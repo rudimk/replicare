@@ -1,0 +1,85 @@
+version: '3'
+
+vars:
+  BINARY: replicare
+  PKG: ./...
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  DATE:
+    sh: date -u +%Y-%m-%dT%H:%M:%SZ
+  LDFLAGS: >-
+    -X github.com/rudimk/replicare/internal/buildinfo.Version={{.VERSION}}
+    -X github.com/rudimk/replicare/internal/buildinfo.Commit={{.COMMIT}}
+    -X github.com/rudimk/replicare/internal/buildinfo.Date={{.DATE}}
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build the replicare binary into ./bin
+    cmds:
+      - go build -ldflags "{{.LDFLAGS}}" -o bin/{{.BINARY}} ./cmd/replicare
+
+  run:
+    desc: Run replicare (pass args after --, e.g. `task run -- version`)
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/replicare {{.CLI_ARGS}}
+
+  fmt:
+    desc: Format all Go code
+    cmds:
+      - gofmt -w .
+
+  fmt:check:
+    desc: Fail if any Go file is not gofmt-formatted
+    cmds:
+      - |
+        unformatted=$(gofmt -l .)
+        if [ -n "$unformatted" ]; then
+          echo "These files are not gofmt-formatted:"; echo "$unformatted"; exit 1
+        fi
+
+  vet:
+    desc: Run go vet
+    cmds:
+      - go vet {{.PKG}}
+
+  lint:
+    desc: Run golangci-lint
+    cmds:
+      - golangci-lint run
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test {{.PKG}}
+
+  test:race:
+    desc: Run unit tests with the race detector
+    cmds:
+      - go test -race {{.PKG}}
+
+  tidy:
+    desc: Tidy go.mod/go.sum
+    cmds:
+      - go mod tidy
+
+  ci:
+    desc: Run the full CI gate (format check, vet, lint, race tests, build)
+    cmds:
+      - task: fmt:check
+      - task: vet
+      - task: lint
+      - task: test:race
+      - task: build
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - rm -rf bin
