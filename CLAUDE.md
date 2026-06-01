@@ -393,6 +393,13 @@ For one-way replication the source is authoritative (target rows are overwritten
 match). Multi-master conflict resolution (e.g. latest-timestamp-wins, source-priority,
 custom) is **deferred** but the apply/cursor layer should not preclude it.
 
+**Single-engine syncs — never cross-engine (decision, permanent).** A sync replicates within one
+engine only: a Postgres source goes to Postgres target(s), MySQL→MySQL, Redis→Redis. **We never do
+cross-engine replication** (e.g. Postgres→Redis). This is a direct consequence of faithful
+transport (§1.7): cross-engine would require value/semantic mapping, which we will not do. The
+engine is therefore effectively a property of the whole sync; config validation enforces that a
+sync's source and all its targets share the same engine.
+
 ---
 
 ## 7. Schema management — data-only
@@ -520,11 +527,21 @@ headline signals.
 
 - **YAML config** is primary: sources, targets, syncs, table selection, tuning knobs (worker
   counts, batch sizes, copy chunk size), observability endpoints, TLS.
+- **Engine-pluggable layout (decision).** Config is a **thin engine-neutral envelope + a typed
+  per-engine block**, dispatched through the engine registry (mirrors the `Source`/`Sink`
+  decoupling, §5). The neutral layer holds sync wiring, delivery, observability, state store,
+  logging, and engine-neutral tuning (pool caps, drain interval, retention). Each engine **owns and
+  validates** its own block: connection shape (Postgres/MySQL: host/port/db/sslmode; **Redis:
+  cluster/sentinel topology, node addresses, db index**), **selection** (relational: `schema.table`
+  globs; **Redis: key patterns**), and engine-specific CDC tuning. Adding MySQL/Redis touches only
+  their block — never the neutral schema or the Postgres block. **v1 builds the neutral envelope +
+  registry dispatch + the full Postgres block; MySQL/Redis are documented extension points.**
 - **Env-var overrides** for any field (container/secret-injection friendly).
 - **Secrets:** may be inline in YAML, with env-var override; **per-connection TLS** is
   configurable (`sslmode`-style: disable → verify-full).
 - **Table selection:** include/exclude lists with **schema globs** (e.g. `public.*`, exclude
-  `*_audit`). *(Decision.)*
+  `*_audit`) for relational engines; **key-pattern selection for Redis**. Selection is part of the
+  engine-specific block. *(Decision.)*
 - **Distribution:** single static binary + sample `systemd` unit now; **Helm chart later**
   (YAML injected via chart values — no rush).
 
@@ -606,6 +623,8 @@ invasive.
 | Initial copy vs deltas | **Enable capture first**, then chunked parallel copy; idempotent apply reconciles overlap → **no frozen snapshot needed** (handles huge DBs). |
 | Delivery | **At-least-once + idempotent upserts**, checkpointed cursors. |
 | Topology | **User choice**: default single→single; **fan-out supported**; **multi-master on roadmap**. |
+| Engine scope | **Never cross-engine.** A sync is **single-engine** (source + all targets share one engine: PG→PG, MySQL→MySQL, Redis→Redis). Follows from faithful transport (§1.7); enforced in config validation. |
+| Config model | **Neutral envelope + typed per-engine block, registry-dispatched** (§11). Each engine owns/validates its connection, selection, and CDC tuning. v1: Postgres block only; MySQL/Redis are extension points. |
 | Schema | **Target pre-exists; data-only; no live DDL** (v1). |
 | Process model | **Single daemon, many syncs, goroutine worker pools.** |
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |
