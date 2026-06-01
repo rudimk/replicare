@@ -1,0 +1,46 @@
+# Multi-version Postgres test harness for replicare.
+#
+# Brings up an OLD source Postgres and a MODERN target Postgres so integration
+# tests exercise the very-old-source -> modern-target path that replicare is
+# designed for (CLAUDE.md §1.6). Version floor rationale: docs/postgres-version-support.md.
+#
+# Usage:
+#   task harness:up      # start both, wait for healthy
+#   task harness:down    # stop and remove (data is ephemeral, no volumes)
+#
+# Data is intentionally NOT persisted (no named volumes) so each test run starts
+# clean. Ports are non-default to avoid clashing with a local Postgres.
+
+services:
+  source-pg:
+    # F3 floor: 9.6 is pre-12 (exercises extra_float_digits float fidelity),
+    # pre-10 (no declarative partitioning -> exercises the no-partition / ctid
+    # paths), and old PL/pgSQL. See docs/postgres-version-support.md.
+    image: postgres:9.6
+    # 9.6 has no arm64 image; run under emulation on Apple Silicon. CI is amd64.
+    platform: linux/amd64
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: replicare_src
+    ports:
+      - "5440:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d replicare_src"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  target-pg:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: replicare_dst
+    ports:
+      - "5441:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d replicare_dst"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
