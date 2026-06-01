@@ -70,7 +70,6 @@ type fakeDB struct {
 	version  int
 	execs    []string
 	tableSet bool
-	failAt   int // fail when applying this version (0 = never)
 }
 
 type fakeTx struct{ db *fakeDB }
