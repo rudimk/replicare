@@ -287,9 +287,18 @@ brittle across major-version gaps).
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a
 table run in parallel, and distinct components run fully in parallel.** Lower peak disk than
-stage-all. **Cyclic / self-referential FKs** within a component are a documented edge case
-(nullable self-refs are the common form; worst case lean on the §3.3 retry fallback or require
-the user to flag the FK) — not over-engineered now.
+stage-all. **Cyclic / self-referential FK initial copy (decision):** handle by case, never by
+touching target constraints —
+1. **Nullable** cyclic/self-ref FK → **NULL-then-fill two-pass**: insert rows with the FK column(s)
+   NULL, then a second pass `UPDATE`s them to the real values once all rows exist.
+2. **DEFERRABLE** cyclic FK (nullable or not) → load the component inside one transaction with
+   `SET CONSTRAINTS … DEFERRED` (this *defers checking* within the txn; it does **not** alter the
+   constraint and needs no special privilege).
+3. **`NOT NULL` + non-deferrable** cyclic FK → genuinely unloadable row-by-row without disabling
+   constraints (which we won't do). **Pre-flight detects this and fails loud**, instructing the
+   user to make the FK `DEFERRABLE` or break the cycle. We never insert NULL into a `NOT NULL`
+   column and never corrupt.
+During *streaming*, the §3.3 retry fallback remains the cyclic-dependency mechanism.
 
 **Documented defaults (not separately decided):**
 - **Per-chunk progress in the Postgres StateStore:** a completed-range watermark plus a sparse set
@@ -578,7 +587,8 @@ invasive.
 | Copy chunking | **Keyset PK-range default** (balanced ranges via index-only boundary scan; composite/UUID/text keys OK), **ctid/block-range fallback**; native partitions copied per-partition. See §4.1. |
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |
-| Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. Cyclic FKs = documented edge case. |
+| Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
+| Cyclic-FK initial copy | By case (never touch constraints): **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn**; **`NOT NULL` + non-deferrable → pre-flight detects + fails loud** (user defers or breaks the cycle). Streaming uses §3.3 retry. See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |
 | Type fidelity | **Faithful transport, never transform** (verbatim text, both copy + apply). **No transform capability exists, ever.** See §4.2. |
 | Session GUCs | Pin `DateStyle=ISO,YMD`, `TimeZone=UTC`, `extra_float_digits=3`, `IntervalStyle=postgres`, `bytea_output=hex`, `client_encoding=UTF8` on all connections (formatting-only, no privilege). Warn against `money`. |
@@ -591,6 +601,7 @@ invasive.
 | Source bloat protection | **Bounded retention (age/size) + forced reseed** of over-cap targets (configurable, default on). Protects a source we may not own. |
 | Lag↔load | Per-PK coalescing; configurable drain interval / batch size / re-read concurrency; conservative source pressure by default. |
 | Target-down visibility | Unreachable target + growing delta surfaced across **logs + metrics + OTel traces** simultaneously (§3.4, §10). |
+| Schema versioning | Both the Postgres **state-store schema** and the **source `replicare` schema** carry a `schema_version` + an **idempotent in-place migration runner** that **preserves in-flight deltas/cursors** across upgrades. (Source schema lives on a DB we may not own — migrate, never drop-recreate.) |
 | Tables without PK/unique | **Skip + loud warning** (telemetry-surfaced). |
 | Initial copy vs deltas | **Enable capture first**, then chunked parallel copy; idempotent apply reconciles overlap → **no frozen snapshot needed** (handles huge DBs). |
 | Delivery | **At-least-once + idempotent upserts**, checkpointed cursors. |
@@ -610,8 +621,9 @@ invasive.
 
 - Additional `StateStore` backends beyond Postgres (embedded BoltDB/SQLite, etcd, cloud KV) —
   add behind the interface if/when a use case needs them.
-- Initial copy of **cyclic / self-referential FK** subgroups under live target constraints —
-  define the concrete strategy (deferrable detection, NULL-then-fill two-pass, or user flag).
+- ~~Initial copy of cyclic / self-referential FK subgroups~~ — **RESOLVED** (§4.1, §14):
+  nullable → NULL-then-fill; DEFERRABLE → `SET CONSTRAINTS DEFERRED`; NOT NULL + non-deferrable →
+  pre-flight fails loud.
 - **Binary-COPY compatibility gate** — how to detect when source/target versions + types are
   close enough to safely enable binary format instead of text.
 - HA / active-standby leader election (`pg_advisory_lock` + cursor fencing) — design when HA
