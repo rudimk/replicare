@@ -1,0 +1,68 @@
+# Example replicare configuration.
+#
+# The schema is a thin engine-neutral envelope plus a typed per-engine block.
+# Any string value may reference the environment as ${VAR} or ${VAR:-default}
+# (env wins over the default; a required ${VAR} that is unset is a hard error).
+
+logging:
+  level: info          # debug | info | warn | error
+  format: json         # json | text
+
+observability:
+  metrics_addr: ":9090"          # Prometheus /metrics
+  status_addr: ":8080"           # health/status HTTP API
+  otlp_endpoint: "otel:4317"     # OTLP traces/metrics target
+
+# Daemon operational state (Postgres in v1). Distinct from the source-side
+# delta/track tables, which live on each source.
+state_store:
+  engine: postgres
+  postgres:
+    host: localhost
+    port: 5432
+    database: replicare_state
+    user: replicare
+    password: "${REPLICARE_STATE_PASSWORD:-postgres}"
+    sslmode: disable
+
+sources:
+  app:
+    engine: postgres
+    postgres:
+      host: "${APP_DB_HOST:-localhost}"
+      port: 5432
+      database: app
+      user: replicare
+      password: "${APP_DB_PASSWORD:-postgres}"
+      sslmode: verify-full
+      params:
+        application_name: replicare
+
+targets:
+  warehouse:
+    engine: postgres
+    postgres:
+      host: "${WAREHOUSE_DB_HOST:-localhost}"
+      port: 5432
+      database: warehouse
+      user: replicare
+      password: "${WAREHOUSE_DB_PASSWORD:-postgres}"
+      sslmode: require
+
+syncs:
+  - name: app-to-warehouse
+    source: app
+    targets: [warehouse]
+    # Selection globs (relational engines interpret these as schema.table).
+    include:
+      - "public.*"
+    exclude:
+      - "*_audit"
+    tuning:
+      drain_interval: 1s
+      retention:
+        max_age: 24h
+        max_bytes: 10GB
+      pool:
+        max_source_connections: 8
+        max_target_connections: 8
