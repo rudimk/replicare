@@ -22,6 +22,17 @@ func (pgEngine) NewSink(cfg engine.ConnConfig) (engine.Sink, error) {
 	return &Sink{cfg: cfg}, nil
 }
 
+// Preflight classifies an introspected source against an introspected target
+// (M1). The rich internal analysis (FK components, cyclic-FK strategies,
+// per-column compatibility) is retained for later milestones and projected to
+// the engine-neutral report here.
+func (pgEngine) Preflight(syncName string, srcVersion, tgtVersion int, source, target *engine.Schema) *engine.PreflightReport {
+	return buildPreflight(syncName, srcVersion, tgtVersion, source, target).toReport()
+}
+
+// Compile-time assertion that pgEngine satisfies the interface.
+var _ engine.Engine = pgEngine{}
+
 func init() {
 	engine.Register(pgEngine{})
 }

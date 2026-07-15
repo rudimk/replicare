@@ -27,6 +27,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "version", "--version", "-v":
 		fmt.Fprintln(stdout, buildinfo.String())
 		return 0
+	case "validate":
+		return runValidate(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout)
 		return 0
@@ -44,9 +46,10 @@ Usage:
   replicare <command> [flags]
 
 Commands:
-  version   Print version information
-  help      Show this help
+  version               Print version information
+  validate <config>     Introspect and pre-flight a config without starting sync
+  help                  Show this help
 
-More commands (validate, run, status, capture, reseed) arrive in later milestones.
+More commands (run, status, capture, reseed) arrive in later milestones.
 `)
 }

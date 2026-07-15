@@ -16,37 +16,12 @@ import (
 //
 // This is pure assembly over already-introspected data and is fully unit-tested;
 // the CLI performs the actual connect+introspect and renders the report.
-
-// Severity classifies a pre-flight finding.
-type Severity int
-
-const (
-	SevInfo Severity = iota
-	SevWarn
-	SevBlock
-)
-
-func (s Severity) String() string {
-	switch s {
-	case SevInfo:
-		return "INFO"
-	case SevWarn:
-		return "WARN"
-	case SevBlock:
-		return "BLOCK"
-	default:
-		return "?"
-	}
-}
-
-// Finding is one classified pre-flight observation. Table is the zero value for
-// selection-wide findings (e.g. a giant component).
-type Finding struct {
-	Severity Severity
-	Table    engine.TableRef
-	Category string
-	Message  string
-}
+//
+// The severity-classified finding vocabulary (engine.Severity / engine.Finding)
+// and the neutral engine.PreflightReport live in the engine package; this file
+// builds the rich internal Preflight (which also retains the FK components,
+// cyclic-FK strategies, and per-column compatibility for later milestones) and
+// projects it to the neutral report via toReport.
 
 // TablePreflight is the per-table pre-flight result.
 type TablePreflight struct {
@@ -55,30 +30,26 @@ type TablePreflight struct {
 	Compat   TableCompat
 }
 
-// SkippedTable is a table excluded from replication with a reason.
-type SkippedTable struct {
-	Table  engine.TableRef
-	Reason string
-}
-
-// Preflight is the full pre-flight report for one sync.
+// Preflight is the full internal pre-flight report for one (sync, target) pair.
+// It carries the rich analysis needed by later milestones (copy/apply); the
+// neutral projection for the CLI is toReport.
 type Preflight struct {
 	Sync          string
 	SourceVersion int
 	TargetVersion int
 	Replicable    []TablePreflight
-	Skipped       []SkippedTable
+	Skipped       []engine.SkippedTable
 	Components    []Component
 	Giant         GiantComponent
 	Dangling      []engine.ForeignKey
 	CyclicFKs     []CyclicFK
-	Findings      []Finding
+	Findings      []engine.Finding
 }
 
 // Blocked reports whether any finding is fatal (block-on-incompatible policy).
 func (p Preflight) Blocked() bool {
 	for _, f := range p.Findings {
-		if f.Severity == SevBlock {
+		if f.Severity == engine.SevBlock {
 			return true
 		}
 	}
@@ -89,15 +60,34 @@ func (p Preflight) Blocked() bool {
 func (p Preflight) Counts() (info, warn, block int) {
 	for _, f := range p.Findings {
 		switch f.Severity {
-		case SevInfo:
+		case engine.SevInfo:
 			info++
-		case SevWarn:
+		case engine.SevWarn:
 			warn++
-		case SevBlock:
+		case engine.SevBlock:
 			block++
 		}
 	}
 	return info, warn, block
+}
+
+// toReport projects the internal Preflight onto the engine-neutral report the
+// CLI/daemon consumes.
+func (p Preflight) toReport() *engine.PreflightReport {
+	r := &engine.PreflightReport{
+		Sync:          p.Sync,
+		SourceVersion: p.SourceVersion,
+		TargetVersion: p.TargetVersion,
+		Skipped:       p.Skipped,
+		Findings:      p.Findings,
+	}
+	for _, t := range p.Replicable {
+		r.Replicable = append(r.Replicable, t.Table)
+	}
+	for _, c := range p.Components {
+		r.Components = append(r.Components, c.Tables)
+	}
+	return r
 }
 
 // buildPreflight assembles the report from introspected schemas. Tables without a
@@ -110,8 +100,8 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 	var replicable []engine.Table
 	for _, t := range source.Tables {
 		if !t.HasUsableKey() {
-			p.Skipped = append(p.Skipped, SkippedTable{Table: t.Ref, Reason: "no primary key or usable unique key"})
-			p.add(SevWarn, t.Ref, "no-key", "skipped: no primary key or usable unique key")
+			p.Skipped = append(p.Skipped, engine.SkippedTable{Table: t.Ref, Reason: "no primary key or usable unique key"})
+			p.add(engine.SevWarn, t.Ref, "no-key", "skipped: no primary key or usable unique key")
 			continue
 		}
 		replicable = append(replicable, t)
@@ -121,13 +111,13 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 	p.Components = computeComponents(replicable)
 	p.Giant = detectGiantComponent(p.Components, len(replicable))
 	if p.Giant.Present {
-		p.add(SevWarn, engine.TableRef{}, "giant-component",
+		p.add(engine.SevWarn, engine.TableRef{}, "giant-component",
 			fmt.Sprintf("one FK component spans %.0f%% of selected tables (%d of %d), limiting parallelism",
 				p.Giant.Fraction*100, len(p.Giant.Component.Tables), len(replicable)))
 	}
 	p.Dangling = danglingFKEdges(replicable)
 	for _, fk := range p.Dangling {
-		p.add(SevWarn, fk.Child, "dangling-fk",
+		p.add(engine.SevWarn, fk.Child, "dangling-fk",
 			fmt.Sprintf("FK %s references unselected table %s; the target must already satisfy it", fk.Name, fk.Parent))
 	}
 
@@ -135,10 +125,10 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 	p.CyclicFKs = classifyCyclicFKs(replicable)
 	for _, c := range p.CyclicFKs {
 		if c.Blocked() {
-			p.add(SevBlock, c.FK.Child, "cyclic-fk",
+			p.add(engine.SevBlock, c.FK.Child, "cyclic-fk",
 				fmt.Sprintf("FK %s: %s", c.FK.Name, c.Reason))
 		} else {
-			p.add(SevInfo, c.FK.Child, "cyclic-fk",
+			p.add(engine.SevInfo, c.FK.Child, "cyclic-fk",
 				fmt.Sprintf("FK %s cyclic; load strategy: %s", c.FK.Name, c.Strategy))
 		}
 	}
@@ -165,7 +155,7 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 			return p.Findings[i].Table.String() < p.Findings[j].Table.String()
 		}
 		if p.Findings[i].Severity != p.Findings[j].Severity {
-			return p.Findings[i].Severity > p.Findings[j].Severity // block first
+			return p.Findings[i].Severity > p.Findings[j].Severity // block first (SevBlock is highest)
 		}
 		return p.Findings[i].Category < p.Findings[j].Category
 	})
@@ -175,30 +165,30 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 // addCompatFindings turns a table's compatibility result into findings.
 func (p *Preflight) addCompatFindings(ref engine.TableRef, c TableCompat) {
 	if !c.TargetExists {
-		p.add(SevBlock, ref, "missing-table", "target table does not exist")
+		p.add(engine.SevBlock, ref, "missing-table", "target table does not exist")
 		return
 	}
 	for _, col := range c.MissingInTarget {
-		p.add(SevBlock, ref, "missing-column", fmt.Sprintf("column %q is absent from the target", col))
+		p.add(engine.SevBlock, ref, "missing-column", fmt.Sprintf("column %q is absent from the target", col))
 	}
 	for _, cc := range c.Columns {
 		switch cc.Level {
 		case CompatIncompatible:
-			p.add(SevBlock, ref, "type",
+			p.add(engine.SevBlock, ref, "type",
 				fmt.Sprintf("column %q: %s -> %s is incompatible (%s)", cc.Column, cc.SourceType, cc.TargetType, cc.Detail))
 		case CompatRisky:
-			p.add(SevWarn, ref, "type",
+			p.add(engine.SevWarn, ref, "type",
 				fmt.Sprintf("column %q: %s -> %s is risky (%s)", cc.Column, cc.SourceType, cc.TargetType, cc.Detail))
 		}
 	}
 	for _, col := range c.ExtraNotNull {
-		p.add(SevWarn, ref, "extra-not-null",
+		p.add(engine.SevWarn, ref, "extra-not-null",
 			fmt.Sprintf("target column %q is NOT NULL but not supplied by the source; inserts will fail unless it has a default", col))
 	}
 }
 
-func (p *Preflight) add(sev Severity, table engine.TableRef, category, msg string) {
-	p.Findings = append(p.Findings, Finding{Severity: sev, Table: table, Category: category, Message: msg})
+func (p *Preflight) add(sev engine.Severity, table engine.TableRef, category, msg string) {
+	p.Findings = append(p.Findings, engine.Finding{Severity: sev, Table: table, Category: category, Message: msg})
 }
 
 // replicationKey picks a table's replication identity: the primary key, else the

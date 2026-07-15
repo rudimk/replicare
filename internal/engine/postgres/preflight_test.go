@@ -14,17 +14,17 @@ func keyed(t engine.Table, pkCols ...string) engine.Table {
 
 func schemaOf(ts ...engine.Table) *engine.Schema { return &engine.Schema{Tables: ts} }
 
-func blockFindings(p Preflight) []Finding {
-	var out []Finding
+func blockFindings(p Preflight) []engine.Finding {
+	var out []engine.Finding
 	for _, f := range p.Findings {
-		if f.Severity == SevBlock {
+		if f.Severity == engine.SevBlock {
 			out = append(out, f)
 		}
 	}
 	return out
 }
 
-func hasFinding(p Preflight, sev Severity, category string) bool {
+func hasFinding(p Preflight, sev engine.Severity, category string) bool {
 	for _, f := range p.Findings {
 		if f.Severity == sev && f.Category == category {
 			return true
@@ -72,7 +72,7 @@ func TestPreflightNoKeySkipped(t *testing.T) {
 	if len(p.Skipped) != 1 || p.Skipped[0].Table.String() != "public.logs" {
 		t.Fatalf("expected public.logs skipped, got %+v", p.Skipped)
 	}
-	if !hasFinding(p, SevWarn, "no-key") {
+	if !hasFinding(p, engine.SevWarn, "no-key") {
 		t.Error("expected a no-key warning")
 	}
 	if len(p.Replicable) != 1 {
@@ -91,7 +91,7 @@ func TestPreflightMissingTargetTableBlocks(t *testing.T) {
 	if !p.Blocked() {
 		t.Fatal("missing target table must block")
 	}
-	if !hasFinding(p, SevBlock, "missing-table") {
+	if !hasFinding(p, engine.SevBlock, "missing-table") {
 		t.Error("expected a missing-table block finding")
 	}
 }
@@ -106,7 +106,7 @@ func TestPreflightIncompatibleColumnBlocks(t *testing.T) {
 	if !p.Blocked() {
 		t.Fatal("incompatible column must block")
 	}
-	if !hasFinding(p, SevBlock, "type") {
+	if !hasFinding(p, engine.SevBlock, "type") {
 		t.Error("expected a type block finding")
 	}
 }
@@ -121,7 +121,7 @@ func TestPreflightRiskyColumnWarnsOnly(t *testing.T) {
 	if p.Blocked() {
 		t.Fatalf("risky narrowing should warn, not block: %+v", blockFindings(p))
 	}
-	if !hasFinding(p, SevWarn, "type") {
+	if !hasFinding(p, engine.SevWarn, "type") {
 		t.Error("expected a type warning")
 	}
 }
@@ -139,7 +139,7 @@ func TestPreflightBlockedCyclicFK(t *testing.T) {
 	if !p.Blocked() {
 		t.Fatal("NOT NULL non-deferrable self-ref FK must block")
 	}
-	if !hasFinding(p, SevBlock, "cyclic-fk") {
+	if !hasFinding(p, engine.SevBlock, "cyclic-fk") {
 		t.Error("expected a cyclic-fk block finding")
 	}
 }
@@ -156,7 +156,7 @@ func TestPreflightNullableCyclicInfoNotBlock(t *testing.T) {
 	if p.Blocked() {
 		t.Fatalf("nullable self-ref FK must not block: %+v", blockFindings(p))
 	}
-	if !hasFinding(p, SevInfo, "cyclic-fk") {
+	if !hasFinding(p, engine.SevInfo, "cyclic-fk") {
 		t.Error("expected an info-level cyclic-fk finding describing the strategy")
 	}
 }
@@ -181,7 +181,7 @@ func TestPreflightGiantComponentWarn(t *testing.T) {
 	if !p.Giant.Present {
 		t.Fatal("expected a giant component")
 	}
-	if !hasFinding(p, SevWarn, "giant-component") {
+	if !hasFinding(p, engine.SevWarn, "giant-component") {
 		t.Error("expected a giant-component warning")
 	}
 	if p.Blocked() {
@@ -199,7 +199,7 @@ func TestPreflightDanglingFKWarn(t *testing.T) {
 		[]engine.Column{col2("id", "integer", false), col2("a_id", "integer", true)}), "id"))
 	p := buildPreflight("s", 90600, 170000, src, tgt)
 
-	if !hasFinding(p, SevWarn, "dangling-fk") {
+	if !hasFinding(p, engine.SevWarn, "dangling-fk") {
 		t.Error("expected a dangling-fk warning")
 	}
 	if p.Blocked() {

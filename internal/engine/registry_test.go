@@ -12,6 +12,9 @@ type fakeEngine struct{ name string }
 func (f fakeEngine) Name() string                         { return f.name }
 func (f fakeEngine) NewSource(ConnConfig) (Source, error) { return nil, nil }
 func (f fakeEngine) NewSink(ConnConfig) (Sink, error)     { return nil, nil }
+func (f fakeEngine) Preflight(string, int, int, *Schema, *Schema) *PreflightReport {
+	return nil
+}
 
 func TestRegisterAndGet(t *testing.T) {
 	// Use a fresh registry to avoid cross-test contamination.

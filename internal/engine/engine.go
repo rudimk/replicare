@@ -43,6 +43,10 @@ type Engine interface {
 	NewSource(cfg ConnConfig) (Source, error)
 	// NewSink constructs (does not yet connect) a Sink for the endpoint.
 	NewSink(cfg ConnConfig) (Sink, error)
+	// Preflight classifies an introspected source against an introspected
+	// target into a neutral report (M1). Engine-specific type rules live in the
+	// implementation; inputs and output are engine-neutral (CLAUDE.md §4.2).
+	Preflight(syncName string, srcVersion, tgtVersion int, source, target *Schema) *PreflightReport
 }
 
 // Source is the read side of replication: introspection, trigger-based capture,
