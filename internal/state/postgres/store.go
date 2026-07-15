@@ -2,6 +2,7 @@ package statepg
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -58,25 +59,19 @@ func (s *Store) Close(_ context.Context) error {
 	return nil
 }
 
+// requirePool guards operations that need an open pool.
+func (s *Store) requirePool() error {
+	if s.pool == nil {
+		return errors.New("statepg: not open (call Open first)")
+	}
+	return nil
+}
+
 // --- ownership (M2 slice: advisory-lock) ---
 
 // Acquire takes the single-active ownership lock for a sync.
 func (s *Store) Acquire(ctx context.Context, sync string) (held bool, release func() error, err error) {
 	return false, nil, errNotYet("Acquire")
-}
-
-// --- sync definitions (M2 slice: CRUD) ---
-
-func (s *Store) PutSync(ctx context.Context, def state.SyncDef) error {
-	return errNotYet("PutSync")
-}
-
-func (s *Store) GetSync(ctx context.Context, name string) (state.SyncDef, error) {
-	return state.SyncDef{}, errNotYet("GetSync")
-}
-
-func (s *Store) ListSyncs(ctx context.Context) ([]state.SyncDef, error) {
-	return nil, errNotYet("ListSyncs")
 }
 
 // --- initial-copy progress (M2 slice: progress/cursors) ---
