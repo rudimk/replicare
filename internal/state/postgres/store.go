@@ -1,0 +1,151 @@
+package statepg
+
+import (
+	"context"
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/rudimk/replicare/internal/engine"
+	"github.com/rudimk/replicare/internal/migrate"
+	"github.com/rudimk/replicare/internal/pgmigrate"
+	"github.com/rudimk/replicare/internal/state"
+)
+
+// Store is the Postgres-backed StateStore. It uses a connection pool for
+// checkpoint-heavy CRUD; the single-active ownership lock (Acquire) holds a
+// dedicated connection for the lock's lifetime.
+type Store struct {
+	cfg  engine.ConnConfig
+	pool *pgxpool.Pool
+}
+
+// Compile-time assertion that *Store satisfies the interface.
+var _ state.StateStore = (*Store)(nil)
+
+// New constructs (does not yet connect) a Postgres StateStore for the endpoint.
+func New(cfg engine.ConnConfig) *Store {
+	return &Store{cfg: cfg}
+}
+
+// Open builds the connection pool and runs migrations to the current schema
+// version (F4). It is idempotent: re-running against an up-to-date schema is a
+// no-op, and it never drops existing state.
+func (s *Store) Open(ctx context.Context) error {
+	if s.pool != nil {
+		return nil
+	}
+	pool, err := pgxpool.New(ctx, buildDSN(s.cfg))
+	if err != nil {
+		return fmt.Errorf("statepg: create pool: %w", err)
+	}
+	if _, err := migrate.Apply(ctx, pgmigrate.New(pool), schemaSet); err != nil {
+		pool.Close()
+		return fmt.Errorf("statepg: migrate: %w", err)
+	}
+	s.pool = pool
+	return nil
+}
+
+// Close releases the pool. It is safe to call on an unopened Store.
+func (s *Store) Close(_ context.Context) error {
+	if s.pool != nil {
+		s.pool.Close()
+		s.pool = nil
+	}
+	return nil
+}
+
+// --- ownership (M2 slice: advisory-lock) ---
+
+// Acquire takes the single-active ownership lock for a sync.
+func (s *Store) Acquire(ctx context.Context, sync string) (held bool, release func() error, err error) {
+	return false, nil, errNotYet("Acquire")
+}
+
+// --- sync definitions (M2 slice: CRUD) ---
+
+func (s *Store) PutSync(ctx context.Context, def state.SyncDef) error {
+	return errNotYet("PutSync")
+}
+
+func (s *Store) GetSync(ctx context.Context, name string) (state.SyncDef, error) {
+	return state.SyncDef{}, errNotYet("GetSync")
+}
+
+func (s *Store) ListSyncs(ctx context.Context) ([]state.SyncDef, error) {
+	return nil, errNotYet("ListSyncs")
+}
+
+// --- initial-copy progress (M2 slice: progress/cursors) ---
+
+func (s *Store) SaveCopyProgress(ctx context.Context, sync string, p state.CopyProgress) error {
+	return errNotYet("SaveCopyProgress")
+}
+
+func (s *Store) LoadCopyProgress(ctx context.Context, sync string, t engine.TableRef) (state.CopyProgress, error) {
+	return state.CopyProgress{}, errNotYet("LoadCopyProgress")
+}
+
+// --- streaming cursors (M2 slice: progress/cursors) ---
+
+func (s *Store) SaveCursor(ctx context.Context, sync string, c state.Cursor) error {
+	return errNotYet("SaveCursor")
+}
+
+func (s *Store) LoadCursor(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (state.Cursor, error) {
+	return state.Cursor{}, errNotYet("LoadCursor")
+}
+
+// errNotYet marks a method whose M2 slice has not landed yet.
+func errNotYet(method string) error {
+	return fmt.Errorf("statepg: %s not implemented yet", method)
+}
+
+// buildDSN renders a libpq keyword/value DSN from the resolved ConnConfig. The
+// state store stores only our own operational data, so it does not apply the
+// §4.2 transport GUCs.
+func buildDSN(cfg engine.ConnConfig) string {
+	port := cfg.Port
+	if port == 0 {
+		port = 5432
+	}
+	sslmode := string(cfg.TLS)
+	if sslmode == "" {
+		sslmode = "prefer"
+	}
+	kv := map[string]string{
+		"host":     cfg.Host,
+		"port":     fmt.Sprintf("%d", port),
+		"dbname":   cfg.Database,
+		"user":     cfg.User,
+		"password": cfg.Password,
+		"sslmode":  sslmode,
+	}
+	keys := make([]string, 0, len(kv))
+	for k := range kv {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		fmt.Fprintf(&b, "%s=%s", k, quoteDSNValue(kv[k]))
+	}
+	return b.String()
+}
+
+func quoteDSNValue(v string) string {
+	if v == "" {
+		return "''"
+	}
+	if !strings.ContainsAny(v, " '\\") {
+		return v
+	}
+	r := strings.NewReplacer(`\`, `\\`, `'`, `\'`)
+	return "'" + r.Replace(v) + "'"
+}
