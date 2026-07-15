@@ -59,6 +59,20 @@ type SyncDef struct {
 	Selection engine.Selection
 }
 
+// Event is an operational event persisted for the status API / audit trail. It
+// mirrors the F2 observability vocabulary (Level is a slog level, Event is an
+// F2 event name) so the durable record and the live logs/metrics agree
+// (CLAUDE.md §10).
+type Event struct {
+	Sync    string
+	Target  string
+	Table   engine.TableRef
+	Level   string // INFO | WARN | ERROR
+	Event   string // F2 event name, e.g. "target.needs_reseed"
+	Message string
+	Attrs   map[string]any
+}
+
 // StateStore persists daemon state and provides single-active ownership. The
 // Postgres implementation lands in M2; this is the contract.
 type StateStore interface {
@@ -83,4 +97,7 @@ type StateStore interface {
 	// Streaming cursors (per sync, per target, per table).
 	SaveCursor(ctx context.Context, sync string, c Cursor) error
 	LoadCursor(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (Cursor, error)
+
+	// RecordEvent persists an operational event for the status API / audit trail.
+	RecordEvent(ctx context.Context, e Event) error
 }

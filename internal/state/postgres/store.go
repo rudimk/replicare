@@ -67,18 +67,6 @@ func (s *Store) requirePool() error {
 	return nil
 }
 
-// --- ownership (M2 slice: advisory-lock) ---
-
-// Acquire takes the single-active ownership lock for a sync.
-func (s *Store) Acquire(ctx context.Context, sync string) (held bool, release func() error, err error) {
-	return false, nil, errNotYet("Acquire")
-}
-
-// errNotYet marks a method whose M2 slice has not landed yet.
-func errNotYet(method string) error {
-	return fmt.Errorf("statepg: %s not implemented yet", method)
-}
-
 // buildDSN renders a libpq keyword/value DSN from the resolved ConnConfig. The
 // state store stores only our own operational data, so it does not apply the
 // §4.2 transport GUCs.
