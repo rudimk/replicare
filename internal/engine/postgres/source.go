@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 
@@ -54,9 +53,17 @@ func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 	return serverVersion(ctx, s.conn)
 }
 
-// Introspect returns the schema for the selected tables (M1).
+// Introspect returns the schema for the selected tables (M1). Catalog queries
+// are version-tolerant so this works against very old source servers.
 func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
-	return nil, errNotYet("Introspect", "M1")
+	if err := s.requireConn(); err != nil {
+		return nil, err
+	}
+	version, err := serverVersion(ctx, s.conn)
+	if err != nil {
+		return nil, err
+	}
+	return introspectConn(ctx, s.conn, version, sel)
 }
 
 // InstallCapture manages the replicare schema, delta/track tables, and triggers
@@ -103,9 +110,14 @@ func (s *Source) Purge(ctx context.Context, t engine.TableRef, ret engine.Retent
 // requireConn guards operations that need an open connection.
 func (s *Source) requireConn() error {
 	if s.conn == nil {
-		return errors.New("postgres source: not connected (call Connect first)")
+		return errNotConnected("source")
 	}
 	return nil
+}
+
+// errNotConnected is returned by operations invoked before Connect.
+func errNotConnected(role string) error {
+	return fmt.Errorf("postgres %s: not connected (call Connect first)", role)
 }
 
 // errNotYet reports a method whose milestone has not landed yet, so accidental

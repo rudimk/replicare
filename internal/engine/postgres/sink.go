@@ -2,7 +2,6 @@ package postgres
 
 import (
 	"context"
-	"errors"
 	"io"
 
 	"github.com/jackc/pgx/v5"
@@ -47,14 +46,22 @@ func (s *Sink) Close(ctx context.Context) error {
 // ServerVersion returns the numeric target server version.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.conn == nil {
-		return 0, errors.New("postgres sink: not connected (call Connect first)")
+		return 0, errNotConnected("sink")
 	}
 	return serverVersion(ctx, s.conn)
 }
 
-// Introspect returns the (pre-existing) target schema for pre-flight (M1).
+// Introspect returns the (pre-existing) target schema for pre-flight (M1). It
+// reuses the same version-tolerant catalog queries as the Source.
 func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
-	return nil, errNotYet("Introspect", "M1")
+	if s.conn == nil {
+		return nil, errNotConnected("sink")
+	}
+	version, err := serverVersion(ctx, s.conn)
+	if err != nil {
+		return nil, err
+	}
+	return introspectConn(ctx, s.conn, version, sel)
 }
 
 // BulkLoad streams a text COPY into the target table for initial copy (M4).
