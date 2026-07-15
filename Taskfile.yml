@@ -65,6 +65,13 @@ tasks:
     cmds:
       - go test -race {{.PKG}}
 
+  test:integration:
+    desc: Run integration tests against the multi-version harness (brings it up/down)
+    cmds:
+      - task: harness:up
+      - defer: { task: harness:down }
+      - REPLICARE_INTEGRATION=1 go test -count=1 {{.PKG}}
+
   tidy:
     desc: Tidy go.mod/go.sum
     cmds:
