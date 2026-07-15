@@ -74,26 +74,6 @@ func (s *Store) Acquire(ctx context.Context, sync string) (held bool, release fu
 	return false, nil, errNotYet("Acquire")
 }
 
-// --- initial-copy progress (M2 slice: progress/cursors) ---
-
-func (s *Store) SaveCopyProgress(ctx context.Context, sync string, p state.CopyProgress) error {
-	return errNotYet("SaveCopyProgress")
-}
-
-func (s *Store) LoadCopyProgress(ctx context.Context, sync string, t engine.TableRef) (state.CopyProgress, error) {
-	return state.CopyProgress{}, errNotYet("LoadCopyProgress")
-}
-
-// --- streaming cursors (M2 slice: progress/cursors) ---
-
-func (s *Store) SaveCursor(ctx context.Context, sync string, c state.Cursor) error {
-	return errNotYet("SaveCursor")
-}
-
-func (s *Store) LoadCursor(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (state.Cursor, error) {
-	return state.Cursor{}, errNotYet("LoadCursor")
-}
-
 // errNotYet marks a method whose M2 slice has not landed yet.
 func errNotYet(method string) error {
 	return fmt.Errorf("statepg: %s not implemented yet", method)
