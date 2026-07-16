@@ -66,11 +66,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	return introspectConn(ctx, s.conn, version, sel)
 }
 
-// PlanChunks computes balanced copy chunks for a table (M4).
-func (s *Source) PlanChunks(ctx context.Context, t engine.TableRef, opts engine.ChunkOptions) ([]engine.Chunk, error) {
-	return nil, errNotYet("PlanChunks", "M4")
-}
-
 // CopyChunk streams one chunk as text COPY into w (M4).
 func (s *Source) CopyChunk(ctx context.Context, c engine.Chunk, w io.Writer) error {
 	return errNotYet("CopyChunk", "M4")
