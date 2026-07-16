@@ -76,19 +76,9 @@ func (s *Source) CopyChunk(ctx context.Context, c engine.Chunk, w io.Writer) err
 	return errNotYet("CopyChunk", "M4")
 }
 
-// ReadDirtyKeys returns unconsumed delta keys for (target, table) (M5).
-func (s *Source) ReadDirtyKeys(ctx context.Context, t engine.TableRef, target engine.TargetID, max int) ([]engine.DirtyKey, error) {
-	return nil, errNotYet("ReadDirtyKeys", "M5")
-}
-
 // RereadCurrent streams current source values for the given keys as text COPY (M5).
 func (s *Source) RereadCurrent(ctx context.Context, t engine.TableRef, keys []engine.KeyValues, w io.Writer) error {
 	return errNotYet("RereadCurrent", "M5")
-}
-
-// ConfirmConsumed records delta ids as consumed for (target, table) (M5).
-func (s *Source) ConfirmConsumed(ctx context.Context, t engine.TableRef, target engine.TargetID, ids []engine.DeltaID) error {
-	return errNotYet("ConfirmConsumed", "M5")
 }
 
 // Purge removes deltas consumed by all targets, subject to retention (M5c).
