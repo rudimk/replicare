@@ -56,7 +56,7 @@ func quoteIdentifier(s string) string {
 // nullable unique-key column never breaks the trigger.
 func deltaTableDDL(relID int, pk []captureCol) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "CREATE TABLE %s (\n", qualifiedCapture(deltaTableName(relID)))
+	fmt.Fprintf(&b, "CREATE TABLE IF NOT EXISTS %s (\n", qualifiedCapture(deltaTableName(relID)))
 	b.WriteString("\tdelta_id bigserial PRIMARY KEY,\n")
 	b.WriteString("\trc_op char(1) NOT NULL,\n")
 	for i, c := range pk {
@@ -74,7 +74,7 @@ func deltaTableDDL(relID int, pk []captureCol) string {
 // (isolating its bloat alongside the delta table), keyed by target so all
 // targets share it. A row here means that (target, delta_id) has been consumed.
 func trackTableDDL(relID int) string {
-	return fmt.Sprintf(`CREATE TABLE %s (
+	return fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 	target text NOT NULL,
 	delta_id bigint NOT NULL,
 	consumed_at timestamptz NOT NULL DEFAULT now(),

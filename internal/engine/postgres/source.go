@@ -66,17 +66,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	return introspectConn(ctx, s.conn, version, sel)
 }
 
-// InstallCapture manages the replicare schema, delta/track tables, and triggers
-// on the source (M3).
-func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) error {
-	return errNotYet("InstallCapture", "M3")
-}
-
-// RemoveCapture tears down the capture machinery (M3).
-func (s *Source) RemoveCapture(ctx context.Context, tables []engine.TableRef) error {
-	return errNotYet("RemoveCapture", "M3")
-}
-
 // PlanChunks computes balanced copy chunks for a table (M4).
 func (s *Source) PlanChunks(ctx context.Context, t engine.TableRef, opts engine.ChunkOptions) ([]engine.Chunk, error) {
 	return nil, errNotYet("PlanChunks", "M4")
