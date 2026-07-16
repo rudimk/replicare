@@ -85,12 +85,12 @@ func TestPlanKeysetChunksIntegration(t *testing.T) {
 			t.Errorf("non-contiguous at %d: %v vs %v", i, chunks[i].Hi, chunks[i+1].Lo)
 		}
 	}
-	// Boundary keys ascending: 11 then 21.
-	if b := keyInt(t, chunks[0].Hi[0]); b != 11 {
-		t.Errorf("first boundary = %d, want 11", b)
+	// Boundary keys ascending, in faithful text form: "11" then "21".
+	if b, _ := chunks[0].Hi[0].(string); b != "11" {
+		t.Errorf("first boundary = %v, want \"11\"", chunks[0].Hi[0])
 	}
-	if b := keyInt(t, chunks[1].Hi[0]); b != 21 {
-		t.Errorf("second boundary = %d, want 21", b)
+	if b, _ := chunks[1].Hi[0].(string); b != "21" {
+		t.Errorf("second boundary = %v, want \"21\"", chunks[1].Hi[0])
 	}
 }
 

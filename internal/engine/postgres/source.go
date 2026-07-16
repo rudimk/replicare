@@ -11,12 +11,18 @@ import (
 )
 
 // Source is the Postgres read side: introspection (M1), trigger-based capture
-// (M3), chunked initial copy (M4), and dirty-key delta consumption (M5). Only the
-// connection lifecycle and introspection land in M1; later methods are stubs that
-// fail loudly until their milestone implements them.
+// (M3), chunked initial copy (M4), and dirty-key delta consumption (M5).
+//
+// A Source wraps a single *pgx.Conn and is therefore NOT safe for concurrent
+// use (like the underlying conn). Parallel copy uses multiple Sources, one per
+// worker connection.
 type Source struct {
 	cfg  engine.ConnConfig
 	conn *pgx.Conn
+	// meta caches introspected table metadata (columns/keys) so per-chunk copy
+	// does not re-introspect. Safe without a lock because a Source is
+	// single-connection / single-goroutine.
+	meta map[engine.TableRef]engine.Table
 }
 
 // Compile-time assertion that *Source satisfies the interface.
@@ -64,11 +70,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 		return nil, err
 	}
 	return introspectConn(ctx, s.conn, version, sel)
-}
-
-// CopyChunk streams one chunk as text COPY into w (M4).
-func (s *Source) CopyChunk(ctx context.Context, c engine.Chunk, w io.Writer) error {
-	return errNotYet("CopyChunk", "M4")
 }
 
 // RereadCurrent streams current source values for the given keys as text COPY (M5).

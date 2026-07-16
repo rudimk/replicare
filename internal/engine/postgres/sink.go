@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/jackc/pgx/v5"
@@ -64,9 +65,27 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 	return introspectConn(ctx, s.conn, version, sel)
 }
 
-// BulkLoad streams a text COPY into the target table for initial copy (M4).
+// BulkLoad streams a text COPY into the target table for initial copy (§4.1).
+// The direct path COPYs straight into the (empty) target; the merge path (TEMP
+// staging + upsert) for a non-empty target lands in a later slice. The column
+// list is explicit and name-matched to the source.
 func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) error {
-	return errNotYet("BulkLoad", "M4")
+	if s.conn == nil {
+		return errNotConnected("sink")
+	}
+	if len(cols) == 0 {
+		return fmt.Errorf("postgres: bulk load: no columns for %s", t)
+	}
+	switch mode {
+	case engine.LoadDirect, "":
+		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(t), quotedColumnList(cols))
+		if _, err := s.conn.PgConn().CopyFrom(ctx, r, sql); err != nil {
+			return fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("postgres: bulk load mode %q not implemented yet", mode)
+	}
 }
 
 // BeginApply starts a transaction scoped to one FK component's drain pass (M5).

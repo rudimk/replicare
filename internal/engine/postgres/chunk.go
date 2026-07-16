@@ -70,8 +70,14 @@ func (s *Source) planKeysetChunks(ctx context.Context, t engine.TableRef, target
 // keysetBoundaries returns the lower-bound key of each chunk after the first: an
 // index-only scan numbers rows in key order and returns every Nth key. Empty
 // result (table smaller than one chunk) means a single unbounded chunk.
+//
+// Boundaries are captured in their Postgres TEXT form (via ::text). Range
+// predicates then cast them back with 'text'::coltype, so Postgres's own text
+// I/O round-trips every key type exactly — faithful and precision-safe (§4.2),
+// and inlinable as literals (COPY's simple protocol has no bind parameters).
 func (s *Source) keysetBoundaries(ctx context.Context, t engine.TableRef, cols []captureCol, n int) ([]engine.KeyValues, error) {
 	keyList := quotedKeyList(cols)
+	textList := quotedKeyListAsText(cols)
 	q := fmt.Sprintf(`
 		SELECT %s FROM (
 			SELECT %s, row_number() OVER (ORDER BY %s) AS rn
@@ -79,7 +85,7 @@ func (s *Source) keysetBoundaries(ctx context.Context, t engine.TableRef, cols [
 		) s
 		WHERE (rn - 1) %% $1 = 0 AND rn > 1
 		ORDER BY rn`,
-		keyList, keyList, keyList, qualifyTable(t))
+		textList, keyList, keyList, qualifyTable(t))
 
 	rows, err := s.conn.Query(ctx, q, n)
 	if err != nil {
@@ -122,6 +128,16 @@ func quotedKeyList(cols []captureCol) string {
 	parts := make([]string, len(cols))
 	for i, c := range cols {
 		parts[i] = quoteIdentifier(c.Name)
+	}
+	return strings.Join(parts, ", ")
+}
+
+// quotedKeyListAsText renders the ordered key columns cast to text, so boundary
+// values are captured in their faithful Postgres text representation.
+func quotedKeyListAsText(cols []captureCol) string {
+	parts := make([]string, len(cols))
+	for i, c := range cols {
+		parts[i] = quoteIdentifier(c.Name) + "::text"
 	}
 	return strings.Join(parts, ", ")
 }
