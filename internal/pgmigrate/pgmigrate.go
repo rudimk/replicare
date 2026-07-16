@@ -40,14 +40,26 @@ var _ migrate.DB = (*DB)(nil)
 // EnsureVersionTable idempotently creates the version table's schema and the
 // table itself. versionTable is a trusted, schema-qualified identifier supplied
 // by our own migration Sets (never user input).
+//
+// CREATE SCHEMA runs only when the schema is actually absent: Postgres checks the
+// CREATE-on-database privilege before the IF NOT EXISTS short-circuit, so blindly
+// issuing CREATE SCHEMA IF NOT EXISTS would fail for a least-privilege role even
+// when the schema was pre-created for us (CLAUDE.md §12 "a pre-created schema we
+// own"). When the schema is present we skip straight to the table.
 func (d *DB) EnsureVersionTable(ctx context.Context, versionTable string) error {
 	schema, table, err := splitIdent(versionTable)
 	if err != nil {
 		return err
 	}
 	if schema != "" {
-		if _, err := d.q.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, quoteIdent(schema))); err != nil {
-			return fmt.Errorf("pgmigrate: create schema %q: %w", schema, err)
+		exists, err := d.schemaExists(ctx, schema)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := d.q.Exec(ctx, fmt.Sprintf(`CREATE SCHEMA IF NOT EXISTS %s`, quoteIdent(schema))); err != nil {
+				return fmt.Errorf("pgmigrate: create schema %q: %w", schema, err)
+			}
 		}
 	}
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
@@ -59,6 +71,19 @@ func (d *DB) EnsureVersionTable(ctx context.Context, versionTable string) error 
 		return fmt.Errorf("pgmigrate: create version table %q: %w", versionTable, err)
 	}
 	return nil
+}
+
+// schemaExists reports whether a schema is already present. Reading
+// information_schema.schemata needs no special privilege and is old-PG-safe.
+func (d *DB) schemaExists(ctx context.Context, schema string) (bool, error) {
+	var exists bool
+	err := d.q.QueryRow(ctx,
+		`SELECT EXISTS (SELECT 1 FROM information_schema.schemata WHERE schema_name = $1)`, schema).
+		Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("pgmigrate: check schema %q: %w", schema, err)
+	}
+	return exists, nil
 }
 
 // CurrentVersion returns the highest recorded version, or 0 if none.

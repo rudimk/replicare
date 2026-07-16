@@ -550,9 +550,19 @@ headline signals.
 ## 12. Minimum privileges (document & keep accurate)
 
 **Source (Postgres):**
-- `CREATE` on a schema (or a pre-created schema we own) to hold the `replicare` schema, delta
-  tables, track/cursor tables, and trigger functions.
-- `TRIGGER` on each replicated table (or table ownership).
+- `CREATE` on the database to create the `replicare` schema — **or**, to avoid any database-level
+  grant, **pre-create the `replicare` schema owned by the daemon role** (the "pre-created schema we
+  own" option). The daemon owns that schema, so it freely creates the delta tables, track tables,
+  and trigger functions inside it. *(The migration runner only issues `CREATE SCHEMA` when the
+  schema is actually absent, because Postgres checks the CREATE-on-database privilege before the
+  `IF NOT EXISTS` short-circuit — so a pre-created schema needs no database grant. Verified in M3.)*
+- `USAGE` on each schema that contains a replicated table (prerequisite to referencing its tables).
+- `TRIGGER` on each replicated table — **enough to install capture** (`CREATE TRIGGER`). **Note the
+  asymmetry:** Postgres allows `CREATE TRIGGER` with only the `TRIGGER` privilege, but `DROP TRIGGER`
+  requires **table ownership**. So a least-privilege daemon role can install and run capture, but
+  fully *uninstalling* the trigger (RemoveCapture) needs table ownership (or the owner's help). All
+  other RemoveCapture teardown (dropping our delta/track tables and functions) works with the daemon
+  role, since it owns those objects. *(Verified in M3.)*
 - `SELECT` on each replicated table.
 - **No** superuser, **no** `REPLICATION` attribute, **no** `wal_level` change.
 
