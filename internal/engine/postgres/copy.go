@@ -58,9 +58,45 @@ func (s *Source) chunkPredicate(table engine.Table, c engine.Chunk) (string, err
 			return "", fmt.Errorf("postgres: copy chunk: table %s has no usable key", c.Table)
 		}
 		return keysetPredicate(keyCols, c.Lo, c.Hi)
+	case engine.ChunkCTID:
+		return ctidPredicate(c.Lo, c.Hi)
 	default:
-		return "", fmt.Errorf("postgres: copy chunk method %q not implemented yet", method)
+		return "", fmt.Errorf("postgres: copy chunk method %q not implemented", method)
 	}
+}
+
+// ctidPredicate builds a half-open block-range predicate
+// ctid >= '(lo,0)' AND ctid < '(hi,0)'. A nil bound is unbounded on that side.
+func ctidPredicate(lo, hi engine.KeyValues) (string, error) {
+	block := func(kv engine.KeyValues) (int, error) {
+		if len(kv) != 1 {
+			return 0, fmt.Errorf("postgres: ctid bound must be a single block number, got %v", kv)
+		}
+		b, ok := kv[0].(int)
+		if !ok {
+			return 0, fmt.Errorf("postgres: ctid bound is %T, want int block number", kv[0])
+		}
+		return b, nil
+	}
+	var parts []string
+	if lo != nil {
+		b, err := block(lo)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("ctid >= '(%d,0)'::tid", b))
+	}
+	if hi != nil {
+		b, err := block(hi)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, fmt.Sprintf("ctid < '(%d,0)'::tid", b))
+	}
+	if len(parts) == 0 {
+		return "TRUE", nil
+	}
+	return strings.Join(parts, " AND "), nil
 }
 
 // keysetPredicate builds a half-open row-value range predicate
