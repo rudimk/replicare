@@ -44,8 +44,11 @@ func (s *Source) PlanChunks(ctx context.Context, t engine.TableRef, opts engine.
 
 	switch method {
 	case engine.ChunkKeyset:
-		return s.planKeysetChunks(ctx, t, targetRows)
+		return s.planKeysetChunks(ctx, t, targetRows, opts.Lo)
 	case engine.ChunkCTID:
+		if opts.Lo != nil {
+			return nil, fmt.Errorf("postgres: ctid chunking does not support a resume lower bound")
+		}
 		return s.planCtidChunks(ctx, t, targetRows)
 	default:
 		return nil, fmt.Errorf("postgres: chunk method %q not implemented", method)
@@ -53,9 +56,10 @@ func (s *Source) PlanChunks(ctx context.Context, t engine.TableRef, opts engine.
 }
 
 // planKeysetChunks discovers balanced key-range boundaries and builds [lo, hi)
-// chunks. A table with no usable key automatically falls back to ctid/block-range
-// chunking (CLAUDE.md §4.1).
-func (s *Source) planKeysetChunks(ctx context.Context, t engine.TableRef, targetRows int) ([]engine.Chunk, error) {
+// chunks. When lo is non-nil, planning is restricted to keys >= lo (resume), and
+// the first chunk starts at lo instead of unbounded. A table with no usable key
+// automatically falls back to ctid/block-range chunking (CLAUDE.md §4.1).
+func (s *Source) planKeysetChunks(ctx context.Context, t engine.TableRef, targetRows int, lo engine.KeyValues) ([]engine.Chunk, error) {
 	table, err := s.tableMeta(ctx, t)
 	if err != nil {
 		return nil, err
@@ -66,11 +70,11 @@ func (s *Source) planKeysetChunks(ctx context.Context, t engine.TableRef, target
 		return s.planCtidChunks(ctx, t, targetRows)
 	}
 
-	boundaries, err := s.keysetBoundaries(ctx, t, cols, targetRows)
+	boundaries, err := s.keysetBoundaries(ctx, t, cols, targetRows, lo)
 	if err != nil {
 		return nil, err
 	}
-	return buildKeysetRanges(t, boundaries), nil
+	return buildKeysetRangesFrom(t, lo, boundaries), nil
 }
 
 // planCtidChunks chunks a table by physical block range (CLAUDE.md §4.1): the
@@ -133,17 +137,23 @@ func buildCtidRanges(t engine.TableRef, boundaries []int) []engine.Chunk {
 // predicates then cast them back with 'text'::coltype, so Postgres's own text
 // I/O round-trips every key type exactly — faithful and precision-safe (§4.2),
 // and inlinable as literals (COPY's simple protocol has no bind parameters).
-func (s *Source) keysetBoundaries(ctx context.Context, t engine.TableRef, cols []captureCol, n int) ([]engine.KeyValues, error) {
+func (s *Source) keysetBoundaries(ctx context.Context, t engine.TableRef, cols []captureCol, n int, lo engine.KeyValues) ([]engine.KeyValues, error) {
 	keyList := quotedKeyList(cols)
 	textList := quotedKeyListAsText(cols)
+	inner := fmt.Sprintf("SELECT %s, row_number() OVER (ORDER BY %s) AS rn\n\t\t\tFROM %s", keyList, keyList, qualifyTable(t))
+	if lo != nil {
+		pred, err := valueTuple(cols, lo)
+		if err != nil {
+			return nil, err
+		}
+		inner += fmt.Sprintf("\n\t\t\tWHERE (%s) >= %s", keyList, pred)
+	}
 	q := fmt.Sprintf(`
 		SELECT %s FROM (
-			SELECT %s, row_number() OVER (ORDER BY %s) AS rn
-			FROM %s
+			%s
 		) s
 		WHERE (rn - 1) %% $1 = 0 AND rn > 1
-		ORDER BY rn`,
-		textList, keyList, keyList, qualifyTable(t))
+		ORDER BY rn`, textList, inner)
 
 	rows, err := s.conn.Query(ctx, q, n)
 	if err != nil {
@@ -166,12 +176,19 @@ func (s *Source) keysetBoundaries(ctx context.Context, t engine.TableRef, cols [
 }
 
 // buildKeysetRanges turns ordered chunk lower-bounds into contiguous, gap-free
-// [lo, hi) chunks: the first chunk is unbounded below, the last unbounded above,
-// so together they cover the whole key space (and any concurrently inserted
-// rows). With no boundaries, a single fully-unbounded chunk.
+// [lo, hi) chunks unbounded on both ends. With no boundaries, a single
+// fully-unbounded chunk.
 func buildKeysetRanges(t engine.TableRef, boundaries []engine.KeyValues) []engine.Chunk {
+	return buildKeysetRangesFrom(t, nil, boundaries)
+}
+
+// buildKeysetRangesFrom is buildKeysetRanges with an explicit first lower bound:
+// start is the range floor (nil = unbounded below, or the resume watermark). The
+// last chunk is always unbounded above, so new rows above the top boundary are
+// still covered.
+func buildKeysetRangesFrom(t engine.TableRef, start engine.KeyValues, boundaries []engine.KeyValues) []engine.Chunk {
 	out := make([]engine.Chunk, 0, len(boundaries)+1)
-	var prev engine.KeyValues // nil = unbounded below
+	prev := start
 	for _, b := range boundaries {
 		out = append(out, engine.Chunk{Table: t, Method: engine.ChunkKeyset, Lo: prev, Hi: b})
 		prev = b

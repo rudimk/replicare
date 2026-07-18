@@ -132,14 +132,5 @@ func TestPlanKeysetChunksCompositeKey(t *testing.T) {
 	}
 }
 
-func TestPlanKeysetChunksKeylessErrors(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	src := captureSource(t, ctx)
-	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.nopk (a int, b int)")
-
-	_, err := src.PlanChunks(ctx, engine.TableRef{Schema: "rc_it", Name: "nopk"}, engine.ChunkOptions{TargetRows: 10})
-	if err == nil {
-		t.Fatal("keyset chunking a keyless table should error (use ctid)")
-	}
-}
+// (Keyless tables no longer error on the keyset path — they auto-fall back to
+// ctid; see TestPlanChunksAutoFallbackToCtid.)

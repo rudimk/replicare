@@ -11,11 +11,14 @@ import (
 )
 
 // Sink is the Postgres write side: introspection for pre-flight (M1), bulk load
-// (M4), and faithful FK-ordered per-component apply (M5). Only the connection
-// lifecycle and introspection land in M1.
+// (M4), and faithful FK-ordered per-component apply (M5).
+//
+// Like Source, a Sink wraps a single *pgx.Conn and is NOT safe for concurrent
+// use; parallel load uses multiple Sinks.
 type Sink struct {
 	cfg  engine.ConnConfig
 	conn *pgx.Conn
+	meta map[engine.TableRef]engine.Table
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
@@ -88,7 +91,57 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 	}
 }
 
+// DeleteRange deletes target rows in the half-open key range [lo, hi) so an
+// incomplete chunk can be re-COPYed on resume (§4.1). The predicate uses the
+// target's own key columns/types.
+func (s *Sink) DeleteRange(ctx context.Context, t engine.TableRef, lo, hi engine.KeyValues) error {
+	if s.conn == nil {
+		return errNotConnected("sink")
+	}
+	table, err := s.tableMeta(ctx, t)
+	if err != nil {
+		return err
+	}
+	keyCols := captureColsFor(table)
+	if len(keyCols) == 0 {
+		return fmt.Errorf("postgres: delete-range: target %s has no usable key", t)
+	}
+	pred, err := keysetPredicate(keyCols, lo, hi)
+	if err != nil {
+		return err
+	}
+	if _, err := s.conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", qualifyTable(t), pred)); err != nil {
+		return fmt.Errorf("postgres: delete-range on %s: %w", t, err)
+	}
+	return nil
+}
+
 // BeginApply starts a transaction scoped to one FK component's drain pass (M5).
 func (s *Sink) BeginApply(ctx context.Context) (engine.ApplyTx, error) {
 	return nil, errNotYet("BeginApply", "M5")
+}
+
+// tableMeta returns cached introspected metadata for a target table.
+func (s *Sink) tableMeta(ctx context.Context, ref engine.TableRef) (engine.Table, error) {
+	if t, ok := s.meta[ref]; ok {
+		return t, nil
+	}
+	version, err := serverVersion(ctx, s.conn)
+	if err != nil {
+		return engine.Table{}, err
+	}
+	schema, err := introspectConn(ctx, s.conn, version, engine.Selection{Include: []string{ref.String()}})
+	if err != nil {
+		return engine.Table{}, err
+	}
+	for _, t := range schema.Tables {
+		if t.Ref == ref {
+			if s.meta == nil {
+				s.meta = make(map[engine.TableRef]engine.Table)
+			}
+			s.meta[ref] = t
+			return t, nil
+		}
+	}
+	return engine.Table{}, fmt.Errorf("postgres: target table %s not found", ref)
 }

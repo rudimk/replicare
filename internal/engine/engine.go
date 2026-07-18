@@ -102,6 +102,11 @@ type Sink interface {
 	// (M4). cols is the explicit, name-matched column list (CLAUDE.md §4.2).
 	BulkLoad(ctx context.Context, t TableRef, cols []string, r io.Reader, mode LoadMode) error
 
+	// DeleteRange deletes target rows in the half-open key range [lo, hi) (a nil
+	// bound is unbounded on that side), used to clear an incomplete chunk's rows
+	// before re-COPY on resume (CLAUDE.md §4.1). Keys are faithful text values.
+	DeleteRange(ctx context.Context, t TableRef, lo, hi KeyValues) error
+
 	// BeginApply starts a transaction scoped to one FK component so a drain
 	// pass applies atomically (CLAUDE.md §8.1). Upserts and deletes within it are
 	// ordered parent->child / child->parent by the caller.
@@ -131,6 +136,9 @@ const (
 type ChunkOptions struct {
 	Method     ChunkMethod
 	TargetRows int // approximate rows per chunk
+	// Lo, when non-nil, restricts planning to keys >= Lo — the resume lower
+	// bound (the copy-progress watermark). Keyset only (CLAUDE.md §4.1).
+	Lo KeyValues
 }
 
 // KeyValues is one row's key column values, in key-column order.

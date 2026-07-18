@@ -70,7 +70,9 @@ tasks:
     cmds:
       - task: harness:up
       - defer: { task: harness:down }
-      - REPLICARE_INTEGRATION=1 go test -count=1 {{.PKG}}
+      # -p 1 serializes packages: integration tests share the one harness and
+      # would otherwise clobber each other's schemas (rc_it, replicare_state).
+      - REPLICARE_INTEGRATION=1 go test -count=1 -p 1 {{.PKG}}
 
   tidy:
     desc: Tidy go.mod/go.sum
