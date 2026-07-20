@@ -142,6 +142,20 @@ func valueTuple(cols []captureCol, vals engine.KeyValues) (string, error) {
 	return "(" + strings.Join(parts, ", ") + ")", nil
 }
 
+// copyAllCols streams an explicit column subset of a whole table as text COPY
+// into w. Used by the cyclic-FK load strategies, which copy small components
+// whole (unchunked) and sometimes need to omit or isolate the FK columns.
+func (s *Source) copyAllCols(ctx context.Context, ref engine.TableRef, cols []string, w io.Writer) error {
+	if err := s.requireConn(); err != nil {
+		return err
+	}
+	sql := fmt.Sprintf("COPY (SELECT %s FROM %s) TO STDOUT", quotedColumnList(cols), qualifyTable(ref))
+	if _, err := s.conn.PgConn().CopyTo(ctx, w, sql); err != nil {
+		return fmt.Errorf("postgres: copy %s cols: %w", ref, err)
+	}
+	return nil
+}
+
 // transportColumns returns the name-matched columns replicare moves for a table:
 // every column except GENERATED STORED ones (the target regenerates those).
 // Identity columns ARE transported so source key values carry over (§4.2).
