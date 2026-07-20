@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -69,9 +70,9 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 }
 
 // BulkLoad streams a text COPY into the target table for initial copy (§4.1).
-// The direct path COPYs straight into the (empty) target; the merge path (TEMP
-// staging + upsert) for a non-empty target lands in a later slice. The column
-// list is explicit and name-matched to the source.
+// The direct path COPYs straight into an (empty) target; the merge path stages
+// into a TEMP table then upserts, for a non-empty target. The column list is
+// explicit and name-matched to the source.
 func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) error {
 	if s.conn == nil {
 		return errNotConnected("sink")
@@ -86,9 +87,105 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 			return fmt.Errorf("postgres: bulk load into %s: %w", t, err)
 		}
 		return nil
+	case engine.LoadMerge:
+		return s.mergeLoad(ctx, t, cols, r)
 	default:
-		return fmt.Errorf("postgres: bulk load mode %q not implemented yet", mode)
+		return fmt.Errorf("postgres: bulk load mode %q not implemented", mode)
 	}
+}
+
+// mergeLoad implements the non-empty-target path (CLAUDE.md §4.1): COPY the chunk
+// into a TEMP staging table, then INSERT ... ON CONFLICT DO UPDATE from it. This
+// is privilege-light and idempotent (~2x write amplification). Requires a usable
+// key for the conflict target.
+func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader) error {
+	table, err := s.tableMeta(ctx, t)
+	if err != nil {
+		return err
+	}
+	pk := captureColsFor(table)
+	if len(pk) == 0 {
+		return fmt.Errorf("postgres: merge load: target %s has no usable key for ON CONFLICT", t)
+	}
+	typeByName := make(map[string]string, len(table.Columns))
+	identity := false
+	colSet := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		colSet[c] = true
+	}
+	for _, c := range table.Columns {
+		typeByName[c.Name] = c.DataType
+		if c.Identity && colSet[c.Name] {
+			identity = true
+		}
+	}
+
+	const stg = "replicare_stg"
+	stgCols := make([]string, len(cols))
+	for i, c := range cols {
+		stgCols[i] = quoteIdentifier(c) + " " + typeByName[c]
+	}
+
+	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("postgres: merge load: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	if _, err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
+		quoteIdentifier(stg), strings.Join(stgCols, ", "))); err != nil {
+		return fmt.Errorf("postgres: merge load: create staging: %w", err)
+	}
+	copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
+	if _, err := s.conn.PgConn().CopyFrom(ctx, r, copySQL); err != nil {
+		return fmt.Errorf("postgres: merge load: copy to staging: %w", err)
+	}
+	if _, err := s.conn.Exec(ctx, mergeInsertSQL(t, stg, cols, pk, colSetOf(pk), identity)); err != nil {
+		return fmt.Errorf("postgres: merge load: upsert %s: %w", t, err)
+	}
+	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("postgres: merge load: commit: %w", err)
+	}
+	committed = true
+	return nil
+}
+
+// mergeInsertSQL builds the upsert from the staging table into the target.
+func mergeInsertSQL(t engine.TableRef, stg string, cols []string, pk []captureCol, pkSet map[string]bool, identity bool) string {
+	overriding := ""
+	if identity {
+		overriding = " OVERRIDING SYSTEM VALUE"
+	}
+	pkNames := make([]string, len(pk))
+	for i, c := range pk {
+		pkNames[i] = quoteIdentifier(c.Name)
+	}
+	var setParts []string
+	for _, c := range cols {
+		if !pkSet[c] {
+			setParts = append(setParts, fmt.Sprintf("%s = EXCLUDED.%s", quoteIdentifier(c), quoteIdentifier(c)))
+		}
+	}
+	action := "DO NOTHING"
+	if len(setParts) > 0 {
+		action = "DO UPDATE SET " + strings.Join(setParts, ", ")
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s)%s SELECT %s FROM %s ON CONFLICT (%s) %s",
+		qualifyTable(t), quotedColumnList(cols), overriding, quotedColumnList(cols),
+		quoteIdentifier(stg), strings.Join(pkNames, ", "), action)
+}
+
+// colSetOf returns a name set for the given key columns.
+func colSetOf(cols []captureCol) map[string]bool {
+	m := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		m[c.Name] = true
+	}
+	return m
 }
 
 // DeleteRange deletes target rows in the half-open key range [lo, hi) so an
