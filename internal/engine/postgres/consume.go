@@ -33,9 +33,12 @@ func (s *Source) ReadDirtyKeys(ctx context.Context, t engine.TableRef, target en
 		return nil, fmt.Errorf("postgres: read dirty keys: table %s is not captured", t)
 	}
 
+	// Key columns are read in faithful Postgres text form (::text), consistent
+	// with keyset boundaries, so they inline safely into re-read/apply predicates
+	// and round-trip every key type exactly (§4.2).
 	sel := "d.delta_id, d.rc_op"
 	for _, k := range deltaColumns(len(pkCols)) {
-		sel += ", d." + k
+		sel += ", d." + k + "::text"
 	}
 	q := fmt.Sprintf(`
 		SELECT %s

@@ -3,7 +3,6 @@ package postgres
 import (
 	"context"
 	"fmt"
-	"io"
 
 	"github.com/jackc/pgx/v5"
 
@@ -70,11 +69,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 		return nil, err
 	}
 	return introspectConn(ctx, s.conn, version, sel)
-}
-
-// RereadCurrent streams current source values for the given keys as text COPY (M5).
-func (s *Source) RereadCurrent(ctx context.Context, t engine.TableRef, keys []engine.KeyValues, w io.Writer) error {
-	return errNotYet("RereadCurrent", "M5")
 }
 
 // Purge removes deltas consumed by all targets, subject to retention (M5c).

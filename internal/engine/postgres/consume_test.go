@@ -16,23 +16,6 @@ func dirtyIDs(ks []engine.DirtyKey) []engine.DeltaID {
 	return out
 }
 
-// keyInt coerces a key value to int64 regardless of the source integer width
-// (pgx decodes int4 as int32, int8 as int64).
-func keyInt(t *testing.T, v any) int64 {
-	t.Helper()
-	switch n := v.(type) {
-	case int64:
-		return n
-	case int32:
-		return int64(n)
-	case int:
-		return int64(n)
-	default:
-		t.Fatalf("key value %v is not an integer (%T)", v, v)
-		return 0
-	}
-}
-
 func TestReadDirtyKeysSetDifference(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -51,8 +34,8 @@ func TestReadDirtyKeysSetDifference(t *testing.T) {
 	if len(keys) != 3 {
 		t.Fatalf("expected 3 dirty keys, got %d", len(keys))
 	}
-	if k := keyInt(t, keys[0].Key[0]); k != 1 {
-		t.Errorf("first key = %v, want 1", keys[0].Key[0])
+	if k, _ := keys[0].Key[0].(string); k != "1" {
+		t.Errorf("first key = %v, want \"1\"", keys[0].Key[0])
 	}
 	if keys[0].Op != engine.OpInsert {
 		t.Errorf("op = %q, want I", keys[0].Op)
@@ -180,8 +163,8 @@ func TestConsumeDeleteByDeltaIDRace(t *testing.T) {
 	if remaining[0].DeltaID == observed[0].DeltaID {
 		t.Error("surviving delta should be the newer one, not the confirmed one")
 	}
-	if k := keyInt(t, remaining[0].Key[0]); k != 1 {
-		t.Errorf("surviving key = %v, want PK 1", remaining[0].Key[0])
+	if k, _ := remaining[0].Key[0].(string); k != "1" {
+		t.Errorf("surviving key = %v, want PK \"1\"", remaining[0].Key[0])
 	}
 }
 
@@ -204,8 +187,8 @@ func TestReadDirtyKeysCompositeKey(t *testing.T) {
 	if len(keys) != 1 || len(keys[0].Key) != 2 {
 		t.Fatalf("expected 1 key with 2 columns, got %+v", keys)
 	}
-	if oid := keyInt(t, keys[0].Key[0]); oid != 10 {
-		t.Errorf("order_id = %v, want 10", keys[0].Key[0])
+	if oid, _ := keys[0].Key[0].(string); oid != "10" {
+		t.Errorf("order_id = %v, want \"10\"", keys[0].Key[0])
 	}
 	if sku, _ := keys[0].Key[1].(string); sku != "abc" {
 		t.Errorf("sku = %v, want abc", keys[0].Key[1])
