@@ -107,6 +107,12 @@ type Sink interface {
 	// before re-COPY on resume (CLAUDE.md §4.1). Keys are faithful text values.
 	DeleteRange(ctx context.Context, t TableRef, lo, hi KeyValues) error
 
+	// ApplyPass applies one streaming drain pass for a table (CLAUDE.md §3.3): in
+	// one transaction, upsert the re-read present rows and delete the dirtyKeys
+	// now absent at the source. reread is the faithful text COPY of current
+	// source rows for the dirty keys; cols is the name-matched column list.
+	ApplyPass(ctx context.Context, t TableRef, cols []string, dirtyKeys []KeyValues, reread io.Reader) error
+
 	// BeginApply starts a transaction scoped to one FK component so a drain
 	// pass applies atomically (CLAUDE.md §8.1). Upserts and deletes within it are
 	// ordered parent->child / child->parent by the caller.
