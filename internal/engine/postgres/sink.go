@@ -213,9 +213,22 @@ func (s *Sink) DeleteRange(ctx context.Context, t engine.TableRef, lo, hi engine
 	return nil
 }
 
-// BeginApply starts a transaction scoped to one FK component's drain pass (M5).
+// BeginApply starts a transaction for one FK component's drain pass (M5b): it
+// opens the transaction and defers FK checks (SET CONSTRAINTS ALL DEFERRED) so
+// deferrable cyclic FKs commit. The returned ApplyTx uses the sink's connection,
+// so the sink must not be used for other work until the tx completes.
 func (s *Sink) BeginApply(ctx context.Context) (engine.ApplyTx, error) {
-	return nil, errNotYet("BeginApply", "M5")
+	if s.conn == nil {
+		return nil, errNotConnected("sink")
+	}
+	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
+		return nil, fmt.Errorf("postgres: begin apply: %w", err)
+	}
+	if _, err := s.conn.Exec(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
+		_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
+		return nil, fmt.Errorf("postgres: begin apply: defer constraints: %w", err)
+	}
+	return &pgApplyTx{sink: s, staging: map[engine.TableRef]stagingInfo{}}, nil
 }
 
 // tableMeta returns cached introspected metadata for a target table.

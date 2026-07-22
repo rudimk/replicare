@@ -32,17 +32,7 @@ func Drain(ctx context.Context, src engine.Source, sink engine.Sink,
 
 	// Coalesce: one re-read per distinct PK (bounded work under churn), but track
 	// EVERY observed delta_id so consumption is exact (delete-by-delta_id).
-	ids := make([]engine.DeltaID, 0, len(dirty))
-	var distinct []engine.KeyValues
-	seen := map[string]bool{}
-	for _, d := range dirty {
-		ids = append(ids, d.DeltaID)
-		sig := keySignature(d.Key)
-		if !seen[sig] {
-			seen[sig] = true
-			distinct = append(distinct, d.Key)
-		}
-	}
+	distinct, ids := coalesce(dirty)
 
 	cols, err := transportColumns(ctx, src, t)
 	if err != nil {

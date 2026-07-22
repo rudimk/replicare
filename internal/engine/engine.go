@@ -115,17 +115,23 @@ type Sink interface {
 
 	// BeginApply starts a transaction scoped to one FK component so a drain
 	// pass applies atomically (CLAUDE.md §8.1). Upserts and deletes within it are
-	// ordered parent->child / child->parent by the caller.
+	// ordered parent->child / child->parent by the caller. The transaction defers
+	// FK checks (SET CONSTRAINTS ALL DEFERRED) so deferrable cyclic FKs commit.
 	BeginApply(ctx context.Context) (ApplyTx, error)
 }
 
-// ApplyTx is a target transaction for one FK component's drain pass (M5).
+// ApplyTx is a target transaction for one FK component's drain pass (M5b). The
+// caller stages+upserts every dirty table (parent->child), then deletes-absent
+// every dirty table (child->parent), then commits — so the component is
+// referentially consistent within the pass.
 type ApplyTx interface {
-	// UpsertBatch applies a faithful text batch (staging + INSERT ... ON
-	// CONFLICT) for a table (CLAUDE.md §4.2).
-	UpsertBatch(ctx context.Context, t TableRef, cols []string, r io.Reader) error
-	// DeleteBatch deletes rows by key for a table.
-	DeleteBatch(ctx context.Context, t TableRef, keys []KeyValues) error
+	// StageUpsert stages the faithful text re-read (present rows) for a table
+	// into a per-table TEMP table and upserts it (INSERT ... ON CONFLICT DO
+	// UPDATE). The staging is kept for a later DeleteAbsent in the same tx.
+	StageUpsert(ctx context.Context, t TableRef, cols []string, reread io.Reader) error
+	// DeleteAbsent deletes the given dirty keys that are absent from the table's
+	// staging (i.e. deleted at the source). Requires a prior StageUpsert for t.
+	DeleteAbsent(ctx context.Context, t TableRef, dirtyKeys []KeyValues) error
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
 }
