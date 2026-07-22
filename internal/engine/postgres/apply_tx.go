@@ -2,9 +2,12 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -68,7 +71,7 @@ func (tx *pgApplyTx) StageUpsert(ctx context.Context, t engine.TableRef, cols []
 		return fmt.Errorf("postgres: apply: stage re-read for %s: %w", t, err)
 	}
 	if _, err := conn.Exec(ctx, mergeInsertSQL(t, stg, cols, keyCols, colSetOf(keyCols), identity)); err != nil {
-		return fmt.Errorf("postgres: apply: upsert %s: %w", t, err)
+		return fmt.Errorf("postgres: apply: upsert %s: %w", t, classifyFKViolation(err))
 	}
 	tx.staging[t] = stagingInfo{name: stg, keyCols: keyCols}
 	return nil
@@ -91,7 +94,7 @@ func (tx *pgApplyTx) DeleteAbsent(ctx context.Context, t engine.TableRef, dirtyK
 	del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
 		qualifyTable(t), inPred, keyTuple, quotedKeyList(info.keyCols), quoteIdentifier(info.name))
 	if _, err := tx.sink.conn.Exec(ctx, del); err != nil {
-		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, err)
+		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
 	}
 	return nil
 }
@@ -99,10 +102,22 @@ func (tx *pgApplyTx) DeleteAbsent(ctx context.Context, t engine.TableRef, dirtyK
 // Commit commits the apply transaction (FK checks fire here for deferred ones).
 func (tx *pgApplyTx) Commit(ctx context.Context) error {
 	if _, err := tx.sink.conn.Exec(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("postgres: apply: commit: %w", err)
+		return fmt.Errorf("postgres: apply: commit: %w", classifyFKViolation(err))
 	}
 	tx.committed = true
 	return nil
+}
+
+// classifyFKViolation marks Postgres FK violations (SQLSTATE 23503) as
+// transient so the drain loop's retry fallback handles cycles/self-refs/
+// cross-pass dependencies (§3.3). Deferred FK checks surface at COMMIT, so
+// Commit classifies too. Every other error stays as-is and halts loud.
+func classifyFKViolation(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return &engine.TransientConstraintError{Err: err}
+	}
+	return err
 }
 
 // Rollback rolls back the apply transaction if it has not committed.

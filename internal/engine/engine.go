@@ -2,8 +2,26 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"io"
 )
+
+// TransientConstraintError marks an apply failure — typically an FK violation —
+// that can resolve on a later drain pass once the missing dependency lands
+// (CLAUDE.md §3.3 retry fallback: cycles, self-references, cross-pass deps).
+// Engines wrap the underlying driver error; the drain loop retries these with
+// bounded backoff and halts loud on anything else (or on exhaustion).
+type TransientConstraintError struct{ Err error }
+
+func (e *TransientConstraintError) Error() string { return e.Err.Error() }
+func (e *TransientConstraintError) Unwrap() error { return e.Err }
+
+// IsTransientConstraint reports whether err is (or wraps) a transient
+// constraint violation eligible for the retry fallback.
+func IsTransientConstraint(err error) bool {
+	var t *TransientConstraintError
+	return errors.As(err, &t)
+}
 
 // TLSMode mirrors the libpq sslmode spectrum (CLAUDE.md §11). Connections are
 // configurable per endpoint, disable -> verify-full.
