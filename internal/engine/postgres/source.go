@@ -83,4 +83,3 @@ func (s *Source) requireConn() error {
 func errNotConnected(role string) error {
 	return fmt.Errorf("postgres %s: not connected (call Connect first)", role)
 }
-
