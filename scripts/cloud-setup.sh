@@ -12,7 +12,11 @@
 #   2. go-task (the Taskfile is the entrypoint for build/test/lint)
 #   3. golangci-lint v2.12.2 (tag-pinned; master's installer checksums are stale)
 #   4. Oh-My-Claude-Sisyphus into ~/.claude (user-level config does NOT carry
-#      over from a laptop, so we reinstall it here)
+#      over from a laptop, so we reinstall it here). Pinned to 1.8.0 to match
+#      the local install: 1.8.0 keeps the /plan -> prometheus -> /review ->
+#      momus planning+review flow and .sisyphus/ plan path. (The project has
+#      since rebranded to oh-my-claudecode 4.x — same capability under renamed
+#      agents planner/critic and a .omc/plans path; switch later if desired.)
 #   5. Warms the Postgres harness images so `task test:integration` is fast
 #
 # Idempotent: safe to re-run. Trusted egress covers go.dev, the module proxy,
@@ -60,8 +64,13 @@ if ! command -v golangci-lint >/dev/null 2>&1; then
 fi
 golangci-lint version
 
-log "Oh-My-Claude-Sisyphus (into ~/.claude)"
-curl -fsSL https://raw.githubusercontent.com/Yeachan-Heo/oh-my-claude-sisyphus/main/scripts/install.sh | bash
+log "Oh-My-Claude-Sisyphus 1.8.0 (into ~/.claude)"
+# Distribution moved from the old curl|bash installer to npm; 1.8.0 is still
+# published. Its postinstall wires up ~/.claude, reproducing the local setup.
+if ! command -v npm >/dev/null 2>&1; then
+  apt-get update && apt-get install -y nodejs npm
+fi
+npm i -g oh-my-claude-sisyphus@1.8.0
 
 log "Warm the Postgres test-harness images"
 # Repo-independent so this works at env-create time before the clone.
