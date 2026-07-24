@@ -236,7 +236,7 @@ point resumes correctly — the same discipline as §3.3, applied to the machine
 | Crash point | On restart |
 |---|---|
 | after track reset, before MARKED persisted | `track_T` empty; Purge is idempotent; next purge pass re-detects over-cap → re-marks. No loss (deltas already unpinned). |
-| after MARKED, before/into RECOPYING | `needs_reseed=true` + `phase=initial_copy` in StateStore → orchestration restarts the re-copy; `copy_progress` watermark resumes mid-table (§4.1). |
+| after MARKED, before/into RECOPYING | `needs_reseed=true` + `phase=initial_copy` in StateStore → orchestration re-invokes `Run`, which is idempotent from the top: empty-target + fresh-progress reset re-run harmlessly and the re-copy restarts (its per-chunk watermark resumes *within* a single `Run`; a `Run`-crash restarts the copy). |
 | mid RESUMING | `track_T` still (partially) empty; drain re-reads current values; idempotent upserts replay harmlessly. |
 | after resume drained, before clearing `needs_reseed` | flag still set → one more (no-op) resume pass, then cleared. |
 
