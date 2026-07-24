@@ -10,6 +10,7 @@ package state
 
 import (
 	"context"
+	"time"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -22,6 +23,7 @@ type CopyProgress struct {
 	Done      bool
 	Watermark engine.KeyValues // everything strictly below this key is copied
 	Completed []CompletedRange // out-of-order completed ranges above the watermark
+	UpdatedAt time.Time        // last checkpoint time (read-only; ignored on write)
 }
 
 // CompletedRange is one finished chunk's half-open key range.
@@ -38,7 +40,8 @@ type Cursor struct {
 	Table       engine.TableRef
 	Phase       Phase
 	LastDelta   engine.DeltaID
-	NeedsReseed bool // set when retention cap forces a reseed (CLAUDE.md §3.4)
+	NeedsReseed bool      // set when retention cap forces a reseed (CLAUDE.md §3.4)
+	UpdatedAt   time.Time // last cursor write (read-only; the lag/age signal)
 }
 
 // Phase is a table's lifecycle phase within a sync.
@@ -64,13 +67,14 @@ type SyncDef struct {
 // F2 event name) so the durable record and the live logs/metrics agree
 // (CLAUDE.md §10).
 type Event struct {
-	Sync    string
-	Target  string
-	Table   engine.TableRef
-	Level   string // INFO | WARN | ERROR
-	Event   string // F2 event name, e.g. "target.needs_reseed"
-	Message string
-	Attrs   map[string]any
+	Sync      string
+	Target    string
+	Table     engine.TableRef
+	Level     string // INFO | WARN | ERROR
+	Event     string // F2 event name, e.g. "target.needs_reseed"
+	Message   string
+	Attrs     map[string]any
+	CreatedAt time.Time // set on read (RecentEvents); ignored on write
 }
 
 // StateStore persists daemon state and provides single-active ownership. The
@@ -100,4 +104,11 @@ type StateStore interface {
 
 	// RecordEvent persists an operational event for the status API / audit trail.
 	RecordEvent(ctx context.Context, e Event) error
+
+	// Read aggregates for the status surface (M6). ListCopyProgress and
+	// ListCursors return every row for a sync; RecentEvents returns the newest
+	// events (most recent first, up to limit) for "last error" reporting.
+	ListCopyProgress(ctx context.Context, sync string) ([]CopyProgress, error)
+	ListCursors(ctx context.Context, sync string) ([]Cursor, error)
+	RecentEvents(ctx context.Context, sync string, limit int) ([]Event, error)
 }
