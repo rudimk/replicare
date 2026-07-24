@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -236,5 +237,96 @@ func TestDeltaBacklog(t *testing.T) {
 	}
 	if bl.Rows != 0 || bl.HasBacklog {
 		t.Errorf("backlog after consume = %+v, want empty", bl)
+	}
+}
+
+// TestPurgeXminHorizonBloatSurfaced (Momus M-4): a long idle-in-transaction
+// session pins the source's xmin horizon, so autovacuum cannot reclaim the
+// delta table's dead tuples even after purge deletes the rows — the documented
+// bloat trap (CLAUDE.md §3.4). This asserts the two halves of the promise:
+// purge still bounds LOGICAL growth (row count returns to zero), and the physical
+// bloat is real and causally the xmin horizon's fault — it reclaims only once the
+// pinning transaction ends. Our size signal (deltaTotalBytes) tracks the bloat.
+func TestPurgeXminHorizonBloatSurfaced(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	relID, _, _, _ := lookupCapture(ctx, src.conn, ref)
+	deltaTable := qualifiedCapture(deltaTableName(relID))
+
+	// Pin the xmin horizon: a second session holds a snapshot open for the whole
+	// churn+purge window, so no dead tuple produced below it is reclaimable.
+	pin, err := connect(ctx, harnessConn(t, "source"))
+	if err != nil {
+		t.Fatalf("pin connect: %v", err)
+	}
+	pinTx, err := pin.Begin(ctx)
+	if err != nil {
+		t.Fatalf("pin begin: %v", err)
+	}
+	if _, err := pinTx.Exec(ctx, "SELECT txid_current()"); err != nil {
+		t.Fatalf("pin snapshot: %v", err)
+	}
+	pinClosed := false
+	defer func() {
+		if !pinClosed {
+			_ = pinTx.Rollback(context.Background())
+		}
+		_ = pin.Close(context.Background())
+	}()
+
+	// Churn: several rounds of insert -> consume -> purge. Each round's deltas are
+	// DELETEd (logical count returns to 0) but become dead tuples the pinned xmin
+	// keeps unreclaimable.
+	for round := 0; round < 3; round++ {
+		lo := round*3000 + 1
+		hi := (round + 1) * 3000
+		mustExec(t, ctx, src.conn, fmt.Sprintf(
+			"INSERT INTO rc_it.orders SELECT g, 'v'||g FROM generate_series(%d,%d) g", lo, hi))
+		keys, err := src.ReadDirtyKeys(ctx, ref, "dst", 0)
+		if err != nil {
+			t.Fatalf("round %d read: %v", round, err)
+		}
+		if err := src.ConfirmConsumed(ctx, ref, "dst", dirtyIDs(keys)); err != nil {
+			t.Fatalf("round %d confirm: %v", round, err)
+		}
+		if _, err := src.Purge(ctx, ref, []engine.TargetID{"dst"}, engine.RetentionPolicy{}); err != nil {
+			t.Fatalf("round %d purge: %v", round, err)
+		}
+	}
+
+	// Logical growth is bounded: purge removed every consumed delta row.
+	if got := deltaCount(t, ctx, src, relID); got != 0 {
+		t.Fatalf("delta logical count = %d, want 0 (purge bounds logical growth)", got)
+	}
+
+	// Physical bloat persists under the pinned horizon: VACUUM cannot reclaim.
+	mustExec(t, ctx, src.conn, "VACUUM "+deltaTable)
+	pinnedSize, err := src.deltaTotalBytes(ctx, relID)
+	if err != nil {
+		t.Fatalf("size under pin: %v", err)
+	}
+	if pinnedSize <= 16384 {
+		t.Fatalf("expected visible delta bloat under pinned xmin, size = %d bytes", pinnedSize)
+	}
+
+	// Release the horizon; the same VACUUM now reclaims — proving the bloat was
+	// the idle-transaction's xmin, not our purge failing.
+	if err := pinTx.Rollback(ctx); err != nil {
+		t.Fatalf("release pin: %v", err)
+	}
+	pinClosed = true
+	mustExec(t, ctx, src.conn, "VACUUM "+deltaTable)
+	freedSize, err := src.deltaTotalBytes(ctx, relID)
+	if err != nil {
+		t.Fatalf("size after release: %v", err)
+	}
+	if freedSize >= pinnedSize {
+		t.Errorf("delta size did not shrink after releasing xmin: pinned=%d freed=%d", pinnedSize, freedSize)
 	}
 }
