@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"time"
 )
 
 // TransientConstraintError marks an apply failure — typically an FK violation —
@@ -102,8 +103,20 @@ type Source interface {
 	// ConfirmConsumed records the delta ids as consumed for (target, table) and
 	// is what later enables purge. Delete-by-delta_id discipline (CLAUDE.md §3.3).
 	ConfirmConsumed(ctx context.Context, t TableRef, target TargetID, ids []DeltaID) error
-	// Purge removes deltas consumed by all targets, subject to retention (M5c).
-	Purge(ctx context.Context, t TableRef, ret RetentionPolicy) (PurgeStats, error)
+	// Purge removes deltas consumed by all configured targets, subject to
+	// retention (M5c). targets is the FULL configured target set for the sync:
+	// "consumed by all" is only decidable against the complete set (a target that
+	// has consumed nothing has no track rows yet still pins the queue). A target
+	// pushing the queue past the retention cap is sacrificed — its track is reset
+	// and it is returned in PurgeStats.TargetsReseeded for the orchestration to
+	// mark needs-reseed (Purge itself never touches the StateStore, CLAUDE.md §9).
+	Purge(ctx context.Context, t TableRef, targets []TargetID, ret RetentionPolicy) (PurgeStats, error)
+
+	// DeltaBacklog reports a target's unconsumed-delta backlog for a table (the
+	// delta MINUS track_target set) for retention decisions and F2 telemetry
+	// (CLAUDE.md §3.4, §10): row count, estimated on-disk bytes, and the age of
+	// the oldest unconsumed delta.
+	DeltaBacklog(ctx context.Context, t TableRef, target TargetID) (DeltaBacklog, error)
 }
 
 // Sink is the write side: introspection, bulk load, and faithful, FK-ordered,
@@ -224,4 +237,16 @@ type RetentionPolicy struct {
 type PurgeStats struct {
 	DeltasPurged    int64
 	TargetsReseeded []TargetID
+}
+
+// DeltaBacklog is a target's unconsumed-delta footprint for one table, the
+// headline "is the source healthy?" signal (CLAUDE.md §3.4, §10). Bytes is an
+// estimate (backlog fraction of the delta table's total on-disk size); OldestAge
+// is the wall-clock age of the oldest unconsumed delta, or 0 when the backlog is
+// empty. These feed retention decisions and the F2 delta-backlog metrics.
+type DeltaBacklog struct {
+	Rows       int64
+	Bytes      int64
+	OldestAge  time.Duration
+	HasBacklog bool
 }
