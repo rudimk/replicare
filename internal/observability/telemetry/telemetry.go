@@ -141,7 +141,7 @@ func (t *Telemetry) TargetUnreachable(ctx context.Context, span trace.Span, sync
 		Sync: sync, Target: string(target), Table: table, Level: "ERROR",
 		Event: observability.EventTargetUnreachable, Message: cause.Error(),
 		Attrs: map[string]any{
-			observability.AttrDeltaBacklog: bl.Rows,
+			observability.AttrDeltaBacklog:  bl.Rows,
 			observability.AttrRetentionProx: proximity,
 		},
 	})
