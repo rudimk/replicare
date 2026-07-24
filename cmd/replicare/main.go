@@ -29,6 +29,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "validate":
 		return runValidate(args[1:], stdout, stderr)
+	case "status":
+		return runStatus(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout)
 		return 0
@@ -48,8 +50,9 @@ Usage:
 Commands:
   version               Print version information
   validate <config>     Introspect and pre-flight a config without starting sync
+  status <config>       Report sync phase, lag, progress, and recent events
   help                  Show this help
 
-More commands (run, status, capture, reseed) arrive in later milestones.
+More commands (run, capture, reseed) arrive in later milestones.
 `)
 }
