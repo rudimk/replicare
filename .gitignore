@@ -1,6 +1,3 @@
-# Sisyphus milestone/planning docs — local only, not committed
-.sisyphus/
-
 # Go build artifacts
 /bin/
 /dist/
