@@ -35,6 +35,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runDaemon(args[1:], stdout, stderr)
 	case "capture":
 		return runCapture(args[1:], stdout, stderr)
+	case "reseed":
+		return runReseed(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout)
 		return 0
@@ -57,8 +59,7 @@ Commands:
   run <config>          Run the daemon: all syncs until SIGINT/SIGTERM
   status <config>       Report sync phase, lag, progress, and recent events
   capture ... <config>  Install or remove source-side CDC capture
+  reseed <config>       Flag a target for re-copy (--sync, --target)
   help                  Show this help
-
-More commands (reseed) arrive in later milestones.
 `)
 }

@@ -88,10 +88,16 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	for _, tg := range reseeded {
-		if tg != s.Target {
-			continue
+
+	// Reseed the target when either the retention cap forced it (above) or an
+	// operator flagged it via `replicare reseed` (a cursor marked needs_reseed).
+	needReseed := containsTarget(reseeded, s.Target)
+	if !needReseed {
+		if needReseed, err = s.targetNeedsReseed(ctx); err != nil {
+			return err
 		}
+	}
+	if needReseed {
 		s.Tel.IncReseed(s.Name, s.Target)
 		for _, comp := range s.Components {
 			if err := reseed.Run(ctx, s.reseedDeps(), s.Name, s.Target, comp.Order, s.ChunkOpts); err != nil {
@@ -100,6 +106,31 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// targetNeedsReseed reports whether any of this target's cursors is flagged
+// needs_reseed (an operator-forced reseed via `replicare reseed`).
+func (s *Syncer) targetNeedsReseed(ctx context.Context) (bool, error) {
+	cursors, err := s.Store.ListCursors(ctx, s.Name)
+	if err != nil {
+		return false, err
+	}
+	for _, c := range cursors {
+		if c.Target == s.Target && c.NeedsReseed {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// containsTarget reports whether ts contains t.
+func containsTarget(ts []engine.TargetID, t engine.TargetID) bool {
+	for _, x := range ts {
+		if x == t {
+			return true
+		}
+	}
+	return false
 }
 
 // reportDrainFailure fires the cross-channel signal for a failed drain: a target

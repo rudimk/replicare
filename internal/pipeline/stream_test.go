@@ -7,6 +7,9 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/rudimk/replicare/internal/engine"
+	"github.com/rudimk/replicare/internal/state"
 )
 
 // dumpOrders returns "id|customer_id|note" rows ordered by id.
@@ -86,6 +89,57 @@ func TestSyncerStreamConverges(t *testing.T) {
 	}
 	if countRows(t, ctx, rawTgt, "rc_it.orders") != 51 {
 		t.Errorf("target orders = %d, want 51 (50 + 2 inserts - 1 delete)", countRows(t, ctx, rawTgt, "rc_it.orders"))
+	}
+}
+
+// TestSyncerOperatorForcedReseed proves the daemon picks up an operator-flagged
+// reseed (a cursor marked needs_reseed via `replicare reseed`): a streaming pass
+// re-copies the target from current source state and clears the flag. Simulated
+// by deleting a target row directly (divergence streaming can't otherwise fix)
+// and confirming the reseed restores it.
+func TestSyncerOperatorForcedReseed(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	_, rawTgt := freshFKSchema(t, ctx)
+	syncer := buildSyncer(t, ctx)
+	if err := syncer.Bringup(ctx); err != nil {
+		t.Fatalf("Bringup: %v", err)
+	}
+
+	// Divergence the stream can't repair on its own (no source delta): drop a
+	// target row directly.
+	mustExecC(t, ctx, rawTgt, "DELETE FROM rc_it.orders WHERE id = 5")
+	if countRows(t, ctx, rawTgt, "rc_it.orders WHERE id = 5") != 0 {
+		t.Fatalf("setup: id=5 should be gone from target")
+	}
+
+	// Flag the target's cursors needs_reseed (what the reseed CLI does).
+	for _, tbl := range []string{"customers", "orders"} {
+		ref := engine.TableRef{Schema: "rc_it", Name: tbl}
+		cur, err := syncer.Store.LoadCursor(ctx, "s1", "dst", ref)
+		if err != nil {
+			t.Fatalf("load cursor %s: %v", tbl, err)
+		}
+		cur.NeedsReseed = true
+		if err := syncer.Store.SaveCursor(ctx, "s1", cur); err != nil {
+			t.Fatalf("flag cursor %s: %v", tbl, err)
+		}
+	}
+
+	// A streaming pass must detect the flag, re-copy, and restore the row.
+	if err := syncer.StreamOnce(ctx); err != nil {
+		t.Fatalf("StreamOnce: %v", err)
+	}
+	if countRows(t, ctx, rawTgt, "rc_it.orders WHERE id = 5") != 1 {
+		t.Errorf("reseed did not restore id=5")
+	}
+	cur, _ := syncer.Store.LoadCursor(ctx, "s1", "dst", engine.TableRef{Schema: "rc_it", Name: "orders"})
+	if cur.NeedsReseed || cur.Phase != state.PhaseStreaming {
+		t.Errorf("cursor after reseed = %+v, want streaming + cleared", cur)
 	}
 }
 
