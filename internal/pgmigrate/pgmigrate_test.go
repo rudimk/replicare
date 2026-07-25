@@ -2,6 +2,20 @@ package pgmigrate
 
 import "testing"
 
+func TestAdvisoryKeyStableAndDistinct(t *testing.T) {
+	source := advisoryKey("replicare.schema_version")
+	state := advisoryKey("replicare_state.schema_version")
+
+	// Distinct schemas (source vs state store) get distinct locks.
+	if source == state {
+		t.Error("distinct schemas should hash to distinct advisory keys")
+	}
+	// Stable across calls for the same input (recompute and compare).
+	if again := advisoryKey("replicare.schema_version"); again != source {
+		t.Errorf("advisoryKey not deterministic: %d vs %d", again, source)
+	}
+}
+
 func TestSplitIdent(t *testing.T) {
 	cases := []struct {
 		in            string
