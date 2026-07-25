@@ -162,8 +162,8 @@ func renderReport(w io.Writer, engineName, sourceName, targetName string, r *eng
 	if len(r.Components) > 0 {
 		fmt.Fprintf(w, "\nFK components (%d):\n", len(r.Components))
 		for _, comp := range r.Components {
-			names := make([]string, len(comp))
-			for i, c := range comp {
+			names := make([]string, len(comp.Tables))
+			for i, c := range comp.Tables {
 				names[i] = c.String()
 			}
 			fmt.Fprintf(w, "  [%s]\n", strings.Join(names, ", "))

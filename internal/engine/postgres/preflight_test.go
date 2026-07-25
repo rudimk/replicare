@@ -56,6 +56,17 @@ func TestPreflightHappyPath(t *testing.T) {
 	if len(p.Components) != 1 {
 		t.Errorf("expected 1 FK component, got %d", len(p.Components))
 	}
+
+	// The neutral report must carry the topological apply order (parents first)
+	// so the daemon can drive copy/apply without re-deriving it (M7).
+	r := p.toReport()
+	if len(r.Components) != 1 {
+		t.Fatalf("neutral report components = %d, want 1", len(r.Components))
+	}
+	order := r.Components[0].Order
+	if len(order) != 2 || order[0].String() != "public.customers" || order[1].String() != "public.orders" {
+		t.Errorf("component Order = %v, want [public.customers public.orders] (parent first)", order)
+	}
 }
 
 func TestPreflightNoKeySkipped(t *testing.T) {

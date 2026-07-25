@@ -45,6 +45,20 @@ type SkippedTable struct {
 	Reason string
 }
 
+// Component is an FK connected component of the selected tables (CLAUDE.md §8.1):
+// the unit of dependency ordering, parallelism, and per-drain-pass consistency.
+// Tables are the members (sorted by name); Order is the topological apply order
+// (parents first, cyclic members appended last) that copy and streaming apply
+// consume; Cyclic lists the members involved in a cycle or self-reference.
+type Component struct {
+	Tables []TableRef
+	Order  []TableRef
+	Cyclic []TableRef
+}
+
+// HasCycle reports whether the component contains an FK cycle or self-reference.
+func (c Component) HasCycle() bool { return len(c.Cyclic) > 0 }
+
 // PreflightReport is the engine-neutral result of pre-flight for one
 // (sync, target) pair.
 type PreflightReport struct {
@@ -53,7 +67,7 @@ type PreflightReport struct {
 	TargetVersion int
 	Replicable    []TableRef     // tables that will be replicated, in report order
 	Skipped       []SkippedTable // tables excluded (no usable key, ...)
-	Components    [][]TableRef   // FK connected components (member lists)
+	Components    []Component    // FK connected components with topological order
 	Findings      []Finding
 }
 
