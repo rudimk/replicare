@@ -1,0 +1,55 @@
+# Sample systemd unit for replicare.
+#
+# Install:
+#   sudo cp replicare /usr/local/bin/replicare
+#   sudo mkdir -p /etc/replicare
+#   sudo cp config.yml /etc/replicare/config.yml         # your config
+#   sudo cp replicare.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now replicare
+#
+# Secrets (DB passwords, etc.) are best kept out of the YAML: reference them as
+# ${VAR} in the config and provide them via the EnvironmentFile below.
+
+[Unit]
+Description=replicare data replication daemon
+Documentation=https://github.com/rudimk/replicare
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/replicare run /etc/replicare/config.yml
+
+# Secrets and env-var overrides (optional; the leading - makes it non-fatal if absent).
+EnvironmentFile=-/etc/replicare/replicare.env
+
+# replicare drains in-flight work and checkpoints on SIGTERM, so give it time to
+# stop cleanly before systemd escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening: run unprivileged with a minimal surface. ---
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
