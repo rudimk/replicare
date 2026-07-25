@@ -67,14 +67,18 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		return drainErr
 	}
 
-	// Healthy pass: refresh per-table backlog gauges + retention proximity, and
-	// mark the target reachable.
+	// Healthy pass: refresh per-table backlog gauges every tick, but only emit the
+	// escalating retention log once the backlog is actually approaching the cap
+	// (half or more) — logging it at proximity 0 every tick is just noise.
 	for _, t := range s.Replicable {
 		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
 		if err != nil {
 			continue
 		}
-		s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, bl, telemetry.RetentionProximity(bl, s.Retention))
+		s.Tel.SetBacklog(s.Name, s.Target, t, bl)
+		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
+			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, bl, prox)
+		}
 	}
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 
