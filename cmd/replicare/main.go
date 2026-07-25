@@ -33,6 +33,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runStatus(args[1:], stdout, stderr)
 	case "run":
 		return runDaemon(args[1:], stdout, stderr)
+	case "capture":
+		return runCapture(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout)
 		return 0
@@ -54,8 +56,9 @@ Commands:
   validate <config>     Introspect and pre-flight a config without starting sync
   run <config>          Run the daemon: all syncs until SIGINT/SIGTERM
   status <config>       Report sync phase, lag, progress, and recent events
+  capture ... <config>  Install or remove source-side CDC capture
   help                  Show this help
 
-More commands (capture, reseed) arrive in later milestones.
+More commands (reseed) arrive in later milestones.
 `)
 }
