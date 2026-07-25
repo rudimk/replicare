@@ -34,8 +34,41 @@ type DB struct {
 // New returns a migrate.DB backed by the given pgx querier.
 func New(q Querier) *DB { return &DB{q: q} }
 
-// Compile-time assertion.
-var _ migrate.DB = (*DB)(nil)
+// Compile-time assertions.
+var (
+	_ migrate.DB     = (*DB)(nil)
+	_ migrate.Locker = (*DB)(nil)
+)
+
+// Lock takes a session-level Postgres advisory lock keyed on the (hashed) schema
+// name, so concurrent migrators of the same schema serialize instead of racing on
+// non-idempotent DDL (M7). It returns an unlock func. Advisory locks are
+// old-PG-safe (since 8.2) and need no special privilege. On a single connection
+// (the source capture path) lock and unlock land on the same session; the state
+// store migrates once at startup, so pooling is not a concern there.
+func (d *DB) Lock(ctx context.Context, key string) (func(context.Context) error, error) {
+	k := advisoryKey(key)
+	if _, err := d.q.Exec(ctx, "SELECT pg_advisory_lock($1)", k); err != nil {
+		return nil, fmt.Errorf("pgmigrate: advisory lock: %w", err)
+	}
+	return func(ctx context.Context) error {
+		if _, err := d.q.Exec(ctx, "SELECT pg_advisory_unlock($1)", k); err != nil {
+			return fmt.Errorf("pgmigrate: advisory unlock: %w", err)
+		}
+		return nil
+	}, nil
+}
+
+// advisoryKey derives a stable 64-bit advisory-lock key from a schema name via
+// FNV-1a, so distinct schemas (state store vs source) use distinct locks.
+func advisoryKey(s string) int64 {
+	var h uint64 = 1469598103934665603
+	for i := 0; i < len(s); i++ {
+		h ^= uint64(s[i])
+		h *= 1099511628211
+	}
+	return int64(h)
+}
 
 // EnsureVersionTable idempotently creates the version table's schema and the
 // table itself. versionTable is a trusted, schema-qualified identifier supplied

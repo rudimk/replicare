@@ -101,12 +101,31 @@ type DB interface {
 	InTx(ctx context.Context, fn func(Tx) error) error
 }
 
+// Locker is an optional DB capability: when implemented, Apply serializes
+// concurrent migrators of the same schema behind an advisory lock keyed on the
+// version table. This matters because migrations issue plain DDL (CREATE TABLE,
+// CREATE SEQUENCE) that is not concurrency-safe — two syncs bringing up the same
+// source `replicare` schema at once would otherwise race and fail one (M7:
+// multiple syncs may share a source). Lock returns an unlock func.
+type Locker interface {
+	Lock(ctx context.Context, key string) (unlock func(context.Context) error, err error)
+}
+
 // Apply brings db up to the set's target version, applying only pending
 // migrations in order. It is idempotent: re-running after a full apply is a
 // no-op. Returns the versions actually applied this call.
 func Apply(ctx context.Context, db DB, s Set) ([]int, error) {
 	if err := s.Validate(); err != nil {
 		return nil, err
+	}
+	// Serialize concurrent migrators of this schema, if the DB supports it, so
+	// two callers don't race on the same non-idempotent DDL.
+	if l, ok := db.(Locker); ok {
+		unlock, err := l.Lock(ctx, s.VersionTable)
+		if err != nil {
+			return nil, fmt.Errorf("migrate %q: acquire migration lock: %w", s.Name, err)
+		}
+		defer func() { _ = unlock(ctx) }()
 	}
 	if err := db.EnsureVersionTable(ctx, s.VersionTable); err != nil {
 		return nil, fmt.Errorf("migrate %q: ensure version table: %w", s.Name, err)
