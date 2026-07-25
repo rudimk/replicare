@@ -1,0 +1,56 @@
+# End-to-end replicare demo: a source Postgres, a target Postgres, and replicare
+# replicating public.orders from one to the other.
+#
+#   # from the repo root, build the image first:
+#   task docker
+#   # then run the demo:
+#   cd examples/demo && docker compose up
+#
+# Watch replicare copy the seeded rows into the target, then in another shell:
+#   docker compose exec source psql -U postgres -d app \
+#     -c "INSERT INTO public.orders VALUES (101,'live'); UPDATE public.orders SET note='changed' WHERE id=1;"
+#   docker compose exec target psql -U postgres -d warehouse -c "SELECT count(*), max(id) FROM public.orders;"
+#
+# Operator surface while it runs:
+#   curl localhost:8080/healthz ; curl localhost:8080/status ; curl localhost:9090/metrics
+
+services:
+  source:
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: app
+    volumes:
+      - ./init-source.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  target:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: warehouse
+    volumes:
+      - ./init-target.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d warehouse"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  replicare:
+    image: replicare:latest
+    depends_on:
+      source:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+    volumes:
+      - ./config.yml:/etc/replicare/config.yml:ro
+    command: ["run", "/etc/replicare/config.yml"]
+    ports:
+      - "8080:8080" # status API
+      - "9090:9090" # Prometheus /metrics

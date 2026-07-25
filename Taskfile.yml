@@ -26,6 +26,24 @@ tasks:
     cmds:
       - go build -ldflags "{{.LDFLAGS}}" -o bin/{{.BINARY}} ./cmd/replicare
 
+  dist:
+    desc: Build a static, stripped release binary into ./dist (CGO-free, pure Go)
+    env:
+      CGO_ENABLED: '0'
+    cmds:
+      - go build -trimpath -ldflags "-s -w {{.LDFLAGS}}" -o dist/{{.BINARY}} ./cmd/replicare
+      - 'echo "built dist/{{.BINARY}} ({{.VERSION}})"'
+
+  docker:
+    desc: Build the replicare Docker image (tags :VERSION and :latest)
+    cmds:
+      - >-
+        docker build
+        --build-arg VERSION={{.VERSION}}
+        --build-arg COMMIT={{.COMMIT}}
+        --build-arg DATE={{.DATE}}
+        -t {{.BINARY}}:{{.VERSION}} -t {{.BINARY}}:latest .
+
   run:
     desc: Run replicare (pass args after --, e.g. `task run -- version`)
     cmds:
