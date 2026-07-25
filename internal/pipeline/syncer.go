@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rudimk/replicare/internal/copy"
 	"github.com/rudimk/replicare/internal/engine"
@@ -30,9 +31,10 @@ type Syncer struct {
 	Components []engine.Component
 	Replicable []engine.TableRef
 
-	ChunkOpts  engine.ChunkOptions
-	DrainBatch int
-	Retention  engine.RetentionPolicy
+	ChunkOpts     engine.ChunkOptions
+	DrainBatch    int
+	DrainInterval time.Duration
+	Retention     engine.RetentionPolicy
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
