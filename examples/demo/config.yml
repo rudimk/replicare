@@ -1,0 +1,31 @@
+# replicare demo config: replicate public.* from the `app` source to the
+# `warehouse` target. The state store lives on the target database.
+logging:
+  level: info
+  format: text
+
+observability:
+  status_addr: ":8080"
+  metrics_addr: ":9090"
+
+state_store:
+  engine: postgres
+  postgres: { host: target, port: 5432, database: warehouse, user: postgres, password: postgres, sslmode: disable }
+
+sources:
+  app:
+    engine: postgres
+    postgres: { host: source, port: 5432, database: app, user: postgres, password: postgres, sslmode: disable }
+
+targets:
+  warehouse:
+    engine: postgres
+    postgres: { host: target, port: 5432, database: warehouse, user: postgres, password: postgres, sslmode: disable }
+
+syncs:
+  - name: app-to-warehouse
+    source: app
+    targets: [warehouse]
+    include: ["public.*"]
+    tuning:
+      drain_interval: 1s
