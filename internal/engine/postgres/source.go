@@ -71,11 +71,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	return introspectConn(ctx, s.conn, version, sel)
 }
 
-// Purge removes deltas consumed by all targets, subject to retention (M5c).
-func (s *Source) Purge(ctx context.Context, t engine.TableRef, ret engine.RetentionPolicy) (engine.PurgeStats, error) {
-	return engine.PurgeStats{}, errNotYet("Purge", "M5c")
-}
-
 // requireConn guards operations that need an open connection.
 func (s *Source) requireConn() error {
 	if s.conn == nil {
@@ -87,10 +82,4 @@ func (s *Source) requireConn() error {
 // errNotConnected is returned by operations invoked before Connect.
 func errNotConnected(role string) error {
 	return fmt.Errorf("postgres %s: not connected (call Connect first)", role)
-}
-
-// errNotYet reports a method whose milestone has not landed yet, so accidental
-// early use fails loudly rather than silently no-op'ing.
-func errNotYet(method, milestone string) error {
-	return fmt.Errorf("postgres: %s is not implemented until %s", method, milestone)
 }

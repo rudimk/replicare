@@ -658,10 +658,15 @@ invasive.
 - HA / active-standby leader election (`pg_advisory_lock` + cursor fencing) — design when HA
   becomes a goal; keep the ownership interface ready for it.
 - Multi-master conflict-resolution model (latest-wins / priority / custom) — design later.
-- Concrete **retention-cap defaults** (age and/or size) and the **partition granularity/cadence**
-  for the PG≥10 partition+DROP delta path (resolved in principle in §3.4; tune the numbers).
-- **Reseed coordination:** mechanics of marking a target needs-reseed, resetting its track,
-  re-running initial copy, and resuming streaming without gaps (ties to §4 cutover).
+- **Partition+DROP as default on PG≥10** — **RESOLVED (M5c, `docs/reseed-state-machine.md` §5):**
+  **no** — batched-DELETE + aggressive autovacuum is the universal v1 default on every version;
+  partition+DROP stays an opt-in, documented optimization for high-churn PG≥10, revisited in M9.
+  Concrete **retention-cap defaults** are set conservatively in M5c (age 24h on, size off) and the
+  **partition granularity/cadence** numbers remain a **M9 tuning pass**.
+- ~~**Reseed coordination:** mechanics of marking a target needs-reseed, resetting its track,
+  re-running initial copy, and resuming streaming without gaps~~ — **RESOLVED (M5c):** the reseed
+  state machine, its no-delta-lost invariant, and crash-safety across the handoff are specified in
+  `docs/reseed-state-machine.md` (§4).
 - Optional full-row capture mode (currently PK-only) if a use case demands exact history.
 - Re-sync / reseed workflow for schema drift or divergence.
 - Helm chart packaging.

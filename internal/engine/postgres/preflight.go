@@ -85,7 +85,7 @@ func (p Preflight) toReport() *engine.PreflightReport {
 		r.Replicable = append(r.Replicable, t.Table)
 	}
 	for _, c := range p.Components {
-		r.Components = append(r.Components, c.Tables)
+		r.Components = append(r.Components, engine.Component{Tables: c.Tables, Order: c.Order, Cyclic: c.Cyclic})
 	}
 	return r
 }
