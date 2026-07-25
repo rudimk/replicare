@@ -1,0 +1,121 @@
+# Getting started
+
+This walks you from zero to a running replication in a few minutes, then explains
+how to point replicare at your own databases.
+
+## What replicare does
+
+You give replicare a **source** database and one or more **target** databases and
+a list of tables. It:
+
+1. installs lightweight capture (triggers) on the source,
+2. copies the selected data to the targets (chunked and parallel), then
+3. streams every insert/update/delete continuously to keep the targets converged.
+
+No WAL access, no `REPLICATION` role, no `wal_level` change — just ordinary,
+grantable privileges. See [`../CLAUDE.md`](../CLAUDE.md) for the why.
+
+## Try the demo (2 minutes)
+
+The fastest way to see it work end to end:
+
+```sh
+task docker                        # build the replicare image
+cd examples/demo && docker compose up
+```
+
+This starts a source Postgres (seeded with `public.orders`), a target Postgres,
+and replicare copying then streaming between them. In another shell:
+
+```sh
+# initial copy landed
+docker compose exec target psql -U postgres -d warehouse -c "SELECT count(*) FROM public.orders;"
+
+# make a live change on the source and watch it propagate
+docker compose exec source psql -U postgres -d app \
+  -c "INSERT INTO public.orders VALUES (101,'live'); UPDATE public.orders SET note='changed' WHERE id=1; DELETE FROM public.orders WHERE id=2;"
+docker compose exec target psql -U postgres -d warehouse -c "SELECT count(*), max(id) FROM public.orders;"
+
+# operator surface
+curl localhost:8080/status | jq
+curl localhost:9090/metrics | grep replicare_
+```
+
+`Ctrl-C` then `docker compose down -v` to clean up.
+
+## Point it at your own databases
+
+### 1. Prepare the target schema
+
+replicare replicates **data only** — it never creates or migrates target tables.
+Create/migrate the target tables yourself first, matching the source columns you
+want to replicate. (Types must be compatible; pre-flight will tell you if not.)
+
+### 2. Grant least-privilege roles
+
+Run the grant scripts (edit the role/schema/db values, or pass them with `-v`):
+
+```sh
+psql -v ON_ERROR_STOP=1 -v role=replicare -v db=app -v app_schema=public \
+  -f deploy/grants-source.sql "host=SOURCE dbname=app user=admin"
+psql -v ON_ERROR_STOP=1 -v role=replicare -v db=warehouse -v app_schema=public \
+  -f deploy/grants-target.sql "host=TARGET dbname=warehouse user=admin"
+```
+
+The source role needs only `CREATE`-on-db (or a pre-created owned `replicare`
+schema) plus `USAGE`/`TRIGGER`/`SELECT`; the target role needs only DML. See
+[configuration.md](configuration.md) and
+[`../deploy/`](../deploy/) for details.
+
+### 3. Write a config
+
+Copy [`../examples/replicare.yml`](../examples/replicare.yml) and edit the
+connection blocks and the sync's table selection. Minimal example:
+
+```yaml
+state_store:
+  engine: postgres
+  postgres: { host: db, port: 5432, database: replicare_state, user: replicare, password: "${PW}", sslmode: require }
+sources:
+  app:
+    engine: postgres
+    postgres: { host: app-db, port: 5432, database: app, user: replicare, password: "${PW}", sslmode: verify-full }
+targets:
+  warehouse:
+    engine: postgres
+    postgres: { host: wh-db, port: 5432, database: warehouse, user: replicare, password: "${PW}", sslmode: require }
+syncs:
+  - name: app-to-warehouse
+    source: app
+    targets: [warehouse]
+    include: ["public.*"]
+    exclude: ["*_audit"]
+```
+
+Secrets like `${PW}` are read from the environment. Full field reference:
+[configuration.md](configuration.md).
+
+### 4. Validate, then run
+
+```sh
+export PW=...                          # the replicare role's password
+replicare validate config.yml          # pre-flight: no changes, reports problems
+replicare run config.yml               # start replicating (Ctrl-C / SIGTERM to stop cleanly)
+```
+
+`validate` connects read-only and classifies every column pair — fix any **BLOCK**
+findings (incompatible/missing types) before running. Once running, check
+progress any time with `replicare status config.yml`.
+
+### 5. Deploy
+
+Install the binary and the sample [systemd unit](../deploy/replicare.service), or
+run the [Docker image](../README.md#install). See [operations.md](operations.md)
+for tuning, monitoring, retention/reseed, and troubleshooting.
+
+## Next
+
+- [Configuration reference](configuration.md) — every config field.
+- [CLI reference](cli.md) — every command.
+- [Operations](operations.md) — tuning, health signals, retention, restarts.
+- [Troubleshooting](troubleshooting.md) — common problems and fixes.

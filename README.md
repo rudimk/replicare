@@ -112,13 +112,22 @@ exits 0. `reseed` flags a target for a full re-copy on the running daemon's next
   events (JSON).
 - **`/healthz`** — liveness.
 - **Logs** — structured `slog` (JSON or text).
-- **Traces** — OpenTelemetry spans (OTLP exporter wiring is configurable).
+- **Traces** — OpenTelemetry spans, exported to an OTLP/gRPC collector when
+  `observability.otlp_endpoint` is set.
 
 A degrading target — unreachable, or its delta backlog climbing toward the retention cap — is
 surfaced across metrics, logs, *and* traces simultaneously, never just one channel.
 
 See [`docs/operations.md`](docs/operations.md) for tuning, retention/reseed, and the headline
 health signals.
+
+## Documentation
+
+- [Getting started](docs/getting-started.md) — demo to your own databases.
+- [Configuration reference](docs/configuration.md) — every config field.
+- [CLI reference](docs/cli.md) — every command.
+- [Operations](docs/operations.md) — tuning, health, retention, restarts.
+- [Troubleshooting](docs/troubleshooting.md) — common problems and fixes.
 
 ## Status
 
