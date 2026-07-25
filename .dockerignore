@@ -1,0 +1,16 @@
+# Keep the build context small and reproducible.
+.git
+bin/
+dist/
+*.test
+*.out
+coverage.txt
+coverage.html
+.idea/
+.vscode/
+.DS_Store
+*.env
+.env
+test/harness
+docs
+examples
