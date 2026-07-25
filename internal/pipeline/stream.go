@@ -53,7 +53,10 @@ func (s *Syncer) Stream(ctx context.Context) error {
 func (s *Syncer) StreamOnce(ctx context.Context) error { return s.streamOnce(ctx) }
 
 func (s *Syncer) streamOnce(ctx context.Context) error {
-	// Drain each FK component in one FK-ordered, retrying pass.
+	// Drain each FK component in one FK-ordered, retrying pass. A failure here
+	// (typically a target that went away) does NOT short-circuit the pass: the
+	// retention enforcement below is source-side and must still run to protect a
+	// source we may not own while the target is down (CLAUDE.md §3.4).
 	var drainErr error
 	for _, comp := range s.Components {
 		if _, err := apply.DrainComponentRetrying(ctx, s.Source, s.Sink,
@@ -62,9 +65,24 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 			break
 		}
 	}
+
+	// Retention ALWAYS runs (source-side): routine purge of consumed deltas, and —
+	// if the backlog is over the cap — sacrifice the laggard target (reset its
+	// track, purge the unpinned deltas, flag it needs_reseed). This bounds source
+	// growth even during a target outage; the actual re-copy is deferred to a
+	// healthy pass below.
+	reseeded, enforceErr := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
+		[]engine.TargetID{s.Target}, s.Retention)
+
 	if drainErr != nil {
+		// Target unhealthy: the source is now protected (Enforce ran); surface the
+		// failure and retry next pass. The needs_reseed flag, if set, persists and
+		// is picked up once the target recovers.
 		s.reportDrainFailure(ctx, drainErr)
 		return drainErr
+	}
+	if enforceErr != nil {
+		return enforceErr
 	}
 
 	// Healthy pass: refresh per-table backlog gauges every tick, but only emit the
@@ -82,17 +100,11 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	}
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 
-	// Routine purge + retention; a target pushed over the cap is reseeded.
-	reseeded, err := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
-		[]engine.TargetID{s.Target}, s.Retention)
-	if err != nil {
-		return err
-	}
-
-	// Reseed the target when either the retention cap forced it (above) or an
-	// operator flagged it via `replicare reseed` (a cursor marked needs_reseed).
+	// Reseed the target when either the retention cap forced it (Enforce, above) or
+	// an operator flagged it via `replicare reseed` (a cursor marked needs_reseed).
 	needReseed := containsTarget(reseeded, s.Target)
 	if !needReseed {
+		var err error
 		if needReseed, err = s.targetNeedsReseed(ctx); err != nil {
 			return err
 		}

@@ -209,6 +209,11 @@ marked **"needs reseed"** — its track is reset and a full re-copy is scheduled
 deltas beyond the cap are purged. Default **on** with configurable limits; trades a target re-copy
 for a protected source. (Single-target is the same logic with one consumer.) Alternatives — pure
 alert-only (risks filling the source disk) and hard-stop-the-sync — were rejected as defaults.
+**Enforcement runs every drain cycle regardless of target health (M9):** retention purge and
+reseed-marking are entirely source-side, so they must run *even when the target is down* — that is
+precisely when an unowned source needs protecting. The streaming loop therefore enforces retention
+on every pass whether or not the drain succeeded; the actual re-copy (which needs a live target) is
+deferred to a healthy pass, so a stalled target bounds the source without blocking on recovery.
 
 **Re-read load & the lag↔load tradeoff.** Consuming re-reads current values for dirty PKs; high
 churn → more re-read SELECTs. **Per-PK coalescing** (one re-read per PK per drain pass) bounds it;
@@ -660,9 +665,10 @@ invasive.
 - Multi-master conflict-resolution model (latest-wins / priority / custom) — design later.
 - **Partition+DROP as default on PG≥10** — **RESOLVED (M5c, `docs/reseed-state-machine.md` §5):**
   **no** — batched-DELETE + aggressive autovacuum is the universal v1 default on every version;
-  partition+DROP stays an opt-in, documented optimization for high-churn PG≥10, revisited in M9.
-  Concrete **retention-cap defaults** are set conservatively in M5c (age 24h on, size off) and the
-  **partition granularity/cadence** numbers remain a **M9 tuning pass**.
+  partition+DROP stays an opt-in, documented optimization for high-churn PG≥10. **M9 kept it
+  deferred** (batched-DELETE proven sufficient); the **partition granularity/cadence** numbers are a
+  future tuning pass if/when the opt-in path is built. Concrete **retention-cap defaults** are set
+  conservatively in M5c (age 24h on, size off).
 - ~~**Reseed coordination:** mechanics of marking a target needs-reseed, resetting its track,
   re-running initial copy, and resuming streaming without gaps~~ — **RESOLVED (M5c):** the reseed
   state machine, its no-delta-lost invariant, and crash-safety across the handoff are specified in
