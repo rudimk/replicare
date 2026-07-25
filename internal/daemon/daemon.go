@@ -10,30 +10,36 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rudimk/replicare/internal/buildinfo"
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/engine"
 	"github.com/rudimk/replicare/internal/observability/prom"
 	"github.com/rudimk/replicare/internal/observability/telemetry"
+	"github.com/rudimk/replicare/internal/observability/tracing"
 	"github.com/rudimk/replicare/internal/state"
 	statepg "github.com/rudimk/replicare/internal/state/postgres"
 )
 
 // Daemon runs the syncs of a config until its context is cancelled.
 type Daemon struct {
-	cfg     *config.Config
-	store   state.StateStore
-	metrics *prom.Registry
-	tel     *telemetry.Telemetry
-	log     *slog.Logger
+	cfg      *config.Config
+	store    state.StateStore
+	metrics  *prom.Registry
+	tel      *telemetry.Telemetry
+	tracerTP *sdktrace.TracerProvider // non-nil when OTLP export is configured
+	log      *slog.Logger
 }
 
 // New builds a Daemon from a validated config. It wires the shared infrastructure
 // (StateStore, Prometheus registry, cross-channel telemetry with the StateStore
-// as the durable event sink) but does not connect anything until Run. v1's
-// StateStore backend is Postgres (CLAUDE.md §9).
+// as the durable event sink) but does not connect anything until Run. When
+// observability.otlp_endpoint is set, traces export to that OTLP/gRPC collector;
+// otherwise the tracer is a no-op. v1's StateStore backend is Postgres (§9).
 func New(cfg *config.Config, log *slog.Logger) (*Daemon, error) {
 	if log == nil {
 		log = slog.Default()
@@ -43,8 +49,20 @@ func New(cfg *config.Config, log *slog.Logger) (*Daemon, error) {
 	}
 	store := statepg.New(cfg.StateStore.Conn.ConnConfig())
 	metrics := prom.New()
-	tel := telemetry.New(metrics, nil, log, store) // no-op tracer until OTLP is wired
-	return &Daemon{cfg: cfg, store: store, metrics: metrics, tel: tel, log: log}, nil
+
+	tracer := tracing.Noop()
+	var tp *sdktrace.TracerProvider
+	if ep := cfg.Observability.OTLPEndpoint; ep != "" {
+		p, err := tracing.NewOTLP(context.Background(), ep, buildinfo.Version)
+		if err != nil {
+			return nil, fmt.Errorf("daemon: %w", err)
+		}
+		tp, tracer = p, tracing.New(p)
+		log.Info("OTLP trace export enabled", "endpoint", ep)
+	}
+
+	tel := telemetry.New(metrics, tracer, log, store)
+	return &Daemon{cfg: cfg, store: store, metrics: metrics, tel: tel, tracerTP: tp, log: log}, nil
 }
 
 // Metrics exposes the Prometheus registry so the caller can serve /metrics.
@@ -64,6 +82,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return fmt.Errorf("daemon: open state store: %w", err)
 	}
 	defer func() { _ = d.store.Close(context.Background()) }()
+	if d.tracerTP != nil {
+		// Flush buffered spans on shutdown (fresh ctx: the run ctx is cancelled).
+		defer func() {
+			flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = d.tracerTP.Shutdown(flushCtx)
+		}()
+	}
 
 	g, gctx := errgroup.WithContext(ctx)
 	owned := 0
