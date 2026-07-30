@@ -26,11 +26,36 @@ type Worker struct {
 	Sink engine.Sink
 }
 
+// Option configures a copy run. Options are variadic so existing callers stay
+// source-compatible; the only one today is WithProgress.
+type Option func(*config)
+
+type config struct {
+	// progress, if set, is called after each chunk with the table and the number
+	// of rows loaded, for the rows-copied progress metric. It may be called
+	// concurrently from multiple copy workers, so it must be safe for that.
+	progress func(engine.TableRef, int64)
+}
+
+func newConfig(options []Option) config {
+	var c config
+	for _, o := range options {
+		o(&c)
+	}
+	return c
+}
+
+// WithProgress reports per-chunk rows-loaded counts as the copy proceeds. The
+// callback may fire concurrently across workers and must be goroutine-safe.
+func WithProgress(fn func(engine.TableRef, int64)) Option {
+	return func(c *config) { c.progress = fn }
+}
+
 // Table performs a resumable initial copy of one table using a single worker
 // (serial chunks). Equivalent to Component with one table and one worker.
 func Table(ctx context.Context, src engine.Source, sink engine.Sink, store state.StateStore,
-	syncName string, ref engine.TableRef, opts engine.ChunkOptions) error {
-	return copyTable(ctx, []Worker{{Src: src, Sink: sink}}, store, syncName, ref, opts)
+	syncName string, ref engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
+	return copyTable(ctx, []Worker{{Src: src, Sink: sink}}, store, syncName, ref, opts, newConfig(options))
 }
 
 // Component copies an FK component's tables in the given topological order
@@ -38,12 +63,13 @@ func Table(ctx context.Context, src engine.Source, sink engine.Sink, store state
 // components are independent and may be run concurrently by the caller, each with
 // its own worker pool (CLAUDE.md §8.1).
 func Component(ctx context.Context, workers []Worker, store state.StateStore,
-	syncName string, tablesTopoOrder []engine.TableRef, opts engine.ChunkOptions) error {
+	syncName string, tablesTopoOrder []engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
 	if len(workers) == 0 {
 		return fmt.Errorf("copy: component needs at least one worker")
 	}
+	cfg := newConfig(options)
 	for _, ref := range tablesTopoOrder {
-		if err := copyTable(ctx, workers, store, syncName, ref, opts); err != nil {
+		if err := copyTable(ctx, workers, store, syncName, ref, opts, cfg); err != nil {
 			return err
 		}
 	}
@@ -55,7 +81,7 @@ func Component(ctx context.Context, workers []Worker, store state.StateStore,
 // resumes fine-grained. On resume it clears the incomplete tail (>= watermark)
 // then re-copies from there.
 func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
-	syncName string, ref engine.TableRef, opts engine.ChunkOptions) error {
+	syncName string, ref engine.TableRef, opts engine.ChunkOptions, cfg config) error {
 
 	prog, err := store.LoadCopyProgress(ctx, syncName, ref)
 	if err != nil {
@@ -104,8 +130,12 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 		wk := workers[w]
 		g.Go(func() error {
 			for i := range idxCh {
-				if err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i]); err != nil {
+				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i])
+				if err != nil {
 					return fmt.Errorf("copy %s: chunk %d: %w", ref, i, err)
+				}
+				if cfg.progress != nil {
+					cfg.progress(ref, n)
 				}
 				// Advance the contiguous prefix; persist the watermark only when it
 				// moves (serialized under mu so the watermark never regresses).
@@ -143,8 +173,9 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 }
 
 // copyChunk pipes one chunk source→target via io.Pipe so it never fully buffers.
+// It returns the number of rows loaded into the target.
 func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
-	ref engine.TableRef, cols []string, c engine.Chunk) error {
+	ref engine.TableRef, cols []string, c engine.Chunk) (int64, error) {
 
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
@@ -153,16 +184,16 @@ func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	loadErr := sink.BulkLoad(ctx, ref, cols, pr, engine.LoadDirect)
+	n, loadErr := sink.BulkLoad(ctx, ref, cols, pr, engine.LoadDirect)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {
-		return fmt.Errorf("read side: %w", copyErr)
+		return 0, fmt.Errorf("read side: %w", copyErr)
 	}
 	if loadErr != nil {
-		return fmt.Errorf("write side: %w", loadErr)
+		return 0, fmt.Errorf("write side: %w", loadErr)
 	}
-	return nil
+	return n, nil
 }
 
 // transportColumns returns the name-matched column list to copy, in SOURCE

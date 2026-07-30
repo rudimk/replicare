@@ -46,27 +46,40 @@ func (d Deps) logger() *slog.Logger {
 	return slog.Default()
 }
 
+// EnforceResult reports the outcome of an Enforce pass: which targets now need a
+// reseed, and how many delta rows were purged per table (for the purged-delta
+// metric).
+type EnforceResult struct {
+	Reseeded []engine.TargetID
+	Purged   map[engine.TableRef]int64
+}
+
 // Enforce runs a purge/retention pass over the component's tables for the full
 // target set and returns the targets that now require a reseed (union across the
-// component's tables — the reseed re-copies the whole component). For each such
-// target it marks every component-table cursor needs-reseed + phase=initial_copy
-// in the StateStore and records the target.needs_reseed event (design doc §3, §6).
-// Purge itself already reset the sacrificed targets' source track.
+// component's tables — the reseed re-copies the whole component) plus per-table
+// purge counts. For each reseeding target it marks every component-table cursor
+// needs-reseed + phase=initial_copy in the StateStore and records the
+// target.needs_reseed event (design doc §3, §6). Purge itself already reset the
+// sacrificed targets' source track.
 func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.TableRef,
-	targets []engine.TargetID, ret engine.RetentionPolicy) ([]engine.TargetID, error) {
+	targets []engine.TargetID, ret engine.RetentionPolicy) (EnforceResult, error) {
 
+	res := EnforceResult{Purged: map[engine.TableRef]int64{}}
 	reseedSet := map[engine.TargetID]bool{}
 	for _, t := range tablesTopo {
 		stats, err := d.Src.Purge(ctx, t, targets, ret)
 		if err != nil {
-			return nil, fmt.Errorf("reseed: enforce purge %s: %w", t, err)
+			return EnforceResult{}, fmt.Errorf("reseed: enforce purge %s: %w", t, err)
+		}
+		if stats.DeltasPurged > 0 {
+			res.Purged[t] = stats.DeltasPurged
 		}
 		for _, tg := range stats.TargetsReseeded {
 			reseedSet[tg] = true
 		}
 	}
 	if len(reseedSet) == 0 {
-		return nil, nil
+		return res, nil
 	}
 
 	reseeded := make([]engine.TargetID, 0, len(reseedSet))
@@ -79,12 +92,12 @@ func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.T
 		for _, t := range tablesTopo {
 			cur, err := d.Store.LoadCursor(ctx, syncName, tg, t)
 			if err != nil {
-				return nil, fmt.Errorf("reseed: enforce load cursor %s/%s: %w", tg, t, err)
+				return EnforceResult{}, fmt.Errorf("reseed: enforce load cursor %s/%s: %w", tg, t, err)
 			}
 			cur.NeedsReseed = true
 			cur.Phase = state.PhaseInitialCopy
 			if err := d.Store.SaveCursor(ctx, syncName, cur); err != nil {
-				return nil, fmt.Errorf("reseed: enforce mark cursor %s/%s: %w", tg, t, err)
+				return EnforceResult{}, fmt.Errorf("reseed: enforce mark cursor %s/%s: %w", tg, t, err)
 			}
 		}
 		// Durable + log signals (the metric channel is finalized in M6). ERROR
@@ -96,12 +109,13 @@ func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.T
 			Event:   observability.EventTargetNeedsReseed,
 			Message: "delta backlog exceeded retention cap; target scheduled for reseed",
 		}); err != nil {
-			return nil, fmt.Errorf("reseed: enforce record event %s: %w", tg, err)
+			return EnforceResult{}, fmt.Errorf("reseed: enforce record event %s: %w", tg, err)
 		}
 		d.logger().Error("target scheduled for reseed",
 			observability.AttrSync, syncName, observability.AttrTarget, string(tg))
 	}
-	return reseeded, nil
+	res.Reseeded = reseeded
+	return res, nil
 }
 
 // Run recovers one reseeding target over the component's tables (topological

@@ -130,8 +130,9 @@ type Sink interface {
 	Introspect(ctx context.Context, sel Selection) (*Schema, error)
 
 	// BulkLoad streams a text COPY (r) into the target table for initial copy
-	// (M4). cols is the explicit, name-matched column list (CLAUDE.md §4.2).
-	BulkLoad(ctx context.Context, t TableRef, cols []string, r io.Reader, mode LoadMode) error
+	// (M4). cols is the explicit, name-matched column list (CLAUDE.md §4.2). It
+	// returns the number of rows loaded (for the rows-copied progress metric).
+	BulkLoad(ctx context.Context, t TableRef, cols []string, r io.Reader, mode LoadMode) (int64, error)
 
 	// DeleteRange deletes target rows in the half-open key range [lo, hi) (a nil
 	// bound is unbounded on that side), used to clear an incomplete chunk's rows

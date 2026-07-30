@@ -98,6 +98,57 @@ func (t *Telemetry) ObserveApplyBatch(sync string, target engine.TargetID, secon
 	t.reg.Histogram(observability.MetricApplyBatchSeconds).WithLabelValues(sync, string(target)).Observe(seconds)
 }
 
+// SetReplicationLag publishes a target/table's replication lag (the age of the
+// oldest unconsumed delta, or 0 when caught up).
+func (t *Telemetry) SetReplicationLag(sync string, target engine.TargetID, table engine.TableRef, seconds float64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricReplicationLagSeconds).WithLabelValues(sync, string(target), table.String()).Set(seconds)
+}
+
+// SetThroughput publishes the current apply/copy throughput for a sync (rows/sec).
+func (t *Telemetry) SetThroughput(sync string, rowsPerSec float64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricThroughputRows).WithLabelValues(sync).Set(rowsPerSec)
+}
+
+// SetPhase marks a table's current lifecycle phase (initial_copy/streaming) as an
+// info gauge (value 1 on the active phase label).
+func (t *Telemetry) SetPhase(sync string, table engine.TableRef, phase string) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricPhaseInfo).WithLabelValues(sync, table.String(), phase).Set(1)
+}
+
+// AddRowsCopied advances the initial-copy rows counter for a table.
+func (t *Telemetry) AddRowsCopied(sync string, table engine.TableRef, n int64) {
+	if t.reg == nil || n <= 0 {
+		return
+	}
+	t.reg.Counter(observability.MetricRowsCopiedTotal).WithLabelValues(sync, table.String()).Add(float64(n))
+}
+
+// SetRowsCopiedTarget publishes the estimated total rows to copy for a table (the
+// progress denominator).
+func (t *Telemetry) SetRowsCopiedTarget(sync string, table engine.TableRef, total int64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricRowsCopiedTarget).WithLabelValues(sync, table.String()).Set(float64(total))
+}
+
+// IncError advances the error counter for a category (e.g. "drain", "apply").
+func (t *Telemetry) IncError(sync, category string) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Counter(observability.MetricErrorsTotal).WithLabelValues(sync, category).Inc()
+}
+
 // --- Span helper ---
 
 // StartDrainSpan starts a delta-drain span carrying the target/table backlog

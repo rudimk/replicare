@@ -70,7 +70,10 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 // tables' cursors to streaming for this target. The copy is checkpointed by the
 // StateStore, so an interrupted component resumes rather than restarting.
 func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) error {
-	if err := copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts); err != nil {
+	progress := copy.WithProgress(func(t engine.TableRef, n int64) {
+		s.Tel.AddRowsCopied(s.Name, t, n)
+	})
+	if err := copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress); err != nil {
 		return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
 	}
 	for _, t := range comp.Order {

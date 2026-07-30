@@ -208,12 +208,12 @@ func TestReseedConvergenceUnderWrites(t *testing.T) {
 
 	// Age the backlog past the cap; Enforce must sacrifice dst.
 	f.ageAllDeltas(t, ctx)
-	reseeded, err := Enforce(ctx, f.deps, f.syncName, comp, targets, engine.RetentionPolicy{MaxAgeSeconds: 3600})
+	res, err := Enforce(ctx, f.deps, f.syncName, comp, targets, engine.RetentionPolicy{MaxAgeSeconds: 3600})
 	if err != nil {
 		t.Fatalf("Enforce: %v", err)
 	}
-	if len(reseeded) != 1 || reseeded[0] != "dst" {
-		t.Fatalf("reseeded = %v, want [dst]", reseeded)
+	if len(res.Reseeded) != 1 || res.Reseeded[0] != "dst" {
+		t.Fatalf("reseeded = %v, want [dst]", res.Reseeded)
 	}
 	cur, _ := f.deps.Store.LoadCursor(ctx, f.syncName, "dst", ref)
 	if !cur.NeedsReseed {
@@ -260,13 +260,13 @@ func TestEnforceWithinCapNoReseed(t *testing.T) {
 	}
 	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'v'||g FROM generate_series(1,3) g")
 
-	reseeded, err := Enforce(ctx, f.deps, f.syncName, comp, []engine.TargetID{"dst"},
+	res, err := Enforce(ctx, f.deps, f.syncName, comp, []engine.TargetID{"dst"},
 		engine.RetentionPolicy{MaxAgeSeconds: 86400})
 	if err != nil {
 		t.Fatalf("Enforce: %v", err)
 	}
-	if len(reseeded) != 0 {
-		t.Fatalf("reseeded = %v, want none within cap", reseeded)
+	if len(res.Reseeded) != 0 {
+		t.Fatalf("reseeded = %v, want none within cap", res.Reseeded)
 	}
 	cur, _ := f.deps.Store.LoadCursor(ctx, f.syncName, "dst", ref)
 	if cur.NeedsReseed {

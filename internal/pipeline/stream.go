@@ -58,11 +58,23 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// retention enforcement below is source-side and must still run to protect a
 	// source we may not own while the target is down (CLAUDE.md §3.4).
 	var drainErr error
+	var consumed int
+	drainStart := time.Now()
 	for _, comp := range s.Components {
-		if _, err := apply.DrainComponentRetrying(ctx, s.Source, s.Sink,
-			comp.Order, s.Target, s.DrainBatch, apply.DefaultRetryPolicy); err != nil {
+		n, err := apply.DrainComponentRetrying(ctx, s.Source, s.Sink,
+			comp.Order, s.Target, s.DrainBatch, apply.DefaultRetryPolicy)
+		consumed += n
+		if err != nil {
 			drainErr = err
 			break
+		}
+	}
+	// Apply-batch latency + throughput (only meaningful when a pass did work).
+	if drainErr == nil {
+		elapsed := time.Since(drainStart)
+		s.Tel.ObserveApplyBatch(s.Name, s.Target, elapsed.Seconds())
+		if consumed > 0 && elapsed > 0 {
+			s.Tel.SetThroughput(s.Name, float64(consumed)/elapsed.Seconds())
 		}
 	}
 
@@ -71,38 +83,47 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// track, purge the unpinned deltas, flag it needs_reseed). This bounds source
 	// growth even during a target outage; the actual re-copy is deferred to a
 	// healthy pass below.
-	reseeded, enforceErr := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
+	enf, enforceErr := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
 		[]engine.TargetID{s.Target}, s.Retention)
+	for tbl, n := range enf.Purged {
+		s.Tel.AddPurged(s.Name, tbl, n)
+	}
 
 	if drainErr != nil {
 		// Target unhealthy: the source is now protected (Enforce ran); surface the
 		// failure and retry next pass. The needs_reseed flag, if set, persists and
 		// is picked up once the target recovers.
+		s.Tel.IncError(s.Name, "drain")
 		s.reportDrainFailure(ctx, drainErr)
 		return drainErr
 	}
 	if enforceErr != nil {
+		s.Tel.IncError(s.Name, "retention")
 		return enforceErr
 	}
 
-	// Healthy pass: refresh per-table backlog gauges every tick, but only emit the
-	// escalating retention log once the backlog is actually approaching the cap
-	// (half or more) — logging it at proximity 0 every tick is just noise.
+	// Healthy pass: refresh per-table backlog + lag gauges and phase, but only emit
+	// the escalating retention log once the backlog is actually approaching the cap
+	// (half or more) — logging it at proximity 0 every tick is just noise. Refresh
+	// the cursor so its age reflects liveness (not a stale cutover timestamp).
 	for _, t := range s.Replicable {
+		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
 		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
 		if err != nil {
 			continue
 		}
 		s.Tel.SetBacklog(s.Name, s.Target, t, bl)
+		s.Tel.SetReplicationLag(s.Name, s.Target, t, bl.OldestAge.Seconds())
 		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
 			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, bl, prox)
 		}
 	}
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
+	s.touchCursors(ctx)
 
 	// Reseed the target when either the retention cap forced it (Enforce, above) or
 	// an operator flagged it via `replicare reseed` (a cursor marked needs_reseed).
-	needReseed := containsTarget(reseeded, s.Target)
+	needReseed := containsTarget(enf.Reseeded, s.Target)
 	if !needReseed {
 		var err error
 		if needReseed, err = s.targetNeedsReseed(ctx); err != nil {
@@ -118,6 +139,20 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// touchCursors refreshes each replicable table's cursor timestamp on a healthy
+// pass, so the status API's cursor age reflects streaming liveness rather than a
+// frozen cutover time. It preserves every field (a plain Load+Save) so it never
+// clobbers an operator-set needs_reseed flag.
+func (s *Syncer) touchCursors(ctx context.Context) {
+	for _, t := range s.Replicable {
+		cur, err := s.Store.LoadCursor(ctx, s.Name, s.Target, t)
+		if err != nil {
+			continue
+		}
+		_ = s.Store.SaveCursor(ctx, s.Name, cur)
+	}
 }
 
 // targetNeedsReseed reports whether any of this target's cursors is flagged
