@@ -58,6 +58,34 @@ with backlog attributes, an `ERROR target.unreachable` log, and `replicare_targe
 climbing backlog series. The daemon keeps retrying each pass; nothing is lost. If the target stays
 down long enough to exceed the retention cap, it is reseeded on recovery.
 
+## Metrics reference
+
+Every metric replicare exposes on `/metrics` (Prometheus text format; port `9090` in the demo,
+configurable under `observability:`). These names, types, and labels are the single source of truth
+locked in the observability contract, so a scrape of a running daemon matches this table exactly.
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy. |
+| `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator). |
+| `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply/copy throughput. `0` on an idle, caught-up pass. |
+| `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table` | Replication lag — age of the oldest unconsumed delta (`0` when caught up). |
+| `replicare_delta_backlog_rows` | gauge | `sync`, `target`, `table` | Unconsumed delta rows (the queue depth). |
+| `replicare_delta_backlog_bytes` | gauge | `sync`, `target`, `table` | Estimated unconsumed delta bytes. |
+| `replicare_delta_oldest_unconsumed_age_seconds` | gauge | `sync`, `target`, `table` | Age of the oldest unconsumed delta (how stale the queue is). |
+| `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
+| `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
+| `replicare_target_up` | gauge | `sync`, `target` | Target reachability (`1`=up, `0`=down). |
+| `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
+| `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
+| `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
+
+The headline signals to watch are `replicare_target_up`, `replicare_delta_backlog_rows`,
+`replicare_delta_oldest_unconsumed_age_seconds`, and `replicare_replication_lag_seconds` — together
+they answer "is the target healthy, and how far behind is it?" (see [Source footprint](#source-footprint-the-thing-to-watch)
+and [When a target goes down](#when-a-target-goes-down)). Traces are exported via OTLP when
+`observability.otlp_endpoint` is set; structured `slog` logs carry the same fields.
+
 ## Forcing a reseed
 
 To re-copy a target from scratch (e.g. after out-of-band divergence):
