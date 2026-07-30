@@ -1,0 +1,154 @@
+name: Release
+
+# Cut a release by pushing a semver tag:
+#
+#   git tag -a v0.1.0 -m "replicare v0.1.0"
+#   git push origin v0.1.0
+#
+# This builds static, CGO-free binaries for the common OS/arch pairs, publishes a
+# GitHub Release with the archives + a checksums file, and pushes a multi-arch
+# image to GHCR (ghcr.io/<owner>/replicare:<version> and :latest).
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Least privilege: contents:write to create the Release, packages:write to push
+# the image to GHCR.
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # Build on the declared floor (go.mod), not the latest toolchain.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build static binary
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          COMMIT="$(git rev-parse --short HEAD)"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          PKG=github.com/rudimk/replicare/internal/buildinfo
+          BIN=replicare
+          [ "$GOOS" = windows ] && BIN=replicare.exe
+          mkdir -p dist
+          go build -trimpath \
+            -ldflags "-s -w -X ${PKG}.Version=${VERSION} -X ${PKG}.Commit=${COMMIT} -X ${PKG}.Date=${DATE}" \
+            -o "dist/${BIN}" ./cmd/replicare
+
+          # Archive: .zip for Windows, .tar.gz elsewhere. Include LICENSE + README.
+          NAME="replicare_${VERSION}_${GOOS}_${GOARCH}"
+          if [ "$GOOS" = windows ]; then
+            (cd dist && zip -q "${NAME}.zip" "${BIN}")
+            cp LICENSE README.md dist/ 2>/dev/null || true
+            (cd dist && zip -qg "${NAME}.zip" LICENSE README.md 2>/dev/null || true)
+          else
+            cp LICENSE README.md dist/ 2>/dev/null || true
+            tar -C dist -czf "dist/${NAME}.tar.gz" "${BIN}" LICENSE README.md
+          fi
+
+      - name: Upload archive artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Checksums
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum *.tar.gz *.zip 2>/dev/null | tee checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Auto-generate release notes from merged PRs since the last tag.
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
+
+  image:
+    name: Build and push image (GHCR)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # v0.1.0 -> tags 0.1.0, 0.1, and latest.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+            DATE=${{ github.event.repository.updated_at }}
