@@ -43,6 +43,26 @@ curl localhost:9090/metrics | grep replicare_
 
 `Ctrl-C` then `docker compose down -v` to clean up.
 
+### Verifying the metrics
+
+`/metrics` shows many `replicare_*` series once a sync is streaming, not just
+one. To eyeball the series that only populate at runtime:
+
+```sh
+curl -s localhost:9090/metrics | grep -E \
+  'replicare_(rows_copied_total|apply_batch_seconds|throughput_rows_per_second|replication_lag_seconds|table_phase_info|target_up)'
+```
+
+- `replicare_rows_copied_total` is set once the initial copy runs.
+- `replicare_apply_batch_seconds`, `replicare_replication_lag_seconds`, and
+  `replicare_table_phase_info` refresh on every streaming drain pass.
+- `replicare_throughput_rows_per_second` is only non-zero on a pass that actually
+  applied deltas — make a change on the source (the `INSERT/UPDATE/DELETE` above)
+  and re-scrape; a caught-up idle sync correctly reports `0` here.
+
+The full list of every metric, its type, and its labels is in
+[operations.md](operations.md#metrics-reference).
+
 ## Point it at your own databases
 
 ### 1. Prepare the target schema
