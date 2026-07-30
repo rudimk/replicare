@@ -46,7 +46,7 @@ func copyOneChunk(t *testing.T, ctx context.Context, src *Source, sink *Sink, re
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	loadErr := sink.BulkLoad(ctx, ref, cols, pr, engine.LoadDirect)
+	_, loadErr := sink.BulkLoad(ctx, ref, cols, pr, engine.LoadDirect)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {

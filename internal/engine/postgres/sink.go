@@ -73,24 +73,25 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 // The direct path COPYs straight into an (empty) target; the merge path stages
 // into a TEMP table then upserts, for a non-empty target. The column list is
 // explicit and name-matched to the source.
-func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) error {
+func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) (int64, error) {
 	if s.conn == nil {
-		return errNotConnected("sink")
+		return 0, errNotConnected("sink")
 	}
 	if len(cols) == 0 {
-		return fmt.Errorf("postgres: bulk load: no columns for %s", t)
+		return 0, fmt.Errorf("postgres: bulk load: no columns for %s", t)
 	}
 	switch mode {
 	case engine.LoadDirect, "":
 		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(t), quotedColumnList(cols))
-		if _, err := s.conn.PgConn().CopyFrom(ctx, r, sql); err != nil {
-			return fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+		tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
+		if err != nil {
+			return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
 		}
-		return nil
+		return tag.RowsAffected(), nil
 	case engine.LoadMerge:
 		return s.mergeLoad(ctx, t, cols, r)
 	default:
-		return fmt.Errorf("postgres: bulk load mode %q not implemented", mode)
+		return 0, fmt.Errorf("postgres: bulk load mode %q not implemented", mode)
 	}
 }
 
@@ -98,14 +99,14 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 // into a TEMP staging table, then INSERT ... ON CONFLICT DO UPDATE from it. This
 // is privilege-light and idempotent (~2x write amplification). Requires a usable
 // key for the conflict target.
-func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader) error {
+func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader) (int64, error) {
 	table, err := s.tableMeta(ctx, t)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	pk := captureColsFor(table)
 	if len(pk) == 0 {
-		return fmt.Errorf("postgres: merge load: target %s has no usable key for ON CONFLICT", t)
+		return 0, fmt.Errorf("postgres: merge load: target %s has no usable key for ON CONFLICT", t)
 	}
 	typeByName := make(map[string]string, len(table.Columns))
 	identity := false
@@ -127,7 +128,7 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 	}
 
 	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
-		return fmt.Errorf("postgres: merge load: begin: %w", err)
+		return 0, fmt.Errorf("postgres: merge load: begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -138,20 +139,23 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 
 	if _, err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
 		quoteIdentifier(stg), strings.Join(stgCols, ", "))); err != nil {
-		return fmt.Errorf("postgres: merge load: create staging: %w", err)
+		return 0, fmt.Errorf("postgres: merge load: create staging: %w", err)
 	}
 	copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
-	if _, err := s.conn.PgConn().CopyFrom(ctx, r, copySQL); err != nil {
-		return fmt.Errorf("postgres: merge load: copy to staging: %w", err)
+	tag, err := s.conn.PgConn().CopyFrom(ctx, r, copySQL)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: merge load: copy to staging: %w", err)
 	}
 	if _, err := s.conn.Exec(ctx, mergeInsertSQL(t, stg, cols, pk, colSetOf(pk), identity)); err != nil {
-		return fmt.Errorf("postgres: merge load: upsert %s: %w", t, err)
+		return 0, fmt.Errorf("postgres: merge load: upsert %s: %w", t, err)
 	}
 	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("postgres: merge load: commit: %w", err)
+		return 0, fmt.Errorf("postgres: merge load: commit: %w", err)
 	}
 	committed = true
-	return nil
+	// The staging COPY row count is the number of source rows loaded; the upsert
+	// may touch fewer (ON CONFLICT DO NOTHING) but rows-copied tracks throughput.
+	return tag.RowsAffected(), nil
 }
 
 // mergeInsertSQL builds the upsert from the staging table into the target.

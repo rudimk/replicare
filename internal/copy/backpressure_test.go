@@ -18,7 +18,7 @@ type slowSink struct {
 	delay time.Duration
 }
 
-func (s *slowSink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) error {
+func (s *slowSink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) (int64, error) {
 	return s.Sink.BulkLoad(ctx, t, cols, &slowReader{r: r, delay: s.delay}, mode)
 }
 

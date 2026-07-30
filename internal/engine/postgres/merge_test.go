@@ -45,7 +45,7 @@ func copyOneChunkMode(t *testing.T, ctx context.Context, src *Source, sink *Sink
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	loadErr := sink.BulkLoad(ctx, ref, cols, pr, mode)
+	_, loadErr := sink.BulkLoad(ctx, ref, cols, pr, mode)
 	_ = pr.CloseWithError(loadErr)
 	if copyErr := <-errc; copyErr != nil {
 		t.Fatalf("CopyChunk: %v", copyErr)
