@@ -6,11 +6,18 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"strings"
 
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
+
+// paramLocalInfile is an internal ConnConfig.Params key (rc_ namespace) carrying
+// the local_infile capability hint from the config block to the engine. Internal
+// (rc_-prefixed) params are NEVER forwarded to the DSN — go-sql-driver would try
+// to SET them as session variables and fail. The engine reads this in MM4a.
+const paramLocalInfile = "rc_local_infile"
 
 // dsn builds a go-sql-driver DSN from a resolved engine.ConnConfig. MM0 wires
 // connectivity + a minimal TLS mapping (disable vs. verify-full); the full
@@ -28,17 +35,17 @@ func dsn(cc engine.ConnConfig) (string, error) {
 	// faithful-transport paths (MM1a/MM4) read values as raw bytes, so the driver
 	// must not interpret or reject them. MM1a pins the full session canon.
 	cfg.Params = map[string]string{}
-	switch cc.TLS {
-	case engine.TLSDisable, "":
-		cfg.TLSConfig = "false"
-	default:
-		// MM0 minimal: anything stricter than disable requests TLS with full
-		// verification; the precise six-mode mapping (incl. custom verify-ca) is
-		// MM0.5. This never silently downgrades — an unmapped mode gets the
-		// strictest driver setting.
-		cfg.TLSConfig = "true"
+	tlsVal, err := tlsParam(cc.TLS)
+	if err != nil {
+		return "", err
 	}
+	cfg.TLSConfig = tlsVal
 	for k, v := range cc.Params {
+		// Internal rc_ hints (e.g. local_infile) are consumed by the engine, not
+		// the driver — never leak them into the DSN.
+		if strings.HasPrefix(k, "rc_") {
+			continue
+		}
 		if _, reserved := cfg.Params[k]; reserved {
 			return "", fmt.Errorf("mysql: connection param %q is reserved", k)
 		}
