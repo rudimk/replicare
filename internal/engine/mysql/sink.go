@@ -65,8 +65,5 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 	return introspectDB(ctx, s.db, sel)
 }
 
-// BulkLoad + DeleteRange are in sink_load.go (MM4a). ApplyPass is in apply.go (MM5a).
-
-func (s *Sink) BeginApply(context.Context) (engine.ApplyTx, error) {
-	return nil, errNotImplemented // MM5b
-}
+// BulkLoad + DeleteRange are in sink_load.go (MM4a). ApplyPass is in apply.go
+// (MM5a). BeginApply + the component ApplyTx are in apply_tx.go (MM5b).

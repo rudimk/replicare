@@ -37,12 +37,12 @@ var DefaultRetryPolicy = RetryPolicy{MaxAttempts: 5, BaseBackoff: 200 * time.Mil
 // non-transient error fails immediately; exhausting the policy returns a loud
 // halt error with the deltas still dirty.
 func DrainComponentRetrying(ctx context.Context, src engine.Source, sink engine.Sink,
-	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, policy RetryPolicy) (int, error) {
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool, policy RetryPolicy) (int, error) {
 
 	backoff := policy.BaseBackoff
 	var lastErr error
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		n, err := DrainComponent(ctx, src, sink, tablesTopoOrder, target, batch)
+		n, err := DrainComponent(ctx, src, sink, tablesTopoOrder, target, batch, cyclic)
 		if err == nil {
 			return n, nil
 		}

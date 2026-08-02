@@ -108,7 +108,7 @@ func TestRetryFallbackCrossPassDependency(t *testing.T) {
 
 	// Every attempt fails transiently while the parent is uncommitted, so the
 	// policy exhausts and the component halts LOUD.
-	_, err = DrainComponentRetrying(ctx, f.src, f.sink, f.topo, f.target, 100, fastRetry)
+	_, err = DrainComponentRetrying(ctx, f.src, f.sink, f.topo, f.target, 100, false, fastRetry)
 	if err == nil {
 		t.Fatal("expected halt error while parent dependency is missing")
 	}
@@ -130,7 +130,7 @@ func TestRetryFallbackCrossPassDependency(t *testing.T) {
 
 	// The dependency lands; a fresh retried drain now converges.
 	exec(t, ctx, held, "COMMIT")
-	if _, err := DrainComponentRetrying(ctx, f.src, f.sink, f.topo, f.target, 100, fastRetry); err != nil {
+	if _, err := DrainComponentRetrying(ctx, f.src, f.sink, f.topo, f.target, 100, false, fastRetry); err != nil {
 		t.Fatalf("drain after dependency landed: %v", err)
 	}
 	var parents, children int
@@ -145,7 +145,7 @@ func TestRetryFallbackCrossPassDependency(t *testing.T) {
 	}
 
 	// And the queue is drained.
-	n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100)
+	n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100, false)
 	if err != nil {
 		t.Fatalf("final drain: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestComponentDeferrableCycle(t *testing.T) {
 	exec(t, ctx, rawSrc, "COMMIT")
 
 	topo := []engine.TableRef{a, b}
-	if _, err := DrainComponentRetrying(ctx, src, sink, topo, "dst", 100, fastRetry); err != nil {
+	if _, err := DrainComponentRetrying(ctx, src, sink, topo, "dst", 100, true, fastRetry); err != nil {
 		t.Fatalf("drain cycle insert: %v", err)
 	}
 	var na, nb int
@@ -236,7 +236,7 @@ func TestComponentDeferrableCycle(t *testing.T) {
 	exec(t, ctx, rawSrc, "DELETE FROM rc_it.a WHERE id=1")
 	exec(t, ctx, rawSrc, "DELETE FROM rc_it.b WHERE id=10")
 	exec(t, ctx, rawSrc, "COMMIT")
-	if _, err := DrainComponentRetrying(ctx, src, sink, topo, "dst", 100, fastRetry); err != nil {
+	if _, err := DrainComponentRetrying(ctx, src, sink, topo, "dst", 100, true, fastRetry); err != nil {
 		t.Fatalf("drain cycle delete: %v", err)
 	}
 	if err := rawTgt.QueryRow(ctx, "SELECT count(*) FROM rc_it.a").Scan(&na); err != nil {

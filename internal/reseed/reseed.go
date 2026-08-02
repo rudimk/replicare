@@ -188,10 +188,10 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 // steady-state daemon loop uses the per-pass drain directly. Bounded by churn per
 // pass; returns the total deltas consumed.
 func DrainToConvergence(ctx context.Context, d Deps, tablesTopo []engine.TableRef,
-	target engine.TargetID, batch int) (int, error) {
+	target engine.TargetID, batch int, cyclic bool) (int, error) {
 	total := 0
 	for {
-		n, err := apply.DrainComponentRetrying(ctx, d.Src, d.Sink, tablesTopo, target, batch, apply.DefaultRetryPolicy)
+		n, err := apply.DrainComponentRetrying(ctx, d.Src, d.Sink, tablesTopo, target, batch, cyclic, apply.DefaultRetryPolicy)
 		if err != nil {
 			return total, err
 		}

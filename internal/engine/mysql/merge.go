@@ -67,7 +67,9 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 	}
 	if len(setParts) == 0 {
 		// Key-only table: no non-key column to update; make the upsert a no-op.
-		setParts = []string{fmt.Sprintf("%s = %s", bq(key.Columns[0]), bq(key.Columns[0]))}
+		// VALUES(key) avoids the `id = id` ambiguity INSERT ... SELECT ... ODKU
+		// raises (target and SELECT both expose the column name).
+		setParts = []string{fmt.Sprintf("%s = VALUES(%s)", bq(key.Columns[0]), bq(key.Columns[0]))}
 	}
 	ins := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s ON DUPLICATE KEY UPDATE %s",
 		qualify(t.Schema, t.Name), strings.Join(quoted, ", "), strings.Join(quoted, ", "), bq(stg), strings.Join(setParts, ", "))

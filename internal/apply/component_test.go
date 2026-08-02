@@ -100,7 +100,7 @@ func integration() bool {
 func (f *compFixture) drainAll(t *testing.T, ctx context.Context) {
 	t.Helper()
 	for {
-		n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100)
+		n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100, false)
 		if err != nil {
 			t.Fatalf("DrainComponent: %v", err)
 		}
@@ -177,7 +177,7 @@ func TestComponentReferentialConsistency(t *testing.T) {
 	f.assertConsistent(t, ctx)
 
 	// A second drain is a no-op.
-	n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100)
+	n, err := DrainComponent(ctx, f.src, f.sink, f.topo, f.target, 100, false)
 	if err != nil {
 		t.Fatalf("second drain: %v", err)
 	}

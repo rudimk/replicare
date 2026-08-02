@@ -238,7 +238,7 @@ func TestReseedConvergenceUnderWrites(t *testing.T) {
 	exec(t, ctx, f.rawSrc, "DELETE FROM rc_it.orders WHERE id = 2")
 
 	// Resumed streaming drains the retained + in-flight deltas to convergence.
-	if _, err := DrainToConvergence(ctx, f.deps, comp, "dst", 100); err != nil {
+	if _, err := DrainToConvergence(ctx, f.deps, comp, "dst", 100, false); err != nil {
 		t.Fatalf("DrainToConvergence: %v", err)
 	}
 	f.assertConverged(t, ctx)
