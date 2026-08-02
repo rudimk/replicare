@@ -1,0 +1,93 @@
+# End-to-end replicare demo for MySQL: an OLD source MySQL (5.7), a MODERN
+# target MySQL (8.4), and replicare replicating app.orders from one to the other
+# — the old-source -> modern-target path replicare is built for (CLAUDE.md §1.6).
+#
+#   # from the repo root, build the image first:
+#   task docker
+#   # then run the demo:
+#   cd examples/demo-mysql && docker compose up
+#
+# Watch replicare copy the seeded rows into the target, then in another shell:
+#   docker compose exec source \
+#     mysql -uroot -preplicare app -e \
+#     "INSERT INTO orders VALUES (101,'live'); UPDATE orders SET note='changed' WHERE id=1;"
+#   docker compose exec target \
+#     mysql -uroot -preplicare app -e "SELECT count(*), max(id) FROM orders;"
+#
+# Operator surface while it runs:
+#   curl localhost:8080/healthz ; curl localhost:8080/status ; curl localhost:9090/metrics
+#
+# The state store is Postgres (v1's only StateStore backend, CLAUDE.md §9): the
+# daemon's own progress/cursors/ownership live there, while the replicated DATA
+# moves MySQL -> MySQL. A tiny Postgres sidecar holds that state.
+
+services:
+  source:
+    image: mysql:5.7
+    # 5.7 has no arm64 image; run under emulation on Apple Silicon. amd64 hosts
+    # ignore this.
+    platform: linux/amd64
+    # local_infile=ON enables the LOAD DATA fast path on the target; the source
+    # only needs it if it is ever also a target. Kept on both for symmetry.
+    command: >-
+      --local-infile=ON
+      --secure-file-priv=
+      --character-set-server=utf8mb4
+    environment:
+      MYSQL_ROOT_PASSWORD: replicare
+      MYSQL_DATABASE: app
+    volumes:
+      - ./init-source.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -preplicare --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  target:
+    image: mysql:8.4
+    command: >-
+      --local-infile=ON
+      --secure-file-priv=
+      --character-set-server=utf8mb4
+    environment:
+      MYSQL_ROOT_PASSWORD: replicare
+      # Same database name as the source: replicare matches db.table identity
+      # across servers (init-target.sql also creates `app` explicitly).
+      MYSQL_DATABASE: app
+    volumes:
+      - ./init-target.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -preplicare --silent"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # State store (v1 StateStore backend is Postgres, CLAUDE.md §9). Holds only the
+  # daemon's operational state — no replicated data.
+  state:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: replicare_state
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d replicare_state"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  replicare:
+    image: replicare:latest
+    depends_on:
+      source:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+      state:
+        condition: service_healthy
+    volumes:
+      - ./config.yml:/etc/replicare/config.yml:ro
+    command: ["run", "/etc/replicare/config.yml"]
+    ports:
+      - "8080:8080" # status API
+      - "9090:9090" # Prometheus /metrics

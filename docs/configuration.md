@@ -70,6 +70,23 @@ sources:
 | `sslmode` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode (libpq semantics) |
 | `params` | map | extra key=value connection parameters |
 
+### MySQL connection block
+
+Used when an endpoint's `engine` is `mysql`. See [the MySQL engine page](mysql.md)
+for the two operational wrinkles (a MySQL sync still keeps its state store on
+Postgres; MySQL syncs are strictly at-least-once).
+
+| Field | Type | Notes |
+|---|---|---|
+| `host` | string | |
+| `port` | int | default 3306 |
+| `database` | string | the DSN default database only — selection may reference other databases as `db.table` (a MySQL schema *is* a database) |
+| `user` | string | the least-privilege replicare role |
+| `password` | string | use `${VAR}` |
+| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode (same spectrum as Postgres `sslmode`); default `prefer` |
+| `local_infile` | bool | hint that the target permits `LOAD DATA LOCAL INFILE`, the fast initial-copy transport; when the server refuses it, replicare falls back to batched INSERT. A server system variable, not a grant |
+| `params` | map | extra key=value DSN parameters |
+
 **`state_store`** is where replicare keeps its *own* operational state (sync
 progress, cursors, the ownership lock) — a dedicated `replicare_state` schema it
 creates and owns. It may point at the target DB, the source DB, or a separate
@@ -95,9 +112,11 @@ syncs:
 ### Selection
 
 `include`/`exclude` are `schema.table` globs (`*` matches within a name segment).
-Tables without a primary key or usable unique key are **skipped with a warning**
-(they can't be captured). An FK pointing from a selected table to an *excluded*
-one triggers a dangling-FK warning — the target must already satisfy that parent.
+For MySQL, a schema *is* a database, so these are `db.table` globs and a single
+sync may span several databases. Tables without a primary key or usable unique key
+are **skipped with a warning** (they can't be captured). An FK pointing from a
+selected table to an *excluded* one triggers a dangling-FK warning — the target
+must already satisfy that parent.
 
 ### `tuning` (per sync)
 

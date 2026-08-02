@@ -1,0 +1,41 @@
+# replicare MySQL demo config: replicate the `app` database from the 5.7 source to
+# the 8.4 target. In MySQL a schema IS a database and replicare matches tables by
+# their `db.table` identity across servers, so the target holds `app.orders` too
+# (never a renamed database — that would be a transform, CLAUDE.md §1.7). The state
+# store is a separate Postgres (v1's only StateStore backend, CLAUDE.md §9) — the
+# replicated DATA is MySQL -> MySQL, single-engine (a sync never crosses engines,
+# CLAUDE.md §6).
+logging:
+  level: info
+  format: text
+
+observability:
+  status_addr: ":8080"
+  metrics_addr: ":9090"
+
+state_store:
+  engine: postgres
+  postgres: { host: state, port: 5432, database: replicare_state, user: postgres, password: postgres, sslmode: disable }
+
+sources:
+  app:
+    engine: mysql
+    # `database` is the DSN default only; selection may reference other databases
+    # as `db.table` (a MySQL schema IS a database, CLAUDE.md §11).
+    mysql: { host: source, port: 3306, database: app, user: root, password: replicare, tls: disable }
+
+targets:
+  warehouse:
+    engine: mysql
+    # local_infile: true opts into the LOAD DATA fast path; the target server must
+    # also have local_infile enabled (see deploy/grants-target-mysql.sql notes).
+    # `database: app` — same db.table identity as the source (see header note).
+    mysql: { host: target, port: 3306, database: app, user: root, password: replicare, tls: disable, local_infile: true }
+
+syncs:
+  - name: app-to-warehouse
+    source: app
+    targets: [warehouse]
+    include: ["app.*"]
+    tuning:
+      drain_interval: 1s

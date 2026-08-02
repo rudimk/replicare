@@ -87,6 +87,12 @@ schema) plus `USAGE`/`TRIGGER`/`SELECT`; the target role needs only DML. See
 [configuration.md](configuration.md) and
 [`../deploy/`](../deploy/) for details.
 
+For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql)
+and [`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql)
+instead: the source role needs `SELECT`+`TRIGGER` on the replicated tables and
+ownership of the `replicare` capture database; the target role needs the four DML
+verbs plus `CREATE TEMPORARY TABLES`. See [the MySQL engine page](mysql.md).
+
 ### 3. Write a config
 
 Copy [`../examples/replicare.yml`](../examples/replicare.yml) and edit the
@@ -115,6 +121,11 @@ syncs:
 Secrets like `${PW}` are read from the environment. Full field reference:
 [configuration.md](configuration.md).
 
+For a **MySQL** sync, set `engine: mysql` with `mysql:` blocks (see the
+[MySQL connection block](configuration.md#mysql-connection-block)); the state
+store stays on Postgres. A ready-to-run example is in
+[`../examples/demo-mysql/config.yml`](../examples/demo-mysql/config.yml).
+
 ### 4. Validate, then run
 
 ```sh
@@ -139,3 +150,4 @@ for tuning, monitoring, retention/reseed, and troubleshooting.
 - [CLI reference](cli.md) — every command.
 - [Operations](operations.md) — tuning, health signals, retention, restarts.
 - [Troubleshooting](troubleshooting.md) — common problems and fixes.
+- [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](../examples/demo-mysql/).

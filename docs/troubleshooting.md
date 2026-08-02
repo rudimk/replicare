@@ -80,6 +80,29 @@ OTLP/**gRPC** collector (port 4317 by convention) over plaintext — point it at
 local collector or sidecar. Metrics (`/metrics`) and the status API work
 independently of tracing.
 
+## MySQL-specific issues
+
+- **The daemon refuses to connect to a MariaDB server.** MariaDB is not supported
+  in v1; it is detected and refused at connect. Use a real MySQL (5.7+) source and
+  target.
+- **`validate` blocks on a non-InnoDB table.** MyISAM/MEMORY tables make
+  `BEGIN/COMMIT` a no-op, breaking per-component atomicity (target) and the atomic
+  delta consume (source). Convert the table to InnoDB.
+- **`validate` blocks on a target table with a secondary UNIQUE key.** MySQL
+  `INSERT ... ON DUPLICATE KEY UPDATE` has no conflict target, so a secondary unique
+  could silently rewrite the wrong row — pre-flight blocks it rather than risk
+  corruption. Remove the extra unique key or replicate a table without one.
+- **Initial copy is unexpectedly slow.** The fast path is `LOAD DATA LOCAL INFILE`,
+  which needs `local_infile=ON` on the **target** server (a system variable, not a
+  grant). When it is off, replicare falls back to batched INSERT — correct, but
+  slower. Enable `local_infile` and set `local_infile: true` in the target block.
+- **The source's `replicare` database keeps growing under a long transaction.** See
+  [Source footprint](operations.md#source-footprint-the-thing-to-watch) — InnoDB's
+  history list is the `xmin`-horizon analog; end the long-running source transaction.
+
+See [the MySQL engine page](mysql.md) for the full requirements and the two
+operational wrinkles.
+
 ## Getting more detail
 
 Set `logging.level: debug` and `logging.format: text` for verbose, readable
