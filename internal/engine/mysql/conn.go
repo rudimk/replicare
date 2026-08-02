@@ -102,6 +102,33 @@ func open(ctx context.Context, cc engine.ConnConfig) (*sql.DB, error) {
 	return db, nil
 }
 
+// probeLocalInfile reports whether the server permits LOAD DATA LOCAL INFILE by
+// reading the `local_infile` system variable. This is the copy/apply transport
+// (mysql-plan §0.1); when it is OFF, the load paths halt loud with an actionable
+// error rather than fail cryptically (errno 1148) mid-copy. A read error is
+// surfaced (not silently assumed) so a permissions/version quirk is visible.
+func probeLocalInfile(ctx context.Context, db *sql.DB) (bool, error) {
+	var v sql.NullString
+	if err := db.QueryRowContext(ctx, "SELECT @@GLOBAL.local_infile").Scan(&v); err != nil {
+		return false, fmt.Errorf("mysql: probe local_infile: %w", err)
+	}
+	// The variable is 0/1 (or ON/OFF on some builds); treat anything but a clear
+	// enabled value as disabled.
+	switch strings.ToUpper(strings.TrimSpace(v.String)) {
+	case "1", "ON":
+		return true, nil
+	default:
+		return false, nil
+	}
+}
+
+// errLocalInfileRequired is the loud, actionable halt when a target refuses
+// LOAD DATA LOCAL INFILE. v1 has no INSERT fallback (deferred), so the copy/apply
+// transport requires it — surfaced before any reader is consumed.
+var errLocalInfileRequired = fmt.Errorf("mysql: target requires local_infile=ON for the LOAD DATA " +
+	"copy/apply transport, but the server has it disabled (v1 has no INSERT fallback yet). " +
+	"Enable it on the target: SET GLOBAL local_infile=1, or set local-infile=ON in my.cnf. See docs/mysql.md")
+
 // serverVersion queries the connected server's version, rejects MariaDB (out of
 // scope for v1), and returns the comparable version number (§1.6).
 func serverVersion(ctx context.Context, db *sql.DB) (int, error) {

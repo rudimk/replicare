@@ -52,11 +52,17 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 		}
 	}()
 
+	// Drop any leftover staging from a prior pass first: TEMP tables are
+	// session-scoped and the sink pool is MaxOpenConns=1, so a multi-pass drain
+	// reuses the same physical connection and would otherwise collide on the name.
 	const stg = "rc_apply_stg"
+	if _, err := tx.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
+		return fmt.Errorf("mysql: apply: drop stale staging: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
 		return fmt.Errorf("mysql: apply: staging: %w", err)
 	}
-	if _, err := runLoad(ctx, tx, bq(stg), cols, reread, charset); err != nil {
+	if _, err := runLoad(ctx, tx, bq(stg), cols, reread, charset, s.localInfile); err != nil {
 		return fmt.Errorf("mysql: apply: stage re-read %s: %w", t, err)
 	}
 

@@ -118,7 +118,7 @@ func (t *mysqlApplyTx) StageUpsert(ctx context.Context, ref engine.TableRef, col
 	if _, err := t.tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
 		return fmt.Errorf("mysql: apply: staging %s: %w", ref, err)
 	}
-	if _, err := runLoad(ctx, t.tx, bq(stg), cols, reread, charset); err != nil {
+	if _, err := runLoad(ctx, t.tx, bq(stg), cols, reread, charset, t.sink.localInfile); err != nil {
 		return fmt.Errorf("mysql: apply: stage re-read %s: %w", ref, err)
 	}
 

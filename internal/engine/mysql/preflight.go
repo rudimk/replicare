@@ -47,9 +47,6 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 		// Non-InnoDB source (breaks §3.3 source consume/track atomicity).
 		blockNonInnoDB(r, st, "source")
 
-		// Mixed per-column charset (LOAD DATA single-CHARACTER-SET limit, §0.1).
-		flagMixedCharset(r, st)
-
 		tgt, ok := tgtByRef[st.Ref]
 		if !ok {
 			r.Findings = append(r.Findings, finding(engine.SevBlock, st.Ref, "missing-target",
@@ -100,24 +97,6 @@ func blockSecondaryUnique(r *engine.PreflightReport, t engine.Table) {
 			fmt.Sprintf("target table has a secondary UNIQUE key %q beyond the replication key; ON DUPLICATE KEY UPDATE cannot preserve faithful halt-loud semantics for it (mysql-plan §0.4)", u.Name)))
 		return
 	}
-}
-
-// flagMixedCharset warns when a table's character columns use more than one
-// charset (the LOAD DATA single-CHARACTER-SET limitation, §0.1). Returns whether
-// a warning was emitted.
-func flagMixedCharset(r *engine.PreflightReport, t engine.Table) bool {
-	seen := map[string]bool{}
-	for _, c := range t.Columns {
-		if c.Charset != "" {
-			seen[normCharset(c.Charset)] = true
-		}
-	}
-	if len(seen) > 1 {
-		r.Findings = append(r.Findings, finding(engine.SevWarn, t.Ref, "mixed-charset",
-			"table has columns with more than one character set; the initial copy must load per-charset-group (mysql-plan §0.1)"))
-		return true
-	}
-	return false
 }
 
 // compareColumns classifies each name-matched source->target column pair and

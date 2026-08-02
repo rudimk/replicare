@@ -92,10 +92,11 @@ independently of tracing.
   `INSERT ... ON DUPLICATE KEY UPDATE` has no conflict target, so a secondary unique
   could silently rewrite the wrong row — pre-flight blocks it rather than risk
   corruption. Remove the extra unique key or replicate a table without one.
-- **Initial copy is unexpectedly slow.** The fast path is `LOAD DATA LOCAL INFILE`,
-  which needs `local_infile=ON` on the **target** server (a system variable, not a
-  grant). When it is off, replicare falls back to batched INSERT — correct, but
-  slower. Enable `local_infile` and set `local_infile: true` in the target block.
+- **A copy halts with "target requires local_infile=ON".** The copy/apply transport
+  is `LOAD DATA LOCAL INFILE`, which needs `local_infile=ON` on the **target** server
+  (a system variable, not a grant). replicare probes it at connect and halts loud
+  when it is off (v1 has no INSERT fallback). Enable it — `SET GLOBAL local_infile=1`
+  or `local-infile=ON` in my.cnf — and set `local_infile: true` in the target block.
 - **The source's `replicare` database keeps growing under a long transaction.** See
   [Source footprint](operations.md#source-footprint-the-thing-to-watch) — InnoDB's
   history list is the `xmin`-horizon analog; end the long-running source transaction.

@@ -45,7 +45,7 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 
 	// Pass 1: load every row with the FK column(s) omitted (NULL on target).
 	pass1 := subtractCols(transportCols(table), fkCols)
-	if err := pipeLoad(ctx, src, ref, pass1, sink.db, qualify(ref.Schema, ref.Name), charset); err != nil {
+	if err := pipeLoad(ctx, src, ref, pass1, sink.db, qualify(ref.Schema, ref.Name), charset, sink.localInfile); err != nil {
 		return fmt.Errorf("mysql: null-fill pass 1 (%s): %w", ref, err)
 	}
 
@@ -74,11 +74,15 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 			_ = tx.Rollback()
 		}
 	}()
+	// Drop any leftover staging first (session-scoped TEMP on the single-conn pool).
 	const stg = "rc_fill_stg"
+	if _, err := tx.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
+		return fmt.Errorf("mysql: null-fill pass 2: drop stale staging: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
 		return fmt.Errorf("mysql: null-fill pass 2: staging: %w", err)
 	}
-	if err := pipeLoad(ctx, src, ref, fillCols, tx, bq(stg), charset); err != nil {
+	if err := pipeLoad(ctx, src, ref, fillCols, tx, bq(stg), charset, sink.localInfile); err != nil {
 		return fmt.Errorf("mysql: null-fill pass 2: stage: %w", err)
 	}
 	setParts := make([]string, len(fkCols))
@@ -156,7 +160,7 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		return fmt.Errorf("mysql: cyclic load: disable fk checks: %w", err)
 	}
 	for _, info := range infos {
-		if err := pipeLoad(ctx, src, info.ref, info.cols, tx, qualify(info.ref.Schema, info.ref.Name), info.charset); err != nil {
+		if err := pipeLoad(ctx, src, info.ref, info.cols, tx, qualify(info.ref.Schema, info.ref.Name), info.charset, sink.localInfile); err != nil {
 			return fmt.Errorf("mysql: cyclic load %s: %w", info.ref, err)
 		}
 	}
@@ -211,7 +215,7 @@ func verifyNoOrphans(ctx context.Context, ex execQuerier, src *Source, tables []
 // pipeLoad streams an explicit column subset of a whole source table into `into`
 // (a real or TEMP target) via an io.Pipe: CopyChunk-style serialization feeds
 // runLoad on the given execer.
-func pipeLoad(ctx context.Context, src *Source, ref engine.TableRef, cols []string, ex execQuerier, into, charset string) error {
+func pipeLoad(ctx context.Context, src *Source, ref engine.TableRef, cols []string, ex execQuerier, into, charset string, localInfile bool) error {
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
 	go func() {
@@ -219,7 +223,7 @@ func pipeLoad(ctx context.Context, src *Source, ref engine.TableRef, cols []stri
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	_, loadErr := runLoad(ctx, ex, into, cols, pr, charset)
+	_, loadErr := runLoad(ctx, ex, into, cols, pr, charset, localInfile)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {

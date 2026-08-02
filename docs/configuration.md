@@ -84,7 +84,7 @@ Postgres; MySQL syncs are strictly at-least-once).
 | `user` | string | the least-privilege replicare role |
 | `password` | string | use `${VAR}` |
 | `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode (same spectrum as Postgres `sslmode`); default `prefer` |
-| `local_infile` | bool | hint that the target permits `LOAD DATA LOCAL INFILE`, the fast initial-copy transport; when the server refuses it, replicare falls back to batched INSERT. A server system variable, not a grant |
+| `local_infile` | bool | hint that the target permits `LOAD DATA LOCAL INFILE`, the copy/apply transport (**required** in v1). replicare probes it at connect and halts loud if off — no INSERT fallback yet. A server system variable, not a grant |
 | `params` | map | extra key=value DSN parameters |
 
 **`state_store`** is where replicare keeps its *own* operational state (sync

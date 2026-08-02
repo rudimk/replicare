@@ -28,9 +28,11 @@ type Conn struct {
 	Password string `yaml:"password"`
 	TLS      string `yaml:"tls"`
 	// LocalInfile hints that this (target) server permits LOAD DATA LOCAL INFILE,
-	// the fast initial-copy transport (mysql-plan §0.1). When false, the engine
-	// uses the text-literal batched-INSERT fallback. It is a hint: MM4a still
-	// probes/handles the server refusing local_infile.
+	// the copy/apply transport (mysql-plan §0.1). It is only a hint: the engine
+	// probes the server's actual `local_infile` at connect and, when it is
+	// disabled, halts the load LOUD with an actionable error (v1 has no INSERT
+	// fallback — deferred; see docs/mysql.md), rather than failing cryptically
+	// mid-copy. Set it true to document the requirement in config.
 	LocalInfile *bool             `yaml:"local_infile"`
 	Params      map[string]string `yaml:"params"`
 }

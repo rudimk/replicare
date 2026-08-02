@@ -19,12 +19,17 @@ type Sink struct {
 	cfg  engine.ConnConfig
 	db   *sql.DB
 	meta map[engine.TableRef]engine.Table // introspection cache (single-goroutine)
+	// localInfile records whether the target server permits LOAD DATA LOCAL INFILE
+	// (the copy/apply transport), probed at Connect. When false, load paths halt
+	// loud rather than fail cryptically mid-copy (MM9; v1 has no INSERT fallback).
+	localInfile bool
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
 var _ engine.Sink = (*Sink)(nil)
 
-// Connect opens the connection. Session canonicalization is added in MM1a.
+// Connect opens the connection (session canonicalization via the DSN) and probes
+// whether the target permits LOAD DATA LOCAL INFILE, the copy/apply transport.
 func (s *Sink) Connect(ctx context.Context) error {
 	if s.db != nil {
 		return nil
@@ -34,6 +39,13 @@ func (s *Sink) Connect(ctx context.Context) error {
 		return err
 	}
 	s.db = db
+	ok, err := probeLocalInfile(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		s.db = nil
+		return err
+	}
+	s.localInfile = ok
 	return nil
 }
 
