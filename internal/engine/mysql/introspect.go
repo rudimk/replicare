@@ -99,7 +99,7 @@ func listTables(ctx context.Context, db *sql.DB) ([]engine.TableRef, map[engine.
 // full declared type incl. length/unsigned) for faithful pre-flight comparison.
 func introspectColumns(ctx context.Context, db *sql.DB, t engine.TableRef) ([]engine.Column, error) {
 	rows, err := db.QueryContext(ctx, `
-		SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(EXTRA, '')
+		SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, IFNULL(EXTRA, ''), IFNULL(CHARACTER_SET_NAME, '')
 		FROM information_schema.COLUMNS
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 		ORDER BY ORDINAL_POSITION`, t.Schema, t.Name)
@@ -110,8 +110,8 @@ func introspectColumns(ctx context.Context, db *sql.DB, t engine.TableRef) ([]en
 
 	var cols []engine.Column
 	for rows.Next() {
-		var name, colType, nullable, extra string
-		if err := rows.Scan(&name, &colType, &nullable, &extra); err != nil {
+		var name, colType, nullable, extra, charset string
+		if err := rows.Scan(&name, &colType, &nullable, &extra, &charset); err != nil {
 			return nil, fmt.Errorf("mysql: scan column %s: %w", t, err)
 		}
 		e := strings.ToLower(extra)
@@ -122,6 +122,7 @@ func introspectColumns(ctx context.Context, db *sql.DB, t engine.TableRef) ([]en
 			Generated:  strings.Contains(e, "generated"),      // VIRTUAL or STORED
 			Identity:   strings.Contains(e, "auto_increment"), // auto_increment
 			AutoUpdate: strings.Contains(e, "on update current_timestamp"),
+			Charset:    charset,
 		})
 	}
 	if err := rows.Err(); err != nil {

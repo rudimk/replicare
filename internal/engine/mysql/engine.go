@@ -41,10 +41,9 @@ func (mysqlEngine) NewSink(cfg engine.ConnConfig) (engine.Sink, error) {
 }
 
 // Preflight classifies an introspected source against an introspected target
-// (MM1b). The MM0 skeleton returns an empty report; real classification (type
-// compatibility, FK components, MySQL-specific blocks) lands in MM1b.
+// (MM1b): type compatibility, FK components, and the MySQL-specific blocks.
 func (mysqlEngine) Preflight(syncName string, srcVersion, tgtVersion int, source, target *engine.Schema) *engine.PreflightReport {
-	return &engine.PreflightReport{Sync: syncName, SourceVersion: srcVersion, TargetVersion: tgtVersion}
+	return buildPreflight(syncName, srcVersion, tgtVersion, source, target)
 }
 
 // Compile-time assertion that mysqlEngine satisfies the interface.
