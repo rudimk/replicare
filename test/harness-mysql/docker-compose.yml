@@ -1,0 +1,58 @@
+# Multi-version MySQL test harness for replicare.
+#
+# Brings up an OLD source MySQL and a MODERN target MySQL so integration tests
+# exercise the old-source -> modern-target path replicare is designed for
+# (CLAUDE.md §1.6). Floor rationale: docs/mysql-version-support.md.
+#
+# Usage:
+#   task harness:mysql:up      # start both, wait for healthy
+#   task harness:mysql:down    # stop and remove (data is ephemeral, no volumes)
+#
+# Data is intentionally NOT persisted (no named volumes) so each run starts
+# clean. Ports are 3340/3341 to avoid clashing with a local MySQL (3306) AND the
+# Postgres harness (5440/5441), so both harnesses can run at once for the
+# engine-coexistence test (MM7).
+#
+# local_infile=ON is required: the initial-copy transport is LOAD DATA LOCAL
+# INFILE (mysql-plan §0.1). secure_file_priv="" permits it; the driver only ever
+# streams from an in-process reader, never a server file path.
+
+services:
+  source-mysql:
+    # F3 floor: 5.7 is the oldest supported source — it has generated columns,
+    # JSON, and a usable information_schema, while predating 8.0's multi-trigger
+    # and utf8mb4 defaults (docs/mysql-version-support.md).
+    image: mysql:5.7
+    # 5.7 has no arm64 image; run under emulation on Apple Silicon. CI is amd64.
+    platform: linux/amd64
+    command: >-
+      --local-infile=ON
+      --secure-file-priv=
+      --character-set-server=utf8mb4
+    environment:
+      MYSQL_ROOT_PASSWORD: replicare
+      MYSQL_DATABASE: replicare_src
+    ports:
+      - "3340:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -preplicare --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  target-mysql:
+    image: mysql:8.4
+    command: >-
+      --local-infile=ON
+      --secure-file-priv=
+      --character-set-server=utf8mb4
+    environment:
+      MYSQL_ROOT_PASSWORD: replicare
+      MYSQL_DATABASE: replicare_dst
+    ports:
+      - "3341:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -preplicare --silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30

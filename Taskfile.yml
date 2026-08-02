@@ -125,3 +125,27 @@ tasks:
     desc: Validate the harness compose file
     cmds:
       - docker compose -f test/harness/docker-compose.yml config -q
+
+  harness:mysql:up:
+    desc: Start the multi-version MySQL test harness (5.7 source + 8.4 target)
+    cmds:
+      - docker compose -f test/harness-mysql/docker-compose.yml up -d --wait
+
+  harness:mysql:down:
+    desc: Stop and remove the MySQL test harness (ephemeral data is discarded)
+    cmds:
+      - docker compose -f test/harness-mysql/docker-compose.yml down -v
+
+  harness:mysql:config:
+    desc: Validate the MySQL harness compose file
+    cmds:
+      - docker compose -f test/harness-mysql/docker-compose.yml config -q
+
+  test:integration:mysql:
+    desc: Run MySQL integration tests against the 5.7->8.4 harness (brings it up/down)
+    cmds:
+      - task: harness:mysql:up
+      - defer: { task: harness:mysql:down }
+      # -p 1 serializes packages: integration tests share the one harness and
+      # would otherwise clobber each other's schemas.
+      - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 {{.PKG}}
