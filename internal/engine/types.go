@@ -39,6 +39,11 @@ type Column struct {
 	// verbatim source value so it is not silently mutated to "now" (CLAUDE.md
 	// §1.7; mysql-plan §0.4). Zero (false) for engines without this behavior.
 	AutoUpdate bool
+	// Charset is the character-set name for character columns when the engine
+	// stores it per column (MySQL: `utf8mb4`, `latin1`, ...); empty otherwise.
+	// Pre-flight uses it to classify charset-narrowing (`utf8mb4`->`utf8mb3`,
+	// lossy) and to flag mixed-per-column-charset tables (mysql-plan §0.1).
+	Charset string
 }
 
 // Key is a primary or unique key (an ordered set of columns).
