@@ -45,11 +45,17 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 		}
 	}()
 
+	// Drop any leftover staging first: TEMP tables are session-scoped and the pool
+	// is single-connection, so a multi-chunk merge copy reuses the same connection
+	// and would otherwise collide on the constant staging name.
 	const stg = "rc_merge_stg"
+	if _, err := tx.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
+		return 0, fmt.Errorf("mysql: merge load: drop stale staging: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
 		return 0, fmt.Errorf("mysql: merge load: create staging: %w", err)
 	}
-	n, err := runLoad(ctx, tx, bq(stg), cols, r, charset)
+	n, err := runLoad(ctx, tx, bq(stg), cols, r, charset, s.localInfile)
 	if err != nil {
 		return 0, fmt.Errorf("mysql: merge load: stage: %w", err)
 	}

@@ -31,13 +31,13 @@ FLUSH PRIVILEGES;
 --   the write connection (time_zone, a strict-safe sql_mode that keeps
 --   STRICT_*_TABLES but permits zero-dates, NO_AUTO_VALUE_ON_ZERO) is all
 --   session-level and needs no privilege.
--- * local_infile: the initial-copy fast path is LOAD DATA LOCAL INFILE. That
---   requires the TARGET server to allow local-infile loads — a server system
+-- * local_infile is REQUIRED: the copy/apply transport is LOAD DATA LOCAL INFILE.
+--   That requires the TARGET server to allow local-infile loads — a server system
 --   variable (`local_infile=ON`), NOT a grant. Set it in the target's config
 --   (my.cnf) or via `SET GLOBAL local_infile=1`. The driver only ever streams
 --   from an in-process reader, never a server file path, so `secure_file_priv`
---   does not restrict it. When local_infile is off, replicare falls back to a
---   batched multi-row INSERT (slower, correctness-equivalent).
+--   does not restrict it. replicare probes local_infile at connect and halts loud
+--   if it is off (v1 has no INSERT fallback — deferred).
 -- * FOREIGN_KEY_CHECKS: a cyclic NOT NULL FK component is loaded/applied with a
 --   session-local `SET FOREIGN_KEY_CHECKS=0` plus a mandatory pre-commit orphan
 --   verification (mysql-plan §0.2). SET SESSION on this variable needs no

@@ -86,14 +86,21 @@ func TestPreflightRiskyTypeWarns(t *testing.T) {
 	}
 }
 
-func TestPreflightMixedCharsetWarns(t *testing.T) {
+// TestPreflightMixedCharsetOK: a table mixing per-column charsets replicates
+// without warning — the byte-faithful CHARACTER SET binary load (MM9) copies each
+// column's raw bytes and validates them against that column's own charset, so no
+// per-charset-group split is needed and the old mixed-charset warning is gone.
+func TestPreflightMixedCharsetOK(t *testing.T) {
 	tbl := innoTable("t", idCol(),
 		engine.Column{Name: "a", DataType: "varchar(10)", Charset: "latin1"},
 		engine.Column{Name: "b", DataType: "varchar(10)", Charset: "utf8mb4"})
 	src := &engine.Schema{Tables: []engine.Table{tbl}}
 	r := buildPreflight("s", 50744, 80400, src, src)
-	if !hasFinding(r, engine.SevWarn, "mixed-charset") {
-		t.Fatalf("expected a mixed-charset WARN, got %+v", r.Findings)
+	if hasFinding(r, engine.SevWarn, "mixed-charset") {
+		t.Fatalf("mixed-charset should no longer warn (binary load handles it): %+v", r.Findings)
+	}
+	if len(r.Replicable) != 1 {
+		t.Fatalf("mixed-charset table should be replicable, got %+v", r.Replicable)
 	}
 }
 

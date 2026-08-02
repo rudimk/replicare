@@ -40,7 +40,7 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 	if mode == engine.LoadMerge {
 		return s.mergeLoad(ctx, t, cols, r, charset)
 	}
-	return runLoad(ctx, s.db, qualify(t.Schema, t.Name), cols, r, charset)
+	return runLoad(ctx, s.db, qualify(t.Schema, t.Name), cols, r, charset, s.localInfile)
 }
 
 // execQuerier is the subset of database/sql satisfied by *sql.DB, *sql.Tx, and
@@ -52,8 +52,14 @@ type execQuerier interface {
 }
 
 // runLoad streams r into the `into` table (real or TEMP) via a uniquely-named,
-// deregistered-on-return reader handler and returns rows loaded.
-func runLoad(ctx context.Context, ex execQuerier, into string, cols []string, r io.Reader, charset string) (int64, error) {
+// deregistered-on-return reader handler and returns rows loaded. `localInfile`
+// gates the transport: when the target has LOAD DATA LOCAL INFILE disabled, it
+// halts LOUD before consuming r (v1 has no INSERT fallback), rather than failing
+// cryptically with errno 1148 partway through a copy (MM9).
+func runLoad(ctx context.Context, ex execQuerier, into string, cols []string, r io.Reader, charset string, localInfile bool) (int64, error) {
+	if !localInfile {
+		return 0, errLocalInfileRequired
+	}
 	name := fmt.Sprintf("rc_load_%d", loadCounter.Add(1))
 	driver.RegisterReaderHandler(name, func() io.Reader { return r })
 	defer driver.DeregisterReaderHandler(name)
@@ -72,30 +78,20 @@ func runLoad(ctx context.Context, ex execQuerier, into string, cols []string, r 
 	return n, nil
 }
 
-// loadCharset returns the CHARACTER SET clause value for a target table: the
-// single charset shared by its character columns, "binary" if it has none, or an
-// error if columns use more than one charset (mixed-charset needs per-charset-
-// group loading, deferred; pre-flight flags such tables).
-func (s *Sink) loadCharset(ctx context.Context, t engine.TableRef) (string, error) {
-	tbl, err := s.tableMeta(ctx, t)
-	if err != nil {
-		return "", err
-	}
-	seen := map[string]bool{}
-	for _, c := range tbl.Columns {
-		if c.Charset != "" {
-			seen[c.Charset] = true
-		}
-	}
-	switch len(seen) {
-	case 0:
-		return "binary", nil
-	case 1:
-		for cs := range seen {
-			return cs, nil
-		}
-	}
-	return "", fmt.Errorf("mysql: table %s has mixed per-column charsets; per-charset-group LOAD DATA is not yet implemented (pre-flight flags this, mysql-plan §0.1)", t)
+// loadCharset returns the CHARACTER SET clause value for a LOAD DATA into a target
+// table. It is ALWAYS "binary" — the byte-faithful choice (§1.7): with
+// CHARACTER SET binary, LOAD DATA performs no charset conversion when reading the
+// file, so each field's RAW source bytes are assigned to its column and validated
+// by that column's OWN type. A utf8mb4 column rejects invalid utf8 loudly; a
+// VARBINARY/BLOB column keeps arbitrary bytes (including high bytes like 0xFF that
+// a utf8mb4 load charset would mangle); and a table mixing text and binary columns
+// — or several text charsets — loads correctly in one pass (no per-charset-group
+// split needed). This pairs with reads under character_set_results=binary.
+//
+// It keeps the (Sink, TableRef) signature so callers are unchanged and a future
+// per-column strategy can slot in here; it currently never errors.
+func (s *Sink) loadCharset(context.Context, engine.TableRef) (string, error) {
+	return "binary", nil
 }
 
 // DeleteRange deletes target rows in the half-open key range [lo, hi), used to

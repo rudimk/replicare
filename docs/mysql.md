@@ -24,10 +24,14 @@ plan live in [`../.sisyphus/mysql-plan.md`](../.sisyphus/mysql-plan.md).
 - **InnoDB tables only.** Non-transactional engines (MyISAM/MEMORY) break the
   per-component atomic apply and the source consume/track atomicity, so pre-flight
   **blocks** them (mysql-plan §0.5).
-- **`local_infile=ON`** on the target for the fast initial-copy transport
-  (`LOAD DATA LOCAL INFILE`). When it's off, replicare falls back to a
-  byte-faithful batched-`INSERT` path (slower). Set the `local_infile: true` hint
-  in the target's `mysql:` block.
+- **`local_infile=ON` is required on the target** — it is the copy/apply transport
+  (`LOAD DATA LOCAL INFILE`). replicare probes it at connect and, if it is off,
+  **halts loud with an actionable error** rather than failing cryptically mid-copy.
+  Enable it (`SET GLOBAL local_infile=1`, or `local-infile=ON` in my.cnf) and set
+  the `local_infile: true` hint in the target's `mysql:` block. *(A batched-`INSERT`
+  fallback for `local_infile`-off targets is deferred to a future release — doing
+  it byte-faithfully across column charsets needs careful design, and a hardening
+  release favors a loud requirement over a risky fallback.)*
 - **Every replicated table needs a primary key or a usable unique key.** Tables
   without one are skipped with a loud warning (CLAUDE.md §3.1).
 - **No secondary UNIQUE keys on target tables** (beyond the replication key):
