@@ -65,21 +65,17 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	}
 	return introspectDB(ctx, s.db, sel)
 }
-func (s *Source) InstallCapture(context.Context, []engine.TableRef) error { return errNotImplemented } // MM3
-func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error  { return errNotImplemented } // MM3
+
+// InstallCapture/RemoveCapture are in capture.go (MM3).
+// ReadDirtyKeys/ConfirmConsumed are in consume.go (MM3).
+
 func (s *Source) PlanChunks(context.Context, engine.TableRef, engine.ChunkOptions) ([]engine.Chunk, error) {
 	return nil, errNotImplemented // MM4a
 }
 func (s *Source) CopyChunk(context.Context, engine.Chunk, io.Writer) error {
 	return errNotImplemented // MM4a
 }
-func (s *Source) ReadDirtyKeys(context.Context, engine.TableRef, engine.TargetID, int) ([]engine.DirtyKey, error) {
-	return nil, errNotImplemented // MM5a
-}
 func (s *Source) RereadCurrent(context.Context, engine.TableRef, []engine.KeyValues, io.Writer) error {
-	return errNotImplemented // MM5a
-}
-func (s *Source) ConfirmConsumed(context.Context, engine.TableRef, engine.TargetID, []engine.DeltaID) error {
 	return errNotImplemented // MM5a
 }
 func (s *Source) Purge(context.Context, engine.TableRef, []engine.TargetID, engine.RetentionPolicy) (engine.PurgeStats, error) {
