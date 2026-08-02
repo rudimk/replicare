@@ -8,19 +8,11 @@
 package mysql
 
 import (
-	"errors"
-
 	"github.com/rudimk/replicare/internal/engine"
 )
 
 // EngineName is the identifier used in config and both registries.
 const EngineName = "mysql"
-
-// errNotImplemented marks a Source/Sink method that is a stub until its
-// milestone lands. It is deliberately loud: the MM0 engine registers and probes
-// versions but cannot yet run a sync, and any attempt to use an unfinished path
-// should fail obviously rather than silently no-op.
-var errNotImplemented = errors.New("mysql: not implemented (skeleton engine; see .sisyphus/mysql-plan.md)")
 
 // mysqlEngine is the MySQL implementation of engine.Engine: the factory for the
 // MySQL Source and Sink. Registered in init(); the config-block parser is
