@@ -149,3 +149,15 @@ tasks:
       # -p 1 serializes packages: integration tests share the one harness and
       # would otherwise clobber each other's schemas.
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 {{.PKG}}
+
+  test:integration:dual:
+    desc: Run daemon engine-coexistence tests against BOTH harnesses (Postgres + MySQL)
+    cmds:
+      # MM7 needs all three databases at once: a MySQL source+target for the
+      # MySQL sync's data, a Postgres source+target for the coexisting Postgres
+      # sync's data, and the Postgres state store (v1's only StateStore backend).
+      - task: harness:up
+      - task: harness:mysql:up
+      - defer: { task: harness:mysql:down }
+      - defer: { task: harness:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 ./internal/daemon/...
