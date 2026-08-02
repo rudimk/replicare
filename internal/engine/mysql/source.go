@@ -70,10 +70,4 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 // ReadDirtyKeys/ConfirmConsumed are in consume.go (MM3).
 // PlanChunks is in chunk.go, CopyChunk in copy.go (MM4a).
 // RereadCurrent is in reread.go (MM5a).
-
-func (s *Source) Purge(context.Context, engine.TableRef, []engine.TargetID, engine.RetentionPolicy) (engine.PurgeStats, error) {
-	return engine.PurgeStats{}, errNotImplemented // MM5c
-}
-func (s *Source) DeltaBacklog(context.Context, engine.TableRef, engine.TargetID) (engine.DeltaBacklog, error) {
-	return engine.DeltaBacklog{}, errNotImplemented // MM5c
-}
+// Purge/DeltaBacklog are in purge.go (MM5c).
