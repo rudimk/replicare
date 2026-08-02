@@ -147,9 +147,19 @@ type Sink interface {
 
 	// BeginApply starts a transaction scoped to one FK component so a drain
 	// pass applies atomically (CLAUDE.md §8.1). Upserts and deletes within it are
-	// ordered parent->child / child->parent by the caller. The transaction defers
-	// FK checks (SET CONSTRAINTS ALL DEFERRED) so deferrable cyclic FKs commit.
-	BeginApply(ctx context.Context) (ApplyTx, error)
+	// ordered parent->child / child->parent by the caller. `cyclic` reports
+	// whether the component contains an FK cycle/self-reference, so an engine can
+	// choose a cycle-safe strategy: Postgres defers all FK checks to commit
+	// regardless (SET CONSTRAINTS ALL DEFERRED); MySQL, which has no deferrable
+	// constraints, uses FOREIGN_KEY_CHECKS=0 + a pre-commit orphan verification
+	// for a cyclic component, and leaves checks ON (retry-fallback handles
+	// cross-pass deps) for an acyclic one (mysql-plan §0.2). `componentTables` is
+	// the FULL topo-ordered member set of the component (not just this pass's dirty
+	// subset): a cyclic engine's pre-commit verification must scan every component
+	// FK edge, because with checks disabled a delete can strand a non-dirty child
+	// that references a just-deleted parent (mysql-plan §0.2, Momus 2nd-pass m1).
+	// Engines that defer to commit (Postgres) ignore componentTables.
+	BeginApply(ctx context.Context, cyclic bool, componentTables []TableRef) (ApplyTx, error)
 }
 
 // ApplyTx is a target transaction for one FK component's drain pass (M5b). The

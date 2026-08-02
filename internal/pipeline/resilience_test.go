@@ -23,8 +23,8 @@ type slowSink struct {
 	delay time.Duration
 }
 
-func (s slowSink) BeginApply(ctx context.Context) (engine.ApplyTx, error) {
-	tx, err := s.Sink.BeginApply(ctx)
+func (s slowSink) BeginApply(ctx context.Context, cyclic bool, componentTables []engine.TableRef) (engine.ApplyTx, error) {
+	tx, err := s.Sink.BeginApply(ctx, cyclic, componentTables)
 	if err != nil {
 		return nil, err
 	}
@@ -104,11 +104,11 @@ type togglableSink struct {
 	down *bool
 }
 
-func (s togglableSink) BeginApply(ctx context.Context) (engine.ApplyTx, error) {
+func (s togglableSink) BeginApply(ctx context.Context, cyclic bool, componentTables []engine.TableRef) (engine.ApplyTx, error) {
 	if *s.down {
 		return nil, errors.New("simulated target down: connection refused")
 	}
-	return s.Sink.BeginApply(ctx)
+	return s.Sink.BeginApply(ctx, cyclic, componentTables)
 }
 
 func (s togglableSink) ServerVersion(ctx context.Context) (int, error) {

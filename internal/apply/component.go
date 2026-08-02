@@ -26,9 +26,12 @@ type tableWork struct {
 // DrainComponent applies one drain pass for an FK component whose tables are
 // given in topological order (parents first). It returns the number of deltas
 // consumed (0 when every table's queue is empty). The whole pass is atomic on
-// the target; ConfirmConsumed runs only after the commit (crash-safe).
+// the target; ConfirmConsumed runs only after the commit (crash-safe). `cyclic`
+// reports whether the component contains an FK cycle/self-reference; it is passed
+// to BeginApply so a cycle-safe engine (MySQL) can disable FK checks and run a
+// pre-commit orphan verification over the full component (CLAUDE.md §3.3, §8.1).
 func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
-	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int) (int, error) {
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool) (int, error) {
 
 	var work []tableWork
 	total := 0
@@ -52,7 +55,7 @@ func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
 		return 0, nil
 	}
 
-	tx, err := sink.BeginApply(ctx)
+	tx, err := sink.BeginApply(ctx, cyclic, tablesTopoOrder)
 	if err != nil {
 		return 0, fmt.Errorf("apply component: begin: %w", err)
 	}

@@ -62,7 +62,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	drainStart := time.Now()
 	for _, comp := range s.Components {
 		n, err := apply.DrainComponentRetrying(ctx, s.Source, s.Sink,
-			comp.Order, s.Target, s.DrainBatch, apply.DefaultRetryPolicy)
+			comp.Order, s.Target, s.DrainBatch, comp.HasCycle(), apply.DefaultRetryPolicy)
 		consumed += n
 		if err != nil {
 			drainErr = err

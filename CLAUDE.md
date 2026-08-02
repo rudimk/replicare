@@ -318,6 +318,18 @@ pre-commit verification is what restores the loud-before-corrupt promise (§1.7)
 The `FOREIGN_KEY_CHECKS=0` window is session-local, does not alter the constraint, and is discarded
 with the pinned connection. Postgres behavior (case 3, fail loud) is unchanged.
 
+**MySQL streaming apply uses the same mechanism (decided in MM5b).** The generic "streaming → §3.3
+retry fallback" note above holds for **acyclic** MySQL components (a transient FK violation, errno
+1451/1452, is mapped to a transient error and the identical pass is retried once its cross-pass
+dependency lands). It does **not** hold for a MySQL **cyclic `NOT NULL`** component: the neutral
+per-pass apply is all-or-nothing, so a mutual cycle throws 1452 on every identical retry → thrash.
+So MySQL's component `ApplyTx` runs a **cyclic** drain pass under `SET FOREIGN_KEY_CHECKS=0` with the
+**same pre-commit orphan-verification** as initial copy — re-enable checks, anti-join over the
+**whole component's** FK edges (not just the pass's dirty tables, since a delete under checks-off can
+strand a non-dirty child) inside the open transaction, loud-halt + rollback on any orphan. The
+cyclic flag is threaded from the FK-component layer into `BeginApply`; Postgres ignores it (its
+`SET CONSTRAINTS ALL DEFERRED` already covers cycles). Acyclic MySQL components keep checks ON.
+
 **Documented defaults (not separately decided):**
 - **Per-chunk progress in the Postgres StateStore:** a completed-range watermark plus a sparse set
   of out-of-order completed ranges, so restarts skip finished chunks.
@@ -633,7 +645,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
-| Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming uses §3.3 retry. See §4.1. |
+| Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |
 | Type fidelity | **Faithful transport, never transform** (verbatim text, both copy + apply). **No transform capability exists, ever.** See §4.2. |
 | Session GUCs | Pin `DateStyle=ISO,YMD`, `TimeZone=UTC`, `extra_float_digits=3`, `IntervalStyle=postgres`, `bytea_output=hex`, `client_encoding=UTF8` on all connections (formatting-only, no privilege). Warn against `money`. |

@@ -73,7 +73,9 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 		setParts = append(setParts, fmt.Sprintf("%s = VALUES(%s)", bq(c), bq(c)))
 	}
 	if len(setParts) == 0 {
-		setParts = []string{fmt.Sprintf("%s = %s", bq(key.Columns[0]), bq(key.Columns[0]))}
+		// Key-only table: no-op update. VALUES(key) avoids the `id = id` ambiguity
+		// INSERT ... SELECT ... ODKU raises (target and SELECT both expose the name).
+		setParts = []string{fmt.Sprintf("%s = VALUES(%s)", bq(key.Columns[0]), bq(key.Columns[0]))}
 	}
 	ins := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s ON DUPLICATE KEY UPDATE %s",
 		qualify(t.Schema, t.Name), strings.Join(quoted, ", "), strings.Join(quoted, ", "), bq(stg), strings.Join(setParts, ", "))

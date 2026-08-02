@@ -221,7 +221,13 @@ func (s *Sink) DeleteRange(ctx context.Context, t engine.TableRef, lo, hi engine
 // opens the transaction and defers FK checks (SET CONSTRAINTS ALL DEFERRED) so
 // deferrable cyclic FKs commit. The returned ApplyTx uses the sink's connection,
 // so the sink must not be used for other work until the tx completes.
-func (s *Sink) BeginApply(ctx context.Context) (engine.ApplyTx, error) {
+//
+// Postgres defers ALL FK checks to commit regardless of `cyclic`, so both the
+// cyclic flag and componentTables are ignored here — the deferred-check + abort-
+// at-COMMIT behavior already gives cyclic components loud-before-corrupt safety.
+// The parameters exist for MySQL, which has no deferral (CLAUDE.md §8.1,
+// mysql-plan §0.2).
+func (s *Sink) BeginApply(ctx context.Context, _ bool, _ []engine.TableRef) (engine.ApplyTx, error) {
 	if s.conn == nil {
 		return nil, errNotConnected("sink")
 	}
