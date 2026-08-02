@@ -17,8 +17,9 @@ var errNotConnected = errors.New("mysql: not connected")
 // *sql.DB and is not safe for concurrent use. MM0 implements only the connection
 // lifecycle and version probe.
 type Sink struct {
-	cfg engine.ConnConfig
-	db  *sql.DB
+	cfg  engine.ConnConfig
+	db   *sql.DB
+	meta map[engine.TableRef]engine.Table // introspection cache (single-goroutine)
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
@@ -64,12 +65,9 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 	}
 	return introspectDB(ctx, s.db, sel)
 }
-func (s *Sink) BulkLoad(context.Context, engine.TableRef, []string, io.Reader, engine.LoadMode) (int64, error) {
-	return 0, errNotImplemented // MM4a
-}
-func (s *Sink) DeleteRange(context.Context, engine.TableRef, engine.KeyValues, engine.KeyValues) error {
-	return errNotImplemented // MM4a
-}
+
+// BulkLoad + DeleteRange are in sink_load.go (MM4a).
+
 func (s *Sink) ApplyPass(context.Context, engine.TableRef, []string, []engine.KeyValues, io.Reader) error {
 	return errNotImplemented // MM5a
 }
