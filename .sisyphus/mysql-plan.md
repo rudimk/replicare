@@ -1,8 +1,12 @@
 # replicare — MySQL Engine Implementation Plan (v3)
 
-**Status:** REVISED through one Sisyphus (execution) + **two** Momus (design) passes. v1→v2 folded all
-six Momus-pass-1 blocking §1.7 holes + both Sisyphus blocking items; **v2→v3 folds Momus pass 2**
-(verdict REVISE): the FK-cycle verification is corrected to **pre-commit with rollback** (the pass-1
+**Status:** **APPROVED to execute** after one Sisyphus (execution) + **three** Momus (design) passes.
+Pass 3 confirmed every substantive fix closed (it verified the pre-commit FK-verify mechanism against
+`apply/component.go`'s real rollback flow) and returned REVISE only for two one-line consistency nits
+(a stale "minimal/backward-compatible" phrase and an unowned mixed-charset flag) — both now fixed; the
+reviewer's standing was "fix those two lines and this is APPROVE-on-sight, do not open a fourth pass."
+v1→v2 folded all six Momus-pass-1 blocking §1.7 holes + both Sisyphus blocking items; **v2→v3 folded
+Momus pass 2** (verdict REVISE): the FK-cycle verification is corrected to **pre-commit with rollback** (the pass-1
 mechanism was specified post-commit → committed corruption), the **byte-faithful WRITE side** (LOAD
 DATA charset validation + mixed-charset handling) is now specified and tested, the impossible
 cross-charset "byte-identical" corpus is split into same-charset-identical vs cross-charset-halt-loud,
@@ -352,12 +356,15 @@ NULL-then-fill (MM4b); **`NOT NULL` cyclic → scoped `FK_CHECKS=0` + orphan-ver
 (no undecided fork; no `DEFERRABLE` middle case exists); **the MySQL pre-flight BLOCKS
 (§0.4/§0.5):** target tables with **secondary UNIQUE keys** beyond the replication key (B1),
 **non-InnoDB** source/target tables (M3), source tables with a **pre-existing conflicting trigger** on
-5.7 (M4); no-PK/unique tables **skip+warn** (§3.1); CLI `validate` for MySQL.
+5.7 (M4); no-PK/unique tables **skip+warn** (§3.1); **detect + flag tables with mixed per-column
+charsets** (the LOAD DATA single-`CHARACTER SET` limitation, §0.1/2nd-pass B2 — flagged for the
+per-charset-group load path, or blocked if that path is disabled); CLI `validate` for MySQL.
 **Acceptance (5.7→8.4):** `validate` lists components correctly; hub → giant-component warning; FK-to-
 excluded → dangling warning; nullable vs `NOT NULL` cyclic classified to a **single** strategy each;
 MySQL mismatch corpus classified (incompatible/`utf8mb4→utf8mb3` block, risky warn); **a secondary-
 unique target table is blocked**; **a MyISAM table is blocked**; **a pre-existing AFTER trigger on 5.7
-is blocked** with an actionable error; PK-less table skipped+warned; emits F2 metrics/spans.
+is blocked** with an actionable error; **a mixed per-column-charset table is flagged** (per-charset-group
+load or block); PK-less table skipped+warned; emits F2 metrics/spans.
 **Depends on:** MM1a.
 
 ### MM2 — StateStore integration (REUSED — Postgres) + operational wrinkles *(shrunk per Sisyphus B2)*
@@ -415,8 +422,9 @@ loaded per-column-charset-group. This is the *write* half of byte-faithfulness a
 **byte-faithful** (fidelity corpus: **same-charset → byte-identical**, **cross-charset narrowing →
 halt-loud** per §0.1/M1, zero-dates, **BLOB with embedded escape bytes + literal `\N`**, JSON,
 generated-excluded); **an invalid-for-`utf8mb4` byte sequence on the write side halts loud** (write-side
-validation, not silent store); **concurrent multi-chunk LOAD DATA does not collide** (unique reader
-names); **text PK under a ci collation copies with no skipped/duplicated boundary rows**; kill mid-copy
+validation, not silent store); **a mixed per-column-charset table copies byte-faithfully via the
+per-charset-group load path** (or is refused if that path is disabled); **concurrent multi-chunk LOAD
+DATA does not collide** (unique reader names); **text PK under a ci collation copies with no skipped/duplicated boundary rows**; kill mid-copy
 → **resume correct (progress persisted)**; a row changed during copy reconciles; `local_infile`-OFF path
 falls back to text-literal INSERT and stays byte-faithful; backpressure holds under a throttled target;
 emits F2 metrics/spans.
@@ -601,8 +609,10 @@ Register` (init), `config.RegisterEngine` (init), and the one hand-edit to `cmd/
    coarse perf bound in MM9. (Momus M5, Sisyphus m4.)
 
 ## Remaining open items (bounded, decided within the noted milestone)
-- The **`BeginApply` cyclic-signal vs engine self-detection** shape (MM5b) — a minimal,
-  backward-compatible choice, not a redesign.
+- The **`BeginApply` cyclic-signal shape** (MM5b) — *which* signal within the already-decided
+  (non-additive) interface change: an explicit cyclic flag vs. engine self-detection from the passed
+  component FK edges. A small choice inside a settled interface change (which does touch the Postgres
+  sink signature — §0.2/MM5b/reuse ledger); **not** a backward-compatible or minimal one.
 - Whether the **secondary-unique** pre-flight block is hard-block or loud-warn-with-opt-in-override
   (MM1b) — default hard-block; override documented.
 - **`OPTIMIZE`/partition-DROP** as the MySQL space-reclamation default vs opt-in (MM5c) — default
@@ -650,6 +660,16 @@ is **acyclic-only** — MM5b), 2m3 (`character_set_results=binary` metadata-safe
 **Momus pass 2 "verified good — do not touch":** the B3 retry-can't-close-an-intra-pass-cycle diagnosis,
 the strict-safe `sql_mode` (version-correct for 5.7→8.4), the B6 escape set, read-side byte fidelity,
 all Sisyphus decomposition, and the M3-M8/grants/TLS/DDL fixes.
-**Next:** v3 addresses every pass-2 finding; the reviewer's own bar was "fix 2B1 (pre-commit) + 2B2
-(write-side charset), tighten 2M1–2M4, and this is APPROVE-able on a third look." A brief pass-3
-confirmation is optional before MM0; the architecture and sequencing are settled.
+**Momus pass 3 (confirmation, on v3) — APPROVED after two one-line fixes:** verified pass-2 B1's
+pre-commit mechanism against `component.go`'s real control flow (Commit-returns-error → `committed`
+stays false → deferred rollback fires → no orphan ever durable/visible; the orphan-verify error is
+non-1452 so it halts immediately and never thrashes the retry loop), and confirmed B2/M1/M2/M3/M4 and
+all minors properly closed. Two residual consistency nits, now fixed in v3: (3-Major) the "Remaining
+open items" line still called the `BeginApply` change "minimal, backward-compatible," contradicting the
+rest of v3 → rescoped to "which signal shape, inside the settled non-additive interface change";
+(3-Minor) the mixed-per-column-charset flag was assigned to MM1b in prose but absent from MM1b's
+deliverables/acceptance → added to MM1b (and a per-charset-group load case to MM4a). Pass 3's standing:
+"fix those two lines and this is APPROVE-on-sight — do not open a fourth deep pass; the architecture and
+sequencing are settled."
+**Status: execution-ready. Next action = MM0** (engine skeleton + `go-sql-driver/mysql` + 5.7→8.4
+harness/CI pair + MF3/MariaDB decision doc).
