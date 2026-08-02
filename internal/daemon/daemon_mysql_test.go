@@ -32,7 +32,7 @@ func mysqlIntegration(t *testing.T) bool {
 	return true
 }
 
-func myHost() string { return envd("RC_MYSQL_SRC_HOST", "127.0.0.1") }
+func myHost() string    { return envd("RC_MYSQL_SRC_HOST", "127.0.0.1") }
 func myTgtHost() string { return envd("RC_MYSQL_DST_HOST", "127.0.0.1") }
 
 // myDial opens a database/sql handle to a harness MySQL server (default db).
