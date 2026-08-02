@@ -5,8 +5,8 @@
 selected data, then continuously replicates **inserts, updates, and deletes** to keep the targets
 converged with the source.
 
-It is written in Go and ships as a single static binary. **Postgres** is the first supported
-engine; MySQL and Redis are planned.
+It is written in Go and ships as a single static binary. **Postgres** and **MySQL** are supported
+today; Redis is planned.
 
 ## Why it's different
 
@@ -128,13 +128,13 @@ health signals.
 - [CLI reference](docs/cli.md) — every command.
 - [Operations](docs/operations.md) — tuning, health, retention, restarts.
 - [Troubleshooting](docs/troubleshooting.md) — common problems and fixes.
-- [MySQL engine](docs/mysql.md) — the MySQL→MySQL engine (in development).
+- [MySQL engine](docs/mysql.md) — the MySQL→MySQL engine.
 
 ## Status
 
-v1 targets **Postgres → Postgres** (single source → one or more targets, one-way). MySQL and Redis
-are planned; the engine core is designed to accommodate them. Multi-master and HA/leader-election
-are on the roadmap.
+v1 ships **Postgres → Postgres** and **MySQL → MySQL** (single source → one or more targets,
+one-way; a sync never crosses engines, and both can run in one daemon). **Redis** is planned; the
+engine core is designed to accommodate it. Multi-master and HA/leader-election are on the roadmap.
 
 ## License
 

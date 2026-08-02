@@ -5,12 +5,12 @@ no-binlog CDC model as Postgres (CLAUDE.md §3.1) and reuses the engine-neutral
 copy/apply/reseed/pipeline/observability layers unchanged. The design and milestone
 plan live in [`../.sisyphus/mysql-plan.md`](../.sisyphus/mysql-plan.md).
 
-> **Status: in active development.** Connectivity, session canonicalization,
-> `information_schema` introspection, and pre-flight validation are implemented
-> (`replicare validate` works against a MySQL config). Trigger capture, initial
-> copy, and streaming apply are landing milestone by milestone; a MySQL sync
-> cannot yet run end to end. This page documents the engine's shape and its two
-> operational wrinkles so they're not a surprise later.
+> **Status: shipped.** The MySQL engine runs end to end — trigger capture,
+> chunked initial copy (byte-faithful `LOAD DATA`), FK-ordered streaming apply
+> (including cyclic `NOT NULL` components), bloat control (purge/retention/reseed),
+> observability, and the full daemon lifecycle — and coexists with Postgres syncs
+> in one daemon. This page documents the engine's shape and its two operational
+> wrinkles. Try it with the [MySQL demo](../examples/demo-mysql/).
 
 ## Supported versions
 

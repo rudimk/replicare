@@ -51,6 +51,13 @@ source prevents autovacuum from reclaiming purged delta rows, so the delta table
 though replicare purges it*. replicare bounds the *logical* backlog regardless, but physical bloat
 under a pinned `xmin` is surfaced, not fixed — hunt down the idle transaction on the source.
 
+**MySQL (InnoDB) has the direct analog.** InnoDB does not shrink the tablespace on `DELETE`, and a
+long-running source transaction inflates the **history list**, blocking purge of rows it can still
+see — the same shape as the `xmin` horizon. The same headline metrics apply (the delta/track tables
+live in a dedicated `replicare` *database* on the MySQL source), retention/reseed protects the source
+identically, and the fix is the same: end the long-running source transaction. See
+[the MySQL engine page](mysql.md).
+
 ## When a target goes down
 
 A drain against an unreachable target fires **all three channels at once**: an errored trace span
@@ -107,9 +114,11 @@ automatically once you fix the cause (e.g. a missing target type/extension, or a
 ## Restarts & ownership
 
 Each sync runs under a single-active `pg_advisory_lock`; a second daemon pointed at the same sync
-stands by. State (copy progress, cursors) is checkpointed in the Postgres state store, so a
-restarted or rescheduled process resumes cleanly from the last checkpoint — an ungraceful kill
-replays at-least-once and converges idempotently.
+stands by. State (copy progress, cursors) is checkpointed in the Postgres state store — which is
+always Postgres regardless of the data engine, so MySQL syncs restart and resume through the same
+mechanism — so a restarted or rescheduled process resumes cleanly from the last checkpoint; an
+ungraceful kill replays at-least-once and converges idempotently. One daemon can run Postgres and
+MySQL syncs side by side (each sync stays single-engine).
 
 ## Least-privilege grants
 
@@ -117,3 +126,8 @@ See [`../deploy/grants-source.sql`](../deploy/grants-source.sql) and
 [`../deploy/grants-target.sql`](../deploy/grants-target.sql). Note the documented asymmetry:
 installing capture needs only the `TRIGGER` privilege, but `capture remove` (dropping the trigger)
 requires table ownership.
+
+For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql) and
+[`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql). MySQL has no such asymmetry
+— the `TRIGGER` privilege covers both `CREATE TRIGGER` and `DROP TRIGGER`, so the daemon role can
+fully uninstall capture on its own.
