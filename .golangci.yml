@@ -10,6 +10,12 @@ linters:
         - fmt.Fprint
         - fmt.Fprintf
         - fmt.Fprintln
+        # bufio.Writer errors are sticky: they surface on the checked Flush, so
+        # individual buffered writes need not be checked (mysql LOAD DATA serializer).
+        - (*bufio.Writer).WriteByte
+        - (*bufio.Writer).WriteString
+        - (*bufio.Writer).WriteRune
+        - (*bufio.Writer).Write
   exclusions:
     generated: lax
     rules:

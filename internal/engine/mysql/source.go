@@ -16,8 +16,9 @@ import (
 // implements only the connection lifecycle and the version probe; the remaining
 // methods are stubs until their milestones (see .sisyphus/mysql-plan.md).
 type Source struct {
-	cfg engine.ConnConfig
-	db  *sql.DB
+	cfg  engine.ConnConfig
+	db   *sql.DB
+	meta map[engine.TableRef]engine.Table // introspection cache (single-goroutine)
 }
 
 // Compile-time assertion that *Source satisfies the interface.
@@ -68,13 +69,8 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 
 // InstallCapture/RemoveCapture are in capture.go (MM3).
 // ReadDirtyKeys/ConfirmConsumed are in consume.go (MM3).
+// PlanChunks is in chunk.go, CopyChunk in copy.go (MM4a).
 
-func (s *Source) PlanChunks(context.Context, engine.TableRef, engine.ChunkOptions) ([]engine.Chunk, error) {
-	return nil, errNotImplemented // MM4a
-}
-func (s *Source) CopyChunk(context.Context, engine.Chunk, io.Writer) error {
-	return errNotImplemented // MM4a
-}
 func (s *Source) RereadCurrent(context.Context, engine.TableRef, []engine.KeyValues, io.Writer) error {
 	return errNotImplemented // MM5a
 }
