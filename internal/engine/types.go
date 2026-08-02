@@ -32,8 +32,13 @@ type Column struct {
 	Name      string
 	DataType  string // canonical type name as reported by the source catalog
 	Nullable  bool
-	Generated bool // GENERATED ... STORED
-	Identity  bool // GENERATED ... AS IDENTITY
+	Generated bool // GENERATED ... STORED (excluded from inserts; MySQL: VIRTUAL or STORED)
+	Identity  bool // GENERATED ... AS IDENTITY (Postgres) / AUTO_INCREMENT (MySQL)
+	// AutoUpdate marks a column whose value the engine rewrites on every UPDATE
+	// (MySQL `ON UPDATE CURRENT_TIMESTAMP`). Faithful apply must set it to the
+	// verbatim source value so it is not silently mutated to "now" (CLAUDE.md
+	// §1.7; mysql-plan §0.4). Zero (false) for engines without this behavior.
+	AutoUpdate bool
 }
 
 // Key is a primary or unique key (an ordered set of columns).
@@ -65,6 +70,11 @@ type Table struct {
 	UniqueKeys  []Key // usable unique keys (fallback identity)
 	ForeignKeys []ForeignKey
 	Partitioned bool // native declarative partition parent
+	// StorageEngine is the physical storage engine when the database distinguishes
+	// one (MySQL: "InnoDB", "MyISAM", ...). Non-transactional engines break the
+	// per-component atomic apply and source consume/track atomicity, so pre-flight
+	// blocks them (mysql-plan §0.5). Empty for engines without this concept.
+	StorageEngine string
 }
 
 // HasUsableKey reports whether the table has a PK or any unique key usable as a

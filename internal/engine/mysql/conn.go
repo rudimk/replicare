@@ -19,11 +19,33 @@ import (
 // to SET them as session variables and fail. The engine reads this in MM4a.
 const paramLocalInfile = "rc_local_infile"
 
-// dsn builds a go-sql-driver DSN from a resolved engine.ConnConfig. MM0 wires
-// connectivity + a minimal TLS mapping (disable vs. verify-full); the full
-// six-mode mapping and session-variable canonicalization (time_zone, sql_mode,
-// character_set_results=binary, ...) land in MM0.5/MM1a. Any extra Params are
-// threaded through as DSN parameters.
+// sessionVars is the session-variable canonicalization applied on EVERY
+// connection via the DSN, so the go-sql-driver applies them (as one SET) on every
+// physical connection including reconnects (mysql-plan §0.1/§0.4). These are the
+// MySQL analog of the Postgres session GUCs — they make transport byte-faithful
+// and deterministic without any special privilege. Applied to source and target
+// alike (harmless on reads); the write-relevant flags matter on the target.
+//
+//   - time_zone='+00:00'           deterministic TIMESTAMP render/parse (UTC).
+//   - character_set_results=binary the server returns RAW column bytes with no
+//     wire transcoding, so reads are byte-faithful across a latin1<->utf8mb4 gap
+//     (§0.1). Values are scanned as bytes; text is valid UTF-8 for our catalogs.
+//   - sql_mode= an EXPLICIT strict-safe mode: STRICT_TRANS_TABLES+STRICT_ALL_TABLES
+//     keep every out-of-range/oversize value a LOUD error (§1.7), while the
+//     absence of NO_ZERO_DATE/NO_ZERO_IN_DATE lets '0000-00-00' land VERBATIM
+//     (§0.4/Momus B2); NO_AUTO_VALUE_ON_ZERO makes a source 0 in an
+//     auto_increment column faithful (the OVERRIDING SYSTEM VALUE analog);
+//     NO_ENGINE_SUBSTITUTION fails loud rather than silently swapping engines.
+//     Values quoted as the driver sends `SET <name>=<value>` verbatim.
+var sessionVars = []struct{ name, value string }{
+	{"time_zone", "'+00:00'"},
+	{"character_set_results", "binary"},
+	{"sql_mode", "'STRICT_TRANS_TABLES,STRICT_ALL_TABLES,NO_AUTO_VALUE_ON_ZERO,NO_ENGINE_SUBSTITUTION'"},
+}
+
+// dsn builds a go-sql-driver DSN from a resolved engine.ConnConfig: the full
+// six-mode TLS mapping (tls.go), the session-variable canonicalization above, and
+// any user-supplied Params (internal rc_ hints excluded).
 func dsn(cc engine.ConnConfig) (string, error) {
 	cfg := mysql.NewConfig()
 	cfg.Net = "tcp"
@@ -40,6 +62,10 @@ func dsn(cc engine.ConnConfig) (string, error) {
 		return "", err
 	}
 	cfg.TLSConfig = tlsVal
+	// Session canonicalization first; user params may not override it.
+	for _, sv := range sessionVars {
+		cfg.Params[sv.name] = sv.value
+	}
 	for k, v := range cc.Params {
 		// Internal rc_ hints (e.g. local_infile) are consumed by the engine, not
 		// the driver — never leak them into the DSN.
@@ -47,7 +73,7 @@ func dsn(cc engine.ConnConfig) (string, error) {
 			continue
 		}
 		if _, reserved := cfg.Params[k]; reserved {
-			return "", fmt.Errorf("mysql: connection param %q is reserved", k)
+			return "", fmt.Errorf("mysql: connection param %q is reserved (session canonicalization)", k)
 		}
 		cfg.Params[k] = v
 	}

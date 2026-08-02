@@ -58,8 +58,12 @@ func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 
 // --- stubs until their milestones ---
 
-func (s *Source) Introspect(context.Context, engine.Selection) (*engine.Schema, error) {
-	return nil, errNotImplemented // MM1a
+// Introspect returns the schema for the selected tables (MM1a).
+func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	return introspectDB(ctx, s.db, sel)
 }
 func (s *Source) InstallCapture(context.Context, []engine.TableRef) error { return errNotImplemented } // MM3
 func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error  { return errNotImplemented } // MM3

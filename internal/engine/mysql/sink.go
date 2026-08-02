@@ -57,8 +57,12 @@ func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 
 // --- stubs until their milestones ---
 
-func (s *Sink) Introspect(context.Context, engine.Selection) (*engine.Schema, error) {
-	return nil, errNotImplemented // MM1a
+// Introspect returns the (pre-existing) target schema for pre-flight (MM1a).
+func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	return introspectDB(ctx, s.db, sel)
 }
 func (s *Sink) BulkLoad(context.Context, engine.TableRef, []string, io.Reader, engine.LoadMode) (int64, error) {
 	return 0, errNotImplemented // MM4a
