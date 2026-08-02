@@ -300,10 +300,23 @@ touching target constraints —
    `SET CONSTRAINTS … DEFERRED` (this *defers checking* within the txn; it does **not** alter the
    constraint and needs no special privilege).
 3. **`NOT NULL` + non-deferrable** cyclic FK → genuinely unloadable row-by-row without disabling
-   constraints (which we won't do). **Pre-flight detects this and fails loud**, instructing the
-   user to make the FK `DEFERRABLE` or break the cycle. We never insert NULL into a `NOT NULL`
-   column and never corrupt.
+   constraints (which we won't do). **On Postgres, pre-flight detects this and fails loud**,
+   instructing the user to make the FK `DEFERRABLE` or break the cycle. We never insert NULL into a
+   `NOT NULL` column and never corrupt.
 During *streaming*, the §3.3 retry fallback remains the cyclic-dependency mechanism.
+
+**MySQL exception (engine-specific, decided in the MySQL plan MM4b; overrides case 3 above for
+MySQL only).** InnoDB has **no `DEFERRABLE` constraints**, so case 2 does not exist and case 3's
+"defer or break the cycle" instruction has no `DEFERRABLE` escape hatch — refusing all `NOT NULL`
+cyclic schemas would bar common MySQL designs. MySQL therefore loads a `NOT NULL` cyclic component
+with **`SET FOREIGN_KEY_CHECKS=0` scoped to the load transaction, paired with a MANDATORY PRE-COMMIT
+orphan-verification**: after the load, re-enable checks and run an orphan anti-join over the
+component's FK edges *inside the still-open transaction*; **any dangling reference rolls the whole
+load back with a loud error, so nothing referentially broken is ever committed.** `FOREIGN_KEY_CHECKS=0`
+never re-checks on its own (strictly weaker than Postgres deferral, which aborts at COMMIT), so the
+pre-commit verification is what restores the loud-before-corrupt promise (§1.7) and is **not optional**.
+The `FOREIGN_KEY_CHECKS=0` window is session-local, does not alter the constraint, and is discarded
+with the pinned connection. Postgres behavior (case 3, fail loud) is unchanged.
 
 **Documented defaults (not separately decided):**
 - **Per-chunk progress in the Postgres StateStore:** a completed-range watermark plus a sparse set
@@ -620,7 +633,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
-| Cyclic-FK initial copy | By case (never touch constraints): **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn**; **`NOT NULL` + non-deferrable → pre-flight detects + fails loud** (user defers or breaks the cycle). Streaming uses §3.3 retry. See §4.1. |
+| Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming uses §3.3 retry. See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |
 | Type fidelity | **Faithful transport, never transform** (verbatim text, both copy + apply). **No transform capability exists, ever.** See §4.2. |
 | Session GUCs | Pin `DateStyle=ISO,YMD`, `TimeZone=UTC`, `extra_float_digits=3`, `IntervalStyle=postgres`, `bytea_output=hex`, `client_encoding=UTF8` on all connections (formatting-only, no privilege). Warn against `money`. |
@@ -657,7 +670,8 @@ invasive.
   add behind the interface if/when a use case needs them.
 - ~~Initial copy of cyclic / self-referential FK subgroups~~ — **RESOLVED** (§4.1, §14):
   nullable → NULL-then-fill; DEFERRABLE → `SET CONSTRAINTS DEFERRED`; NOT NULL + non-deferrable →
-  pre-flight fails loud.
+  Postgres: pre-flight fails loud; **MySQL: scoped `FOREIGN_KEY_CHECKS=0` + pre-commit
+  orphan-verification → loud halt + rollback** (§4.1 "MySQL exception", decided in the MySQL plan MM4b).
 - **Binary-COPY compatibility gate** — how to detect when source/target versions + types are
   close enough to safely enable binary format instead of text.
 - HA / active-standby leader election (`pg_advisory_lock` + cursor fencing) — design when HA

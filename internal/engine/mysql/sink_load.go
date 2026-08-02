@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"strings"
@@ -32,15 +33,27 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 	if len(cols) == 0 {
 		return 0, fmt.Errorf("mysql: bulk load: no columns for %s", t)
 	}
-	if mode == engine.LoadMerge {
-		return 0, errNotImplemented // merge path: MM4b
-	}
-
 	charset, err := s.loadCharset(ctx, t)
 	if err != nil {
 		return 0, err
 	}
+	if mode == engine.LoadMerge {
+		return s.mergeLoad(ctx, t, cols, r, charset)
+	}
+	return runLoad(ctx, s.db, qualify(t.Schema, t.Name), cols, r, charset)
+}
 
+// execQuerier is the subset of database/sql satisfied by *sql.DB, *sql.Tx, and
+// *sql.Conn, so the load and verify paths run against a pool, a transaction
+// (merge / cyclic FK_CHECKS), or a pinned connection alike.
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// runLoad streams r into the `into` table (real or TEMP) via a uniquely-named,
+// deregistered-on-return reader handler and returns rows loaded.
+func runLoad(ctx context.Context, ex execQuerier, into string, cols []string, r io.Reader, charset string) (int64, error) {
 	name := fmt.Sprintf("rc_load_%d", loadCounter.Add(1))
 	driver.RegisterReaderHandler(name, func() io.Reader { return r })
 	defer driver.DeregisterReaderHandler(name)
@@ -50,11 +63,10 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 		colList[i] = bq(c)
 	}
 	q := fmt.Sprintf("LOAD DATA LOCAL INFILE 'Reader::%s' INTO TABLE %s CHARACTER SET %s %s (%s)",
-		name, qualify(t.Schema, t.Name), charset, loadDataClause, strings.Join(colList, ", "))
-
-	res, err := s.db.ExecContext(ctx, q)
+		name, into, charset, loadDataClause, strings.Join(colList, ", "))
+	res, err := ex.ExecContext(ctx, q)
 	if err != nil {
-		return 0, fmt.Errorf("mysql: bulk load into %s: %w", t, err)
+		return 0, fmt.Errorf("mysql: load into %s: %w", into, err)
 	}
 	n, _ := res.RowsAffected()
 	return n, nil
