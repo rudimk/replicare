@@ -128,6 +128,7 @@ health signals.
 - [CLI reference](docs/cli.md) — every command.
 - [Operations](docs/operations.md) — tuning, health, retention, restarts.
 - [Troubleshooting](docs/troubleshooting.md) — common problems and fixes.
+- [MySQL engine](docs/mysql.md) — the MySQL→MySQL engine (in development).
 
 ## Status
 

@@ -5,6 +5,7 @@
 - **[CLI reference](cli.md)** — every command and flag, with examples.
 - **[Operations](operations.md)** — tuning, health signals, retention/reseed, restarts, ownership.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
+- **[MySQL engine](mysql.md)** — the MySQL→MySQL engine (in development): requirements, the two operational wrinkles, and config.
 
 Deployment artifacts live in [`../deploy/`](../deploy/): a sample systemd unit and
 the least-privilege grant SQL. A runnable end-to-end demo is in

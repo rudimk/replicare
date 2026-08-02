@@ -378,7 +378,12 @@ exactly-once-per-batch bonus** (that needs the StateStore to be the target DB; a
 **Acceptance (assertable only):** a MySQL **sync definition** round-trips through the Postgres
 StateStore; a second daemon **cannot acquire** a held MySQL sync (`pg_advisory_lock`). *(The
 copy-progress/cursor persist-and-resume assertions move to MM4a/MM5a, where the producing code lands —
-Sisyphus B2. "Wrinkles documented" is a deliverable, not a test gate — Momus m5.)*
+Sisyphus B2. "Wrinkles documented" is a deliverable, not a test gate — Momus m5.)* **Live-run note:**
+the StateStore is engine-neutral and already unit/integration-tested (a MySQL SyncDef is structurally
+identical to any other); the sync-def round-trip + advisory-lock exclusion for a MySQL sync **against a
+live Postgres state store co-located with a live MySQL** is exercised under the **MM7 dual-harness**
+(the only place both engines are genuinely present). MM2 delivers the **documentation** of the two
+wrinkles (`docs/mysql.md`).
 **Depends on:** MM0.5 (config shape). *(Parallel with MM3; **not** a dependency of MM3 — Sisyphus m2.)*
 
 ### MM3 — Trigger-based CDC capture (MySQL source machinery, idempotent, + versioning)
