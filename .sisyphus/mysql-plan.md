@@ -1,10 +1,15 @@
-# replicare — MySQL Engine Implementation Plan (v2)
+# replicare — MySQL Engine Implementation Plan (v3)
 
-**Status:** REVISED through one Sisyphus (execution) + one Momus (design) pass. v1→v2 folds all six
-Momus blocking §1.7-faithfulness holes and both Sisyphus blocking decomposition/resequencing items,
-plus the majors/minors from each. The three v1 "open questions" that were load-bearing are now
-**decided** (byte-faithful transport, strict-safe `sql_mode`, and the FK-cycle mechanism). See the
-**Review disposition** at the end for the item-by-item mapping.
+**Status:** REVISED through one Sisyphus (execution) + **two** Momus (design) passes. v1→v2 folded all
+six Momus-pass-1 blocking §1.7 holes + both Sisyphus blocking items; **v2→v3 folds Momus pass 2**
+(verdict REVISE): the FK-cycle verification is corrected to **pre-commit with rollback** (the pass-1
+mechanism was specified post-commit → committed corruption), the **byte-faithful WRITE side** (LOAD
+DATA charset validation + mixed-charset handling) is now specified and tested, the impossible
+cross-charset "byte-identical" corpus is split into same-charset-identical vs cross-charset-halt-loud,
+the FK-edge/cyclic-signal **interface plumbing** is scoped as a real (bounded) change, and the
+infeasible secondary-unique runtime backstop is dropped in favor of the pre-flight block. The three
+load-bearing decisions (byte-faithful transport, strict-safe `sql_mode`, FK-cycle mechanism) are
+**decided**. See the **Review disposition** for the item-by-item mapping across all three passes.
 **Scope:** A second engine — **MySQL source → MySQL target** — implementing the *existing*
 `engine.Source`/`engine.Sink`/`engine.ApplyTx` interfaces (`internal/engine/engine.go`). The
 engine-neutral pipeline (`internal/copy`, `apply`, `reseed`, `pipeline`, the `state` interface,
@@ -34,13 +39,30 @@ now carries its **decided** mitigation.
 Postgres streams `COPY … TO/FROM STDIN` through `io.Pipe`. MySQL's streaming bulk path is
 **`LOAD DATA LOCAL INFILE`** fed from a reader (go-sql-driver's `RegisterReaderHandler`). This keeps
 the `io.Reader`/`io.Writer` contract but forces three decisions, now made:
-- **DECISION (charset, was Open Q2): byte-faithful transport.** Read every column with
+- **DECISION (charset READ side, was Open Q2): byte-faithful reads.** Read every column with
   **`character_set_results = binary`** so the server ships **raw column bytes with no wire
-  transcoding**; the source read side emits those bytes; the target validates them through its own
-  input functions under the column's declared charset. This is the *only* transport that honors §1.7
-  across a `latin1 ↔ utf8mb4` version gap (a `SET NAMES utf8mb4` text path would silently transcode
-  and can lose/rewrite bytes). It also resolves the v1 self-contradiction ("can't lock a wire format
-  while the transcoding model is open"): the wire format is a **byte stream**, so it *can* be locked.
+  transcoding**, re-emitted via the driver's `RawBytes` (no Go-type round-trip). This is the *only*
+  read transport that honors §1.7 across a `latin1 ↔ utf8mb4` version gap (a `SET NAMES utf8mb4` text
+  path would silently transcode). The wire format is a **byte stream**, so it *can* be locked
+  (resolving the v1 "can't lock a format while transcoding is open" contradiction).
+- **DECISION (charset WRITE side — the other half, Momus 2nd-pass B2):** the read side is only half
+  the promise; `LOAD DATA` on the target must **validate** those bytes, not silently store garbage.
+  Two facts force the design: (i) `LOAD DATA` has **one `CHARACTER SET` clause per statement**, but a
+  MySQL table may carry **per-column charsets** — a single statement cannot byte-faithfully land a
+  mixed-charset row; (ii) `CHARACTER SET binary` stores raw bytes **without per-column charset
+  validation**, which would silently admit invalid-for-column bytes (a §1.7 corruption). Therefore:
+  **load with `CHARACTER SET` set to the table's uniform column charset when the table is
+  single-charset**, so the target's own input functions validate each value and **halt loud** on an
+  invalid sequence; and **pre-flight loud-warns/blocks tables with mixed per-column charsets** (MM1b),
+  handling them (if enabled) via **per-column-charset-group loads**. This is specified + tested on the
+  **write** side in MM4a — the read-side corpus alone does not prove faithfulness.
+- **Cross-charset transfers are loud-fail, not byte-identical (Momus 2nd-pass M1):** a `latin1` byte
+  `0xE9` has **no** byte-identical representation in a `utf8mb4` column, and a 4-byte `utf8mb4`
+  sequence has none in `utf8mb3`. Under byte-faithful transport these are **halt-loud** cases (the
+  target's input function rejects them), *never* silent transcodes. The fidelity corpus therefore
+  splits: **same-charset pairs assert byte-identical round-trip; cross-charset narrowing pairs
+  (latin1→utf8mb4 non-ASCII, utf8mb4→utf8mb3 4-byte) assert halt-loud.** (Claiming "byte-identical
+  round-trip across a charset change" is logically impossible and would force an illegal transcode.)
 - **DECISION (escaping, Momus B6): full, fuzz-tested byte-level escape set.** `LOAD DATA … FIELDS
   ESCAPED BY '\\'` interprets more than `\t`/`\n`/`\\`; binary/BLOB bytes include `\0`, `\r` (`\Z`),
   and the **two-byte `\`+`N` that LOAD DATA reads as NULL**. The serializer escapes the complete set
@@ -73,26 +95,45 @@ only ever resolves *cross-pass* deps and acyclic transient violations. Decisions
     Postgres' 23503 in `apply_tx.go`).
   - **Cyclic / self-ref `NOT NULL` components (initial copy AND streaming):** the mechanism is
     **`FOREIGN_KEY_CHECKS=0` scoped to that component's load/apply transaction**, **paired with a
-    mandatory post-transaction referential-integrity verification** (re-enable checks and run an
-    orphan anti-join over the component's FK edges) that converts any residual dangling reference into
-    a **loud halt** (§1.7). `FK_CHECKS=0` alone is *strictly weaker* than Postgres deferral (it never
-    re-checks), so the verification is what restores the loud-failure promise — it is **not optional**.
+    mandatory PRE-COMMIT referential-integrity verification** that converts any residual dangling
+    reference into a **loud halt + rollback** (§1.7). **The verification MUST run inside the open
+    transaction, before `COMMIT` (Momus 2nd-pass B1 — this is the load-bearing correction):** MySQL's
+    `ApplyTx.Commit()` first `SET FOREIGN_KEY_CHECKS=1`, then runs the orphan anti-join over the
+    component's FK edges *within the still-open transaction* (it sees its own uncommitted writes); on
+    any orphan it returns a loud error and **does not COMMIT** — the existing `defer` in the neutral
+    `apply.DrainComponent` rolls the transaction back, so **nothing referentially broken is ever
+    visible**, exactly matching Postgres' abort-at-COMMIT deferral. A **post-commit** verification is
+    *rejected*: it would make the orphan durable and visible before the halt fires (committed
+    corruption, and a crash between COMMIT and verify would skip the only loud step). `FK_CHECKS=0`
+    alone is strictly weaker than Postgres deferral (never re-checks); the **pre-commit** verification
+    is what restores the loud-*before*-corrupt promise — it is **not optional** and **not post-hoc**.
+  - **Verification scope (Momus 2nd-pass m1):** the anti-join covers the **whole component's FK
+    edges over all component tables**, not just this pass's dirty/upserted rows — because with
+    `FK_CHECKS=0` a `DeleteAbsent` can strand a **non-dirty** child that references a just-deleted
+    parent. A dirty-row-scoped check would miss that. (Cost is bounded by component size per pass;
+    acceptable, and only paid for cyclic components.)
   - **Cyclic nullable components:** **NULL-then-fill two-pass** (insert with FK cols NULL, then UPDATE)
     — no constraint touching needed; preferred where applicable.
-- **Reuse caveat (corrects the v1 ledger; Momus B3):** the neutral apply *orchestration* is reused,
-  but MySQL's `ApplyTx` (`BeginApply`) issues `SET FOREIGN_KEY_CHECKS=0` (not `SET CONSTRAINTS ALL
-  DEFERRED`) **for cyclic components only** and runs the post-commit verification. Whether the neutral
-  layer must pass a "component is cyclic" signal into `BeginApply` (a minimal, backward-compatible
-  interface addition) or MySQL self-detects is **decided in MM5b**; either way it is a bounded engine
-  concern, not a pipeline rewrite. The `component.go:14-16` doc-comment that bakes in Postgres deferral
-  is genericized (m1).
+- **Reuse caveat + the plumbing it actually needs (corrects the v1 ledger; Momus B3 + 2nd-pass M2):**
+  the neutral apply *orchestration* is reused, but MySQL's `ApplyTx` issues `SET FOREIGN_KEY_CHECKS=0`
+  (not `SET CONSTRAINTS ALL DEFERRED`) **for cyclic components only** and runs the **pre-commit**
+  verification. This requires threading data the apply layer does **not** carry today (verified: it
+  receives only `comp.Order []engine.TableRef` via `stream.go`→`component.go`; `BeginApply(ctx)` has
+  no component identity, and the `engine.ForeignKey` edges live on `engine.Table.ForeignKeys` at
+  introspection but are **never passed to the sink**). So MM5b must specify a **real, if bounded,
+  interface change**, not a "minimal tweak": (a) a **cyclic flag** and (b) the **component FK-edge
+  list** must reach `BeginApply`/`ApplyTx` (so MySQL can decide `FK_CHECKS=0` at Begin and build the
+  orphan anti-join). This **also changes the Postgres sink's `BeginApply` signature** (it ignores the
+  new args), so it is not purely additive. Feasible and small, but **decided and implemented in MM5b
+  before the FK_CHECKS acceptance gate**, not treated as an afterthought. The `component.go` doc-
+  comment baking in Postgres deferral is genericized (m1).
 - **CHANGE DISCIPLINE (Momus B5 — mandatory, blocking):** this **overturns a RESOLVED CLAUDE.md
   decision** (§4.1/§14 "never by touching target constraints"; §15 marks `NOT NULL` non-deferrable
   cyclic **resolved** as "pre-flight fails loud"). The plan **commits** to these exact edits, made when
   **MM4b/MM5b land** (not after): §4.1 and §14 gain a **MySQL exception** — cyclic `NOT NULL`
-  components use scoped `FOREIGN_KEY_CHECKS=0` **+ post-load orphan verification → loud halt** (never a
-  silent dangling ref); §15 is **re-opened/annotated for the MySQL engine**. Postgres behavior is
-  unchanged.
+  components use scoped `FOREIGN_KEY_CHECKS=0` **+ pre-commit orphan verification → loud halt +
+  rollback** (never a committed dangling ref); §15 is **re-opened/annotated for the MySQL engine**.
+  Postgres behavior is unchanged.
 
 ### 0.3 No `ctid` / stable physical row locator → keyset-only, with two MySQL-specific correctness traps
 InnoDB tables are **clustered on the primary key**, so keyset PK-range chunking already scans in
@@ -122,15 +163,20 @@ keyset over MySQL introduces two traps the Postgres path never had:
   acceptance proves BOTH: (a) a zero-date round-trips verbatim, and (b) an oversize value on a
   *different* column still halts loud under the same pinned mode. If a target version cannot both
   permit zero-dates and keep strict-for-everything-else, **fail loud** — never drop STRICT.
-- **DECISION (`ON DUPLICATE KEY UPDATE` on secondary uniques, Momus B1): pre-flight block/loud-warn.**
+- **DECISION (`ON DUPLICATE KEY UPDATE` on secondary uniques, Momus B1 + 2nd-pass M3): the pre-flight
+  block IS the protection — no viable runtime backstop exists.**
   Postgres upserts `ON CONFLICT (pk)` — a secondary-unique collision raises `unique_violation` and
   halts loud. MySQL `INSERT … ON DUPLICATE KEY UPDATE` has **no conflict target**: it fires on the PK
   *or any secondary UNIQUE*, so upserting `(id=5, email='a@x')` onto an existing `(id=7, email='a@x')`
-  **silently rewrites row 7 to id=5** — §1.7 corruption of a *different* row. **MM1b pre-flight detects
-  target tables carrying secondary UNIQUE keys beyond the replication key and BLOCKS (or loud-warns
-  with a documented, opt-in override)**, because the ON-DUPLICATE-KEY apply cannot preserve halt-loud
-  semantics for them. MM5a acceptance: a secondary-unique collision **halts loud**, never wrong-row
-  update. (Never `REPLACE INTO` — it delete+reinserts, firing cascades/auto_increment.)
+  **silently rewrites row 7 to id=5** — §1.7 corruption of a *different* row. Critically, **ODKU does
+  not error on that collision**, and we cannot use plain `INSERT` + catch errno 1062 because
+  *legitimate* PK re-upserts (the normal streaming case) also raise 1062 — so **there is no clean
+  runtime "halt loud on secondary-unique" backstop.** Protection is therefore entirely **MM1b
+  pre-flight: BLOCK any target table with a secondary UNIQUE key beyond the replication key**
+  (documented opt-in override). MM1b acceptance tests the block; **MM5a does NOT claim a runtime
+  backstop it cannot implement.** Residual risk (a secondary unique added by post-pre-flight DDL
+  drift) falls under the §7 "schema drift → re-sync" stance. (Never `REPLACE INTO` — it
+  delete+reinserts, firing cascades/auto_increment.)
 - **DECISION (`ON UPDATE CURRENT_TIMESTAMP`, Momus M2): override to verbatim.** An old source with
   `explicit_defaults_for_timestamp=OFF` gives TIMESTAMP columns implicit `ON UPDATE CURRENT_TIMESTAMP`;
   on the **target**, any such column is **silently rewritten to "now"** when our upsert touches the
@@ -232,9 +278,11 @@ inserts/updates/deletes/PK-changes to convergence — crash-safe, observable acr
 - **MySQL byte-fidelity corpus (from MM1b):** int/decimal/float/double/bit/char/varchar/text/**blob/
   binary (with embedded `\t \n \\ \0 0x1A` and literal `\N` bytes)**/enum/set/date/**datetime/
   timestamp (tz + `ON UPDATE`)**/**JSON**/generated(virtual+stored)/**`0000-00-00` zero-dates**/
-  **charset mixes (latin1↔utf8mb4, utf8mb4→utf8mb3 truncation)**/auto_increment — round-trip
-  byte-identical across the 5.7→8.4 gap. Zero-dates, charset transcoding, BLOB escaping, and
-  ON-UPDATE-timestamp get dedicated cases.
+  auto_increment. **Same-charset pairs assert byte-identical round-trip across the 5.7→8.4 gap;
+  cross-charset narrowing pairs (latin1→utf8mb4 non-ASCII, utf8mb4→utf8mb3 4-byte) assert HALT-LOUD,
+  never byte-identity** (Momus 2nd-pass M1 — a byte-identical cross-charset round-trip is impossible
+  and would force an illegal transcode). Zero-dates, the write-side charset validation, BLOB escaping,
+  and ON-UPDATE-timestamp get dedicated cases.
 - **Named property/race tests (from MM5a):** commit-order hazard, delete-by-id read-and-clear race,
   crash-between-apply-and-track, coalescing — plus **secondary-unique-halts-loud** and
   **cyclic-orphan-verification-halts-loud**.
@@ -283,12 +331,15 @@ generated/auto_increment/**`on update CURRENT_TIMESTAMP`**, KEY_COLUMN_USAGE/TAB
 STATISTICS for PK/unique/**secondary uniques**, REFERENTIAL_CONSTRAINTS for FK edges incl.
 **cross-database**, `TABLES.ENGINE` for **storage engine**, and existing-**trigger** enumeration),
 version-tolerant behind the MM0 probe; **`db.table` selection** across databases; supplies the FK edge
-list to the neutral component computation.
+list to the neutral component computation. **Note (Momus 2nd-pass m3):** confirm
+`character_set_results=binary` does not corrupt result **metadata** the driver relies on (read by
+ordinal via `RawBytes`) — test it here, don't assume.
 **Acceptance:** `Introspect` returns MySQL tables/columns/keys/FK-edges (incl. cross-DB) correctly on
 both 5.7 and 8.4; `EXTRA`-derived generated/auto_increment/on-update flags parsed; storage engine and
 existing triggers surfaced; `verify-full` + `disable` connect; env-resolved secret connects; a
 zero-date value **round-trips verbatim** under the pinned modes while an oversize value on another
-column **halts loud**; emits F2 spans.
+column **halts loud**; a `RawBytes` read under `character_set_results=binary` returns column values
+byte-intact with correct metadata; emits F2 spans.
 **Depends on:** MM0.5.
 
 ### MM1b — Pre-flight classification & the MySQL-specific blocks
@@ -356,22 +407,30 @@ empty-target **direct LOAD DATA + DELETE-range resume** (`DeleteRange` also `COL
 exclude generated (virtual+stored) cols; **per-chunk progress → StateStore** (this is where the
 "copy-progress persist/resume across restart" acceptance moved from MM2); backpressure (bounded queues
 + pool sizing tied to MF1 caps); **capture-first then copy** (§4).
+**Write-side charset (Momus 2nd-pass B2):** load with the `CHARACTER SET` clause set to a
+single-charset table's uniform column charset so the target **validates + halts loud** on an invalid
+byte sequence; **mixed per-column-charset tables are pre-flight-flagged (MM1b)** and, if enabled,
+loaded per-column-charset-group. This is the *write* half of byte-faithfulness and is tested here.
 **Acceptance (5.7→8.4):** copies acyclic multi-table FK schemas (composite & `BINARY`/text PKs) 5.7→8.4
-**byte-faithful** (full fidelity corpus incl. zero-dates, charset mixes, **BLOB with embedded escape
-bytes + literal `\N`**, JSON, generated-excluded); **concurrent multi-chunk LOAD DATA does not collide**
-(unique reader names); **text PK under a ci collation copies with no skipped/duplicated boundary rows**;
-kill mid-copy → **resume correct (progress persisted)**; a row changed during copy reconciles;
-`local_infile`-OFF path falls back to text-literal INSERT and stays byte-faithful; backpressure holds
-under a throttled target; emits F2 metrics/spans.
+**byte-faithful** (fidelity corpus: **same-charset → byte-identical**, **cross-charset narrowing →
+halt-loud** per §0.1/M1, zero-dates, **BLOB with embedded escape bytes + literal `\N`**, JSON,
+generated-excluded); **an invalid-for-`utf8mb4` byte sequence on the write side halts loud** (write-side
+validation, not silent store); **concurrent multi-chunk LOAD DATA does not collide** (unique reader
+names); **text PK under a ci collation copies with no skipped/duplicated boundary rows**; kill mid-copy
+→ **resume correct (progress persisted)**; a row changed during copy reconciles; `local_infile`-OFF path
+falls back to text-literal INSERT and stays byte-faithful; backpressure holds under a throttled target;
+emits F2 metrics/spans.
 **Depends on:** MM3, MM1b (classification). *(States the MM1 dep — Sisyphus m3.)*
 
 ### MM4b — Cyclic-FK initial load + merge path
 **Goal:** Correct initial load of cyclic/self-ref components without corrupting data or constraints.
 **Deliverables:** **nullable cyclic → NULL-then-fill two-pass**; **`NOT NULL` cyclic → scoped
-`FOREIGN_KEY_CHECKS=0` for the component load + mandatory post-load orphan-verification → loud halt**
-(§0.2); **TEMP staging + `INSERT … SELECT … ON DUPLICATE KEY UPDATE`** merge path for non-empty targets
-(upsert on the replication key; secondary-unique tables already blocked at MM1b); **the committed
-CLAUDE.md §4.1/§14/§15 edits land with this milestone** (change discipline — §0.2/B5).
+`FOREIGN_KEY_CHECKS=0` for the component load + mandatory PRE-COMMIT orphan-verification → loud halt +
+rollback** (§0.2; the verification runs inside the load transaction before COMMIT, so a bad load is
+never committed — initial copy is additionally recoverable by DELETE-range + re-copy, but the rule is
+uniform with streaming); **TEMP staging + `INSERT … SELECT … ON DUPLICATE KEY UPDATE`** merge path for
+non-empty targets (upsert on the replication key; secondary-unique tables already blocked at MM1b);
+**the committed CLAUDE.md §4.1/§14/§15 edits land with this milestone** (change discipline — §0.2/B5).
 **Acceptance (5.7→8.4):** nullable self-ref FK copies via NULL-then-fill; a `NOT NULL` mutual cycle
 copies via scoped `FK_CHECKS=0` **and the orphan-verification passes**; a deliberately-injected orphan
 under `FK_CHECKS=0` is **caught by verification and halts loud** (no silent dangling ref); merge path
@@ -396,33 +455,45 @@ apply→track→purge, at-least-once, no 2PC (§3.3); **cutover** copy→streami
   deleted → V2 survives and converges.
 - **Crash between apply and track-write:** replays without duplication (idempotent upsert).
 - **Coalescing:** N updates to one PK → one re-read, final-value convergence.
-- **Secondary-unique halts loud (§0.4/B1):** an upsert that would collide on a secondary unique halts
-  loud, never wrong-row update. *(Guards the pre-flight block with a runtime backstop.)*
 - **`ON UPDATE` timestamp fidelity (§0.4/M2):** a row with an `ON UPDATE CURRENT_TIMESTAMP` column
   applies the **source** value, not "now".
 - End-to-end insert/update/delete/PK-change converge; **cursor persists + resumes across restart**;
   emits F2 metrics/spans.
-**Depends on:** MM4a (transport) + MM4b (so cyclic components exist to stream, though MM5a itself is
-single-component acyclic; cyclic streaming is MM5b).
+*(Secondary-unique protection is the MM1b pre-flight block, not an MM5a runtime backstop — there is no
+viable ODKU-compatible runtime check, per §0.4 / Momus 2nd-pass M3.)*
+**Depends on:** MM4a (transport + copy). *(MM3 transitive. NOT MM4b — MM5a is single-component acyclic
+streaming and does not need the cyclic initial-copy milestone; cyclic streaming is MM5b — Momus 2nd-pass
+M4.)*
 
 ### MM5b — FK-ordered apply + retry fallback + cyclic streaming (no deferral)
 **Goal:** Multi-table referential correctness within a component **without deferrable constraints**.
 **Deliverables:** **per-component apply** — upserts parent→child, deletes child→parent (§3.3, §8.1) —
 in one transaction with **FK checks ON** for **acyclic** components; **transient-FK mapping: errno 1452
 / SQLSTATE 23000 → `engine.TransientConstraintError`** so the neutral retry fallback handles cross-pass
-deps; **cyclic/self-ref components: `FOREIGN_KEY_CHECKS=0` for the component pass + post-commit
-orphan-verification → loud halt** (§0.2/B3 — this is the **mandated** mechanism, not opt-in, because
-retry provably can't close an intra-pass cycle); **decide + implement the minimal `BeginApply`
-cyclic-signal** (or engine self-detection) per §0.2; **retry termination policy:** bounded exponential
+deps — **acyclic path only** (a cyclic component is routed to `FK_CHECKS=0` and never raises 1452
+mid-pass, so an intra-pass cyclic 1452 must NOT be wrapped as transient — Momus 2nd-pass m2);
+**cyclic/self-ref components: `FOREIGN_KEY_CHECKS=0` for the component pass + PRE-COMMIT orphan-
+verification (SET FK_CHECKS=1, orphan anti-join over the component's FK edges within the open txn,
+loud error + rollback on any orphan, before COMMIT) → nothing broken ever visible** (§0.2/B3 + 2nd-pass
+B1 — mandated, not opt-in, because retry provably can't close an intra-pass cycle; **post-commit
+verification is rejected**); the **anti-join covers all component tables, not just the pass's dirty
+rows** (a `DeleteAbsent` under `FK_CHECKS=0` can strand a non-dirty child — Momus 2nd-pass m1);
+**implement the interface plumbing** to carry the **cyclic flag + component FK-edge list** into
+`BeginApply`/`ApplyTx` (the apply layer receives only `comp.Order` today, and FK edges live on
+`engine.Table.ForeignKeys` but are never passed to the sink — this is a **real, bounded interface
+change that also touches the Postgres sink's `BeginApply` signature**, decided/implemented here BEFORE
+the FK_CHECKS acceptance gate — Momus 2nd-pass M2); **retry termination policy:** bounded exponential
 backoff, then **halt loud + observable** (§4.2), never infinite thrash; **genericize the
 `component.go` PG-deferral doc-comment** (m1); **the CLAUDE.md exception (if not already in MM4b) is
 confirmed present.**
 **Acceptance (5.7→8.4):** acyclic multi-table component stays referentially consistent with checks ON;
 a **cross-pass** dependency converges via retry; a **`NOT NULL` mutual cycle converges via
-`FK_CHECKS=0` + verification** (the case retry alone **cannot** close — asserted directly); an injected
-un-satisfiable orphan **halts loud via verification**; a deliberately unsatisfiable non-cyclic
-dependency **exhausts bounded retry and halts loud** (no thrash/skip); per-component transaction bounded
-by churn/pass; emits F2 metrics/spans.
+`FK_CHECKS=0` + pre-commit verification** (the case retry alone **cannot** close — asserted directly);
+an injected orphan (missing parent AND wrong-parent) is **caught pre-commit, rolled back, halts loud**
+(never committed/visible); a `DeleteAbsent` that would strand a **non-dirty** child is **caught by the
+full-component anti-join**; a deliberately unsatisfiable non-cyclic dependency **exhausts bounded retry
+and halts loud** (no thrash/skip); per-component transaction bounded by churn/pass; emits F2
+metrics/spans.
 **Depends on:** MM5a.
 
 ### MM5c — Bloat control: purge + bounded retention + forced reseed (MySQL)
@@ -500,20 +571,25 @@ end-to-end: MM5a.** Feature-complete: **MM8.** Shippable: **MM9 gate.**
 Reused **unchanged**: `internal/copy`, `internal/reseed`, `internal/pipeline`, the `internal/state`
 interface, `internal/observability`, and the neutral half of `internal/config`; the daemon dispatches
 purely through `engine.Get()` + `engine.*` — **no per-engine switch**. **`internal/apply` orchestration
-is reused, but MySQL's `ApplyTx` implements `FOREIGN_KEY_CHECKS=0` + orphan-verification for cyclic
-components** (vs PG's `SET CONSTRAINTS DEFERRED`), possibly via a minimal backward-compatible
-`BeginApply` cyclic-signal (decided MM5b) — so the apply layer is **reused for the acyclic path,
-extended at the engine boundary for the cyclic path** (corrects the v1 "reused unchanged" overclaim per
-Momus B3). **No `internal/delta`/`internal/schema` package exists** — delta/track is MySQL-new engine
+is reused, but MySQL's `ApplyTx` implements `FOREIGN_KEY_CHECKS=0` + **pre-commit** orphan-verification
+for cyclic components** (vs PG's `SET CONSTRAINTS DEFERRED`), which needs a **real (bounded) interface
+change threading a cyclic flag + component FK edges into `BeginApply`/`ApplyTx`** — this also touches
+the Postgres sink's signature, so it is **not purely additive** (decided/implemented in MM5b before the
+FK_CHECKS gate). So the apply layer is **reused for the acyclic path, extended at the engine+interface
+boundary for the cyclic path** (corrects the v1 "reused unchanged" and the v2 "minimal backward-
+compatible" overclaims — Momus B3 + 2nd-pass M2). **No `internal/delta`/`internal/schema` package exists** — delta/track is MySQL-new engine
 code; "schema" is the neutral `engine.Schema` type set. **`internal/state/postgres` is deliberately
 always-Postgres** and orthogonal to the data engine (MM2). **The three additive seams:** `engine.
 Register` (init), `config.RegisterEngine` (init), and the one hand-edit to `cmd/replicare/engines.go`.
 
 ## Resolved decisions (were v1 Open Questions)
-1. **FK cycles** → scoped `FOREIGN_KEY_CHECKS=0` + **mandatory orphan-verification → loud halt**, for
-   both initial copy (MM4b) and streaming (MM5b); nullable cyclic → NULL-then-fill; acyclic → checks
-   ON + retry fallback. **Overturns CLAUDE.md §4.1/§14/§15 → committed edits land in MM4b.** (Momus
-   B3/B5/M9; retry-alone is provably insufficient for intra-pass cycles.)
+1. **FK cycles** → scoped `FOREIGN_KEY_CHECKS=0` + **mandatory PRE-COMMIT orphan-verification → loud
+   halt + rollback** (verify inside the open txn before COMMIT, so nothing broken is ever visible —
+   Momus 2nd-pass B1), for both initial copy (MM4b) and streaming (MM5b); nullable cyclic →
+   NULL-then-fill; acyclic → checks ON + retry fallback. Requires a **bounded interface change** to
+   thread the cyclic flag + component FK edges into `ApplyTx` (touches the PG sink too — MM5b).
+   **Overturns CLAUDE.md §4.1/§14/§15 → committed edits land in MM4b.** (Momus B3/B5/M9 + 2nd-pass
+   B1/M2; retry-alone is provably insufficient for intra-pass cycles.)
 2. **Charset fidelity** → **byte-faithful `character_set_results=binary`** transport + full byte-level
    LOAD DATA escaping (MM1a/MM4a). (Momus B4/B6.)
 3. **Zero-dates** → target session keeps `STRICT_*`, drops only `NO_ZERO_DATE`/`NO_ZERO_IN_DATE`
@@ -559,5 +635,21 @@ M8 (version-branched defined-order boundary scan — §0.3), M9 (FK_CHECKS decid
 acceptance). Minors m1–m6 (at-least-once note, `CREATE TEMPORARY TABLES`+`DEFINER` grants, reader
 concurrency/security, `utf8mb4→utf8mb3` block, MM2 assertable acceptance, full six-mode TLS mapping) all
 folded.
-**Next:** a second Momus pass on v2 is warranted (as the Postgres plan took two) — primarily to confirm
-the FK_CHECKS+verification mechanism and the byte-faithful transport survive scrutiny before MM0 starts.
+**Momus pass 2 (design, on v2) — REVISE, addressed in v3:** 2B1 (verification was post-commit →
+committed corruption; corrected to **pre-commit verify + rollback inside the txn** — §0.2/MM4b/MM5b),
+2B2 (byte-faithful **write** side unspecified + `LOAD DATA` single-`CHARACTER SET` vs mixed-charset
+tables; now specified: single-charset validate-and-halt-loud load + mixed-charset pre-flight flag +
+per-column-group loads — §0.1/MM4a), 2M1 (impossible cross-charset "byte-identical" corpus split into
+same-charset-identical vs cross-charset-halt-loud — §0.1/testing/MM4a), 2M2 (orphan-verify + cyclic
+routing need FK edges + cyclic flag threaded into `ApplyTx` — a **real bounded interface change that
+touches the PG sink**, not "minimal"; scoped in MM5b before the FK_CHECKS gate), 2M3 (secondary-unique
+runtime backstop is infeasible with ODKU → dropped; **pre-flight block is the sole protection** —
+§0.4/MM5a), 2M4 (MM5a→MM4b edge incoherent → MM5a depends on **MM4a only**), 2m1 (anti-join covers the
+**whole component**, catching delete-stranded non-dirty children — MM5b), 2m2 (1452→transient mapping
+is **acyclic-only** — MM5b), 2m3 (`character_set_results=binary` metadata-safety tested in MM1a).
+**Momus pass 2 "verified good — do not touch":** the B3 retry-can't-close-an-intra-pass-cycle diagnosis,
+the strict-safe `sql_mode` (version-correct for 5.7→8.4), the B6 escape set, read-side byte fidelity,
+all Sisyphus decomposition, and the M3-M8/grants/TLS/DDL fixes.
+**Next:** v3 addresses every pass-2 finding; the reviewer's own bar was "fix 2B1 (pre-commit) + 2B2
+(write-side charset), tighten 2M1–2M4, and this is APPROVE-able on a third look." A brief pass-3
+confirmation is optional before MM0; the architecture and sequencing are settled.
