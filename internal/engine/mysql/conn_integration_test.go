@@ -9,11 +9,14 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// integration skips unless the MySQL harness is enabled.
+// integration skips unless the MySQL harness is enabled. It requires the
+// MySQL-specific REPLICARE_MYSQL=1 (set by `task test:integration:mysql`), NOT
+// just REPLICARE_INTEGRATION, so these tests do NOT run in the Postgres
+// integration job (which sets REPLICARE_INTEGRATION but brings up no MySQL).
 func integration(t *testing.T) bool {
 	t.Helper()
-	if os.Getenv("REPLICARE_INTEGRATION") != "1" {
-		t.Skip("integration test; set REPLICARE_INTEGRATION=1 and run `task harness:mysql:up`")
+	if os.Getenv("REPLICARE_INTEGRATION") != "1" || os.Getenv("REPLICARE_MYSQL") != "1" {
+		t.Skip("MySQL integration test; run `task test:integration:mysql`")
 		return false
 	}
 	return true
