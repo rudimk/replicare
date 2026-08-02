@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"io"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -66,11 +65,8 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 	return introspectDB(ctx, s.db, sel)
 }
 
-// BulkLoad + DeleteRange are in sink_load.go (MM4a).
+// BulkLoad + DeleteRange are in sink_load.go (MM4a). ApplyPass is in apply.go (MM5a).
 
-func (s *Sink) ApplyPass(context.Context, engine.TableRef, []string, []engine.KeyValues, io.Reader) error {
-	return errNotImplemented // MM5a
-}
 func (s *Sink) BeginApply(context.Context) (engine.ApplyTx, error) {
 	return nil, errNotImplemented // MM5b
 }
