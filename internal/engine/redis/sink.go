@@ -54,8 +54,12 @@ func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 
 // --- stubs until their milestones (redis-plan RM2–RM6) ---
 
-func (s *Sink) Introspect(context.Context, engine.Selection) (*engine.Schema, error) {
-	return nil, errNotImplemented // RM2
+// Introspect synthesizes the target unit pseudo-schema + module capabilities (RM2).
+func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	return introspect(ctx, s.db, s.cfg, sel)
 }
 func (s *Sink) BulkLoad(context.Context, engine.TableRef, []string, io.Reader, engine.LoadMode) (int64, error) {
 	return 0, errNotImplemented // RM4 (RESTORE REPLACE)
