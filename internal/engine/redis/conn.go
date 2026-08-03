@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"strconv"
 	"strings"
@@ -13,8 +12,7 @@ import (
 )
 
 // errNotImplemented marks a Source/Sink method that is a stub until its milestone
-// lands (redis-plan RM1–RM11). RM0 is the skeleton: connection lifecycle + the
-// version/fork probe only.
+// lands (redis-plan RM2–RM11).
 var errNotImplemented = fmt.Errorf("redis: not implemented (skeleton engine; see .sisyphus/redis-plan.md)")
 
 // Internal ConnConfig.Params keys (rc_-prefixed) that carry the topology + CDC
@@ -36,45 +34,124 @@ const (
 	paramTypes               = "rc_types"
 )
 
-// client is the minimal command surface RM0 needs from go-redis, satisfied by
-// *goredis.Client (standalone). RM1 generalizes connection to standalone /
-// Sentinel / Cluster behind the same Source/Sink methods.
-type client interface {
+// doer is the minimal command surface used by version/INFO probes, satisfied by
+// *conn (and by go-redis clients directly, for testing).
+type doer interface {
 	Do(ctx context.Context, args ...any) *goredis.Cmd
-	Close() error
 }
 
-// open builds a standalone go-redis client from a resolved ConnConfig and pings
-// it. Cluster/Sentinel construction is RM1 (mode is carried in the redis config
-// block, RM0.5); RM0 connects standalone so the version/fork probe works against
-// the harness pair.
-func open(ctx context.Context, cc engine.ConnConfig) (client, error) {
+// conn wraps a mode-appropriate go-redis client (standalone / cluster / sentinel)
+// and exposes cluster topology for the per-shard operations RM4+ need. go-redis
+// handles MOVED/ASK redirection and topology refresh internally for the cluster
+// client. Delete detection is master-pinned (redis-plan §0.5), so read-from-replica
+// routing is deferred to the read paths (RM4/RM5); RM1 stores the flag and routes
+// everything to masters for correctness.
+type conn struct {
+	mode        string
+	uc          goredis.UniversalClient
+	cluster     *goredis.ClusterClient // non-nil in cluster mode (ForEachMaster)
+	primaryAddr string
+	readReplica bool
+}
+
+// Do delegates to the routing client.
+func (c *conn) Do(ctx context.Context, args ...any) *goredis.Cmd { return c.uc.Do(ctx, args...) }
+
+// Close releases the client.
+func (c *conn) Close() error { return c.uc.Close() }
+
+// masters returns the addresses of every master node: all shard masters in
+// cluster mode, or the single primary otherwise. Used for the per-shard SCAN
+// reconciliation fan-out (RM4+); RM1 uses it to prove topology discovery.
+//
+// It reads CLUSTER SHARDS from a live node rather than go-redis's cached cluster
+// state — the cache can be stale (loaded mid-gossip right after cluster creation),
+// so querying the server directly is authoritative and race-free.
+func (c *conn) masters(ctx context.Context) ([]string, error) {
+	if c.cluster == nil {
+		return []string{c.primaryAddr}, nil
+	}
+	shards, err := c.cluster.ClusterShards(ctx).Result()
+	if err != nil {
+		return nil, fmt.Errorf("redis: discover cluster masters: %w", err)
+	}
+	var addrs []string
+	for _, sh := range shards {
+		for _, n := range sh.Nodes {
+			if strings.EqualFold(n.Role, "master") {
+				host := n.Endpoint
+				if host == "" {
+					host = n.IP
+				}
+				addrs = append(addrs, fmt.Sprintf("%s:%d", host, n.Port))
+			}
+		}
+	}
+	return addrs, nil
+}
+
+// open builds a mode-appropriate client from a resolved ConnConfig (topology +
+// tuning in Params, RM0.5) and pings it.
+func open(ctx context.Context, cc engine.ConnConfig) (*conn, error) {
+	mode := cc.Params[paramMode]
+	if mode == "" {
+		mode = modeStandalone
+	}
+	nodes := seedAddrs(cc)
 	db, err := dbIndex(cc.Database)
 	if err != nil {
 		return nil, err
 	}
-	opts := &goredis.Options{
-		Addr:     fmt.Sprintf("%s:%d", cc.Host, cc.Port),
-		Username: cc.User,
-		Password: cc.Password,
-		DB:       db,
+	tlsCfg := tlsConfig(cc.TLS, cc.Host)
+	readReplica := cc.Params[paramReadReplica] == "1"
+
+	c := &conn{mode: mode, primaryAddr: nodes[0], readReplica: readReplica}
+	switch mode {
+	case modeCluster:
+		cl := goredis.NewClusterClient(&goredis.ClusterOptions{
+			Addrs:     nodes,
+			Username:  cc.User,
+			Password:  cc.Password,
+			TLSConfig: tlsCfg,
+		})
+		c.uc, c.cluster = cl, cl
+	case modeSentinel:
+		c.uc = goredis.NewFailoverClient(&goredis.FailoverOptions{
+			MasterName:    cc.Params[paramSentinelMaster],
+			SentinelAddrs: nodes,
+			Username:      cc.User,
+			Password:      cc.Password,
+			DB:            db,
+			TLSConfig:     tlsCfg,
+		})
+	default: // standalone
+		c.uc = goredis.NewClient(&goredis.Options{
+			Addr:      nodes[0],
+			Username:  cc.User,
+			Password:  cc.Password,
+			DB:        db,
+			TLSConfig: tlsCfg,
+		})
 	}
-	// Minimal TLS: RM1 adds the full disable->verify-full spectrum (redis-plan
-	// §0.5). RM0 only distinguishes off vs on; the harness uses plaintext.
-	if cc.TLS != "" && cc.TLS != engine.TLSDisable {
-		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
-	}
-	c := goredis.NewClient(opts)
-	if err := c.Ping(ctx).Err(); err != nil {
-		_ = c.Close()
-		return nil, fmt.Errorf("redis: connect %s:%d: %w", cc.Host, cc.Port, err)
+
+	if err := c.uc.Ping(ctx).Err(); err != nil {
+		_ = c.uc.Close()
+		return nil, fmt.Errorf("redis: connect (%s) %s: %w", mode, nodes[0], err)
 	}
 	return c, nil
 }
 
+// seedAddrs returns the seed node addresses: the rc_nodes list if present, else a
+// single host:port from the resolved ConnConfig.
+func seedAddrs(cc engine.ConnConfig) []string {
+	if raw := cc.Params[paramNodes]; raw != "" {
+		return strings.Split(raw, ",")
+	}
+	return []string{fmt.Sprintf("%s:%d", cc.Host, cc.Port)}
+}
+
 // dbIndex parses the ConnConfig.Database string as a Redis logical DB index
-// (default 0). In cluster mode only DB 0 is valid (enforced in the config block,
-// RM0.5).
+// (default 0). Cluster mode enforces 0 in the config block (RM0.5).
 func dbIndex(database string) (int, error) {
 	if database == "" {
 		return 0, nil
@@ -88,7 +165,7 @@ func dbIndex(database string) (int, error) {
 
 // serverVersion runs INFO server, rejects an unsupported fork (Dragonfly), and
 // returns the comparable version number (§1.6). Valkey/KeyDB are allowed.
-func serverVersion(ctx context.Context, c client) (int, error) {
+func serverVersion(ctx context.Context, c doer) (int, error) {
 	info, err := infoSection(ctx, c, "server")
 	if err != nil {
 		return 0, err
@@ -104,7 +181,7 @@ func serverVersion(ctx context.Context, c client) (int, error) {
 }
 
 // infoSection runs `INFO <section>` and returns the raw text.
-func infoSection(ctx context.Context, c client, section string) (string, error) {
+func infoSection(ctx context.Context, c doer, section string) (string, error) {
 	res, err := c.Do(ctx, "INFO", section).Text()
 	if err != nil {
 		return "", fmt.Errorf("redis: INFO %s: %w", section, err)

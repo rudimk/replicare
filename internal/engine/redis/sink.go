@@ -16,7 +16,7 @@ var errNotConnected = errors.New("redis: not connected")
 // implements only the connection lifecycle and version/fork probe.
 type Sink struct {
 	cfg engine.ConnConfig
-	db  client
+	db  *conn
 }
 
 var _ engine.Sink = (*Sink)(nil)
