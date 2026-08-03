@@ -61,11 +61,25 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 	}
 	return introspect(ctx, s.db, s.cfg, sel)
 }
-func (s *Sink) BulkLoad(context.Context, engine.TableRef, []string, io.Reader, engine.LoadMode) (int64, error) {
-	return 0, errNotImplemented // RM4 (RESTORE REPLACE)
+
+// BulkLoad reads the DUMP framing and pipelines RESTORE ... REPLACE, value-faithful
+// (RM4). cols/mode are neutral-contract parameters Redis ignores: there are no
+// columns, and REPLACE is inherently idempotent so LoadDirect and LoadMerge behave
+// identically. In cluster mode the routing client dispatches each RESTORE to the
+// key's owning shard. Returns the number of keys restored.
+func (s *Sink) BulkLoad(ctx context.Context, _ engine.TableRef, _ []string, r io.Reader, _ engine.LoadMode) (int64, error) {
+	if s.db == nil {
+		return 0, errNotConnected
+	}
+	return restoreStream(ctx, s.db, r)
 }
+
+// DeleteRange is a no-op for Redis: there is no ordered key space to range-delete,
+// and initial-copy resume re-SCANs from cursor 0 with idempotent RESTORE REPLACE
+// (redis-plan §0.5). The neutral copy layer only calls this when a keyset watermark
+// is present, which a Redis unit never sets.
 func (s *Sink) DeleteRange(context.Context, engine.TableRef, engine.KeyValues, engine.KeyValues) error {
-	return errNotImplemented // RM4: no-op for Redis (no ordered key ranges; redis-plan §0.4)
+	return nil
 }
 func (s *Sink) ApplyPass(context.Context, engine.TableRef, []string, []engine.KeyValues, io.Reader) error {
 	return errNotImplemented // RM5
