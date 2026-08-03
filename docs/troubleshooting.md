@@ -1,5 +1,24 @@
 # Troubleshooting
 
+## The config won't load (exit code 2)
+
+Before any pre-flight, the config is parsed and structurally validated. These are
+**exit-2** failures with a message naming the problem — the earliest thing a new
+user hits:
+
+- **`${VAR}` is unset and has no default** → set the env var, or give a fallback
+  (`${VAR:-default}`). Env expansion applies to *any* field, not just secrets.
+- **unknown YAML field** → strict decoding rejects typos/unknown keys; fix the field
+  name against the [configuration reference](configuration.md).
+- **unknown engine, or a missing engine block** → `engine: postgres|mysql|redis`
+  must match a present typed block (`postgres:` / `mysql:` / `redis:`).
+- **a sync references an undefined source/target**, or **crosses engines** → a sync
+  is single-engine; its source and all targets must share one engine (§6).
+
+`replicare validate <config>` reports these without connecting. Exit `2` is
+"config/usage"; exit `1` is a clean pre-flight **BLOCK** or a connection failure
+(see [CLI reference](cli.md)).
+
 ## `validate` reports BLOCK findings / the daemon refuses to start
 
 Pre-flight blocks on an **incompatible or missing** target type — e.g. a source

@@ -3,9 +3,12 @@
 replicare is configured by a single YAML file (passed to every command). The
 schema is an engine-neutral envelope plus a typed per-engine connection block.
 
-Any string value may reference the environment as `${VAR}` (required — errors if
-unset) or `${VAR:-default}` (falls back to `default`). This is how secrets stay
-out of the file.
+**Any** string value may reference the environment as `${VAR}` (required — errors if
+unset) or `${VAR:-default}` (falls back to `default`) — not just secrets. Expanded
+scalars are re-typed on decode, so it works for ports, hosts, addresses, and
+booleans too (e.g. `port: ${PGPORT:-5432}`), matching the "env-var overrides for any
+field" goal (CLAUDE.md §11). Keeping passwords out of the file is the common case.
+An unset `${VAR}` with no default is a hard config-load error (exit 2).
 
 Validate a config without connecting-and-running via `replicare validate <config>`.
 
@@ -60,6 +63,10 @@ sources:
 
 ### Postgres connection block
 
+Used when an endpoint's `engine` is `postgres`. See [the Postgres engine page](postgres.md)
+for the CDC model, FK-component handling, faithful `COPY` transport, and the
+effectively-exactly-once bonus when the state store *is* the target.
+
 | Field | Type | Notes |
 |---|---|---|
 | `host` | string | |
@@ -102,7 +109,7 @@ host, and carries engine-specific selection and CDC tuning.
 | `nodes` | list of `host:port` | seed nodes for `cluster`/`sentinel` (also allowed for standalone) |
 | `db` | int | logical DB index (standalone only; **must be 0 in cluster**) |
 | `user` / `password` | string | ACL user (Redis 6+); use `${VAR}` for the password |
-| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | same spectrum as Postgres `sslmode` |
+| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | same spectrum as Postgres `sslmode`; **default `disable`** — note this diverges from Postgres/MySQL (`prefer`), so set it explicitly to avoid plaintext |
 | `sentinel_master` | string | required when `mode: sentinel` |
 | `read_from_replica` | bool | offload **value** reads to replicas; delete detection still reads the master (a lagging replica would cause false deletes) |
 | `types` | list | optional type filter: `string`/`list`/`set`/`zset`/`hash`/`stream` (needs Redis 6.0+ for server-side `SCAN … TYPE`) |

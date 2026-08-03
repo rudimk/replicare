@@ -101,8 +101,51 @@ locked in the observability contract, so a scrape of a running daemon matches th
 The headline signals to watch are `replicare_target_up`, `replicare_delta_backlog_rows`,
 `replicare_delta_oldest_unconsumed_age_seconds`, and `replicare_replication_lag_seconds` — together
 they answer "is the target healthy, and how far behind is it?" (see [Source footprint](#source-footprint-the-thing-to-watch)
-and [When a target goes down](#when-a-target-goes-down)). Traces are exported via OTLP when
-`observability.otlp_endpoint` is set; structured `slog` logs carry the same fields.
+and [When a target goes down](#when-a-target-goes-down)).
+
+### Traces (OpenTelemetry)
+
+Traces are exported via OTLP/gRPC when `observability.otlp_endpoint` is set. The span names are a
+fixed registry:
+
+| Span | Covers |
+|---|---|
+| `replicare.initial_copy.chunk` | one chunk of the initial copy |
+| `replicare.capture.install` | installing trigger capture on the source |
+| `replicare.delta.drain` | one streaming drain pass for a table/target |
+| `replicare.apply.component` | applying one FK component's pass on the target |
+| `replicare.reseed` | a forced/retention reseed |
+| `replicare.preflight` | the start-up compatibility check |
+
+A drain/apply span against an **unreachable** target is recorded with **error status** plus the
+backlog/age attributes, so the stall and its blast radius are visible in the trace timeline (§3.4).
+
+### Structured logs (slog)
+
+Logs are JSON or text (`logging.format`), leveled (`logging.level`), with a stable `event` field you
+can grep/alert on:
+
+| Event | Level | Meaning |
+|---|---|---|
+| `capture.installed` / `capture.removed` | INFO | capture lifecycle |
+| `table.cutover_to_streaming` | INFO | a table finished initial copy |
+| `retention.cap_approaching` | INFO→WARN | delta backlog nearing the retention cap (escalates with proximity) |
+| `target.unreachable` / `target.recovered` | ERROR / INFO | target connectivity, cross-channel with the `target_up` gauge and the errored span |
+| `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
+| `preflight.blocked` | ERROR | a sync refused to start on a blocking incompatibility |
+
+A degrading target surfaces in **metrics, traces, AND logs at once** — never just one channel (§3.4).
+
+## The status HTTP API
+
+The daemon serves an operator HTTP surface (bound to `observability.status_addr`, e.g. `:8080`):
+
+- **`GET /status`** — JSON snapshot per sync/target/table: phase (initial_copy/streaming), rows
+  copied vs total, replication lag, and last error. This is what the CLI `replicare status` renders;
+  add `--json` to the CLI for the raw body.
+- **`GET /healthz`** — a liveness probe (200 when the daemon is up), for Kubernetes/load balancers.
+- **`GET /metrics`** — the Prometheus scrape. It is served here too, and additionally on
+  `observability.metrics_addr` when that is set to a different address (the conventional split).
 
 ## Forcing a reseed
 
@@ -138,7 +181,10 @@ phase (snapshot-complete-per-unit; no resumable SCAN cursor), so a crash mid-cop
 See [`../deploy/grants-source.sql`](../deploy/grants-source.sql) and
 [`../deploy/grants-target.sql`](../deploy/grants-target.sql). Note the documented asymmetry:
 installing capture needs only the `TRIGGER` privilege, but `capture remove` (dropping the trigger)
-requires table ownership.
+requires table ownership. For the **true zero-database-grant** path, pre-create the `replicare`
+capture schema (and, if the state store lives there, the `replicare_state` schema) owned by the
+daemon role — the migration runner then issues no `CREATE SCHEMA` and needs no `CREATE`-on-database
+privilege (CLAUDE.md §12). See the [Postgres engine page](postgres.md#least-privilege).
 
 For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql) and
 [`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql). MySQL has no such asymmetry
@@ -147,7 +193,8 @@ fully uninstall capture on its own.
 
 For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt)
 and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The source role is read-only
-(`+scan +dump +pttl +exists +type +memory|usage`); the target role needs `+restore +del +scan +exists
-+module|list`. Watch the foot-gun: `RESTORE` is `@dangerous` and must be granted explicitly with
-`+restore`, or every apply fails loud. In cluster mode, grant the same user on every master. See
-[the Redis engine page](redis.md).
+(`+ping +info +scan +type +dump +pttl +exists +memory|usage`); the target role needs `+ping +info
++restore +del +scan +exists +module|list`. Both roles need **`+info`** (pre-flight reads `INFO
+server`), and in **cluster** mode both also need `+cluster|shards +cluster|slots` and the same user
+granted on **every master**. Watch the foot-gun: `RESTORE` is `@dangerous` and must be granted
+explicitly with `+restore`, or every apply fails loud. See [the Redis engine page](redis.md).

@@ -1,19 +1,20 @@
 # CLI reference
 
-All commands take the config file as an argument. Exit codes: `0` success,
-`1` runtime error, `2` usage/config error.
+Most commands take the config file as an argument. Exit codes: `0` success,
+`1` runtime error **or a pre-flight BLOCK** (see `validate`), `2` usage/config
+error (bad flags, or a config that won't load — unknown engine, unknown field,
+unset `${VAR}`, cross-engine sync).
 
 ```
 replicare <command> [args]
 ```
 
-## `version`
+## `help` / `version`
 
 ```sh
-replicare version
+replicare help          # also: --help, -h — prints the command usage
+replicare version       # also: --version, -v — version, commit, build date, Go version
 ```
-
-Prints the version, commit, build date, and Go version.
 
 ## `validate <config>`
 
@@ -27,6 +28,11 @@ identical/widening (ok), risky/lossy (warn), incompatible or missing type
 (**block**). Also reports FK components, a giant-component warning, dangling FK
 edges, and skipped no-key tables. Makes **no changes**. Fix all BLOCK findings
 before running.
+
+**Exit codes are meaningful for scripting:** `0` = clean (ok/warn only), `1` = at
+least one **BLOCK** finding (a clean "incompatible" verdict, *not* a crash), `2` =
+the config didn't load or a connection failed. So `replicare validate ... && replicare run ...`
+gates a start on a block-free pre-flight.
 
 ## `run <config>`
 
@@ -82,6 +88,10 @@ state store) to re-copy that target from current source state on its next pass,
 then resume streaming — honoring single-active ownership rather than acting
 directly. Use it after out-of-band divergence, or to recover a target that fell
 behind.
+
+If the target has **no cursors yet** (you ran `reseed` before the sync's first
+run), there is nothing to flag: replicare reports that the target will full-copy on
+its first run anyway and exits `0`. That is expected, not a failure.
 
 ## Signals
 
