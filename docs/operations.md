@@ -58,6 +58,15 @@ live in a dedicated `replicare` *database* on the MySQL source), retention/resee
 identically, and the fix is the same: end the long-running source transaction. See
 [the MySQL engine page](mysql.md).
 
+**Redis has no source footprint at all.** Its CDC is capture-less — replicare writes nothing to the
+source (no delta/track tables, no `replicare` schema). So the delta-backlog metrics, retention, and
+`xmin`-style bloat simply don't apply. What you watch instead is **delete-propagation latency**:
+deletes are found by the periodic target-vs-source sweep, so a source `DEL` converges only after the
+next sweep. `replicare_delete_reconciliation_lag_seconds` (sweep duration) and
+`replicare_deletes_reconciled_total` are the Redis-specific signals; tune cadence with
+`delete_sweep_interval`. Upserts converge faster via the rolling reconciliation scan. See
+[the Redis engine page](redis.md).
+
 ## When a target goes down
 
 A drain against an unreachable target fires **all three channels at once**: an errored trace span
@@ -86,6 +95,8 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
 | `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
 | `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
+| `replicare_delete_reconciliation_lag_seconds` | gauge | `sync`, `target`, `table` | **Redis only** — duration of the last completed delete sweep (staleness of capture-less deletes). Unset for Postgres/MySQL. |
+| `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | **Redis only** — keys `DEL`ed by the target-vs-source delete sweep. Unset for Postgres/MySQL. |
 
 The headline signals to watch are `replicare_target_up`, `replicare_delta_backlog_rows`,
 `replicare_delta_oldest_unconsumed_age_seconds`, and `replicare_replication_lag_seconds` — together
@@ -117,8 +128,10 @@ Each sync runs under a single-active `pg_advisory_lock`; a second daemon pointed
 stands by. State (copy progress, cursors) is checkpointed in the Postgres state store — which is
 always Postgres regardless of the data engine, so MySQL syncs restart and resume through the same
 mechanism — so a restarted or rescheduled process resumes cleanly from the last checkpoint; an
-ungraceful kill replays at-least-once and converges idempotently. One daemon can run Postgres and
-MySQL syncs side by side (each sync stays single-engine).
+ungraceful kill replays at-least-once and converges idempotently. One daemon can run Postgres, MySQL,
+and Redis syncs side by side (each sync stays single-engine). A Redis sync checkpoints only coarse
+phase (snapshot-complete-per-unit; no resumable SCAN cursor), so a crash mid-copy re-runs the whole
+`SCAN` idempotently rather than resuming a chunk — see [the Redis engine page](redis.md).
 
 ## Least-privilege grants
 
@@ -131,3 +144,10 @@ For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source
 [`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql). MySQL has no such asymmetry
 — the `TRIGGER` privilege covers both `CREATE TRIGGER` and `DROP TRIGGER`, so the daemon role can
 fully uninstall capture on its own.
+
+For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt)
+and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The source role is read-only
+(`+scan +dump +pttl +exists +type +memory|usage`); the target role needs `+restore +del +scan +exists
++module|list`. Watch the foot-gun: `RESTORE` is `@dangerous` and must be granted explicitly with
+`+restore`, or every apply fails loud. In cluster mode, grant the same user on every master. See
+[the Redis engine page](redis.md).

@@ -122,6 +122,30 @@ Therefore, for Redis:
   reduce lag between reconciliation passes — but **never relied on for correctness**. A missed
   notification is always caught by the next reconciliation scan.
 
+**Implemented (v1, `internal/engine/redis`, plan `.sisyphus/redis-plan.md`):**
+- **Transport = `DUMP` → `RESTORE … REPLACE`, value-faithful** — RDB-serialized bytes moved
+  verbatim over a private length-prefixed binary framing (`{key, ttl, flags, dump}`); the target
+  re-encodes, so it is *value*-faithful, not *byte*-faithful across a version gap. **Never
+  reconstructs or transforms** (§1.7 holds, no exception). Six native types + TTL; STREAM
+  groups/PEL preserved.
+- **Upserts = rolling `SCAN` reconciliation** — every streaming pass re-reads the present keys and
+  RESTOREs them (idempotent → convergent). A **bounded pass-boundary state machine** holds the
+  live per-shard SCAN cursor across ticks and emits one bounded batch per call: memory is
+  **O(batch), never O(keyset)**.
+- **Deletes = durable target-vs-source keyspace diff** (§3.3-aligned, the additive optional
+  `KeyLister`/`KeyExister` seam, §8.1) — `SCAN` the target, `EXISTS`-check the source **master**
+  (a lagging replica would cause false deletes), `DEL` the missing. Every sweep is a full diff, so
+  it subsumes the copy→stream cutover orphan window and the restart case with no special-casing.
+  **Delete latency is bounded by the sweep interval, not instant.**
+- **Notification accelerator** (`InstallCapture`, off by default) — per-master `PSUBSCRIBE` to
+  `__keyevent@<db>__:*` feeds a priority dirty-set drained ahead of the rolling scan; a
+  subscription gap forces a full reconciliation. Lossy and never trusted.
+- **TTL = relative by default** (skew-safe; `PTTL -1`→ no-expiry, `-2`/expired → delete-reconciled);
+  `absttl` opt-in from server `TIME`. **Big keys**: DUMP-and-warn above a threshold, block loud
+  above a refuse-cap (`MEMORY USAGE`); no incremental transport. **Cluster**: per-master SCAN +
+  subscription + delete-sweep; DB 0 only. **Value reads** may use replicas; **delete detection may
+  not**.
+
 ### 3.3 Delta sequencing & consumption (trigger CDC) — the dirty-key-set model
 
 **The hazard we design around (commit-order ≠ assignment-order):** any value a trigger assigns
@@ -509,6 +533,13 @@ crash-atomic). It is **not** bulk data.
   has a Bucardo precedent (central Bucardo Postgres DB).
 - **Embedded (BoltDB/SQLite), etcd, and cloud KV (e.g. DynamoDB) are deliberately deferred** —
   addable later via the same interface if a use case demands them.
+- **Redis reuses this Postgres StateStore with NO new code** (plan RM3), overloading the neutral
+  vocabulary: `TableRef` → a replication *unit* (`redis.db<N>`), key-glob selection, and **coarse
+  checkpointing** — a Redis unit's SCAN snapshot is atomic, so `CopyProgress.Watermark` stays nil
+  and completion is a single `Done` flag (a SCAN cursor is not durably resumable; a restart
+  re-SCANs from cursor 0, idempotent). **Documented wart: a Redis → Redis sync STILL requires a
+  Postgres state store** (v1's only backend) even though no data touches Postgres — see
+  `docs/redis-statestore.md`.
 
 **Concurrency / ownership:** v1 runs a **single active daemon per sync** — Kubernetes restarts it
 on failure (e.g. `Deployment` replicas=1 or a `StatefulSet`); the external Postgres state store
@@ -599,8 +630,16 @@ headline signals.
 **Target (Postgres):**
 - `SELECT, INSERT, UPDATE, DELETE` on the (pre-existing) target tables.
 
-**Redis:** ability to `SCAN`/read keys; optionally permission to enable/consume keyspace
-notifications where supported.
+**Redis (6+ ACL, no admin — presets in `deploy/acl-source-redis.txt` / `acl-target-redis.txt`):**
+- **Source:** `SCAN`, `DUMP`, `PTTL`, `EXISTS`, `TYPE`, `MEMORY USAGE`, `INFO` (+ `CLUSTER SHARDS/SLOTS`
+  in cluster). Read-only — replicare writes **nothing** to the source. The notification accelerator
+  additionally needs `PSUBSCRIBE` and (on self-hosted) `CONFIG SET notify-keyspace-events`
+  (privilege-gated; on ElastiCache/managed set it via a parameter group instead).
+- **Target:** `RESTORE`, `DEL`, `SCAN`, `EXISTS`, `INFO`, `MODULE LIST` (+ `CLUSTER SHARDS/SLOTS`).
+  **`RESTORE` is `@dangerous` and must be granted EXPLICITLY (`+restore`)** — it is the single
+  elevated command replicare needs, the one foot-gun; scope the ACL key pattern tightly.
+- **No** admin, **no** `REPLICAOF`/`FLUSH*`/`CLUSTER` admin, **no** `notify-keyspace-events` change
+  required for correctness (only the optional accelerator).
 
 ---
 
@@ -611,8 +650,8 @@ cmd/replicare/          # main entrypoint (daemon + CLI: run, status, etc.)
 internal/config/        # YAML config + env overrides + validation
 internal/engine/        # engine-agnostic Source/Sink interfaces + registry
   postgres/             # pgx-based Source + Sink (trigger CDC, COPY, upsert apply)
-  mysql/                # (future) trigger CDC
-  redis/                # (future) SCAN snapshot + reconciliation
+  mysql/                # trigger CDC (shipped)
+  redis/                # SCAN snapshot + reconciliation + DUMP/RESTORE (shipped)
 internal/pipeline/      # sync orchestration: initial copy, delta drain, worker pools
 internal/state/         # pluggable StateStore interface; v1 backend = Postgres (advisory-lock ownership)
 internal/observability/ # slog, Prometheus, OTel, status HTTP API
@@ -671,8 +710,20 @@ invasive.
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
-| Stack | Go 1.23+, `pgx` v5, MIT, module `github.com/rudimk/replicare`. |
+| Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
 | Compatibility | **Must read from very old source Postgres**; keep source SQL conservative; target may use modern features. |
+| Redis engine fit | **Overload the neutral vocabulary** (`TableRef`→ replication unit, `KeyValues`→ one `[]byte` key, text COPY→ private binary DUMP framing); **single-member acyclic components + a thin `ApplyTx`**; **near-zero neutral edits** — reuse copy/apply/state/config/observability, plus one additive optional `KeyLister`/`KeyExister` delete-reconciliation seam and a `Schema.Capabilities` field. |
+| Redis transport | **`DUMP` → `RESTORE … REPLACE`, value-faithful** (not byte-faithful across versions; the target re-encodes); `[]byte` end-to-end. **No reconstruction, no incremental — §1.7 holds, no exception.** |
+| Redis CDC | **Upserts = full-keyspace `SCAN` reconciliation** (re-read every pass, idempotent RESTORE; nothing written to the source). **Deletes = durable target-vs-source keyspace diff** via the additive interface; **notifications + optional seen-set = accelerators only** (droppable, never trusted, no reseed trigger). Cutover + restart run a full sweep. |
+| Redis pre-flight | **BLOCK newer→older (RDB-version, in pure `Preflight`)**; **BLOCK missing-module (via `Schema.Capabilities` at introspect)**; no type-coercion axis. |
+| Redis atomicity | **Per-key idempotent apply, NO cross-key / group atomicity** — a deliberate departure from §8.1's per-component transaction (Redis has no such transaction; each RESTORE/DEL is atomic on its own). |
+| Redis checkpointing | **Coarse phase** (per-unit snapshot-complete); SCAN cursor **not** durably resumable; `Watermark`/`DeleteRange`/`Lo` are **no-ops**; both the reconciliation scan and the delete sweep hold a live cursor across ticks and emit **O(batch), never O(keyset)** batches. |
+| Redis TTL | **RELATIVE by default** (skew-safe; `-1`→ no-expiry, `-2`/expired → delete); `ABSTTL` opt-in from server `TIME`. |
+| Redis state store | **Reused Postgres, no new code**; nothing on the source. **A Redis→Redis sync still requires a Postgres state store** (documented wart). |
+| Redis cluster | Per-master `SCAN` + subscription + delete-sweep; topology via `CLUSTER SHARDS`/`SLOTS`; parallelism unit = shard; per-key ops sidestep cross-slot; **delete detection master-pinned** (replica lag → false deletes); DB 0 only. |
+| Redis privileges | Redis 6+ ACL, no admin; **`+restore` granted explicitly** (`@dangerous`); notification-enable/`PSUBSCRIBE` are privilege-gated extras (`deploy/acl-*-redis.txt`). |
+| Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine, multi-master — all deferred. |
+| CI vs local (Redis) | **CI = compile/unit/PG-regression only**; Redis correctness is a **LOCAL** gate (`REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1`, or `REPLICARE_REDIS_CLUSTER=1`; the tri-engine daemon test via `task test:integration:tri`). |
 
 ---
 

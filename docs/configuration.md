@@ -87,11 +87,43 @@ Postgres; MySQL syncs are strictly at-least-once).
 | `local_infile` | bool | hint that the target permits `LOAD DATA LOCAL INFILE`, the copy/apply transport (**required** in v1). replicare probes it at connect and halts loud if off — no INSERT fallback yet. A server system variable, not a grant |
 | `params` | map | extra key=value DSN parameters |
 
+### Redis connection block
+
+Used when an endpoint's `engine` is `redis`. See [the Redis engine page](redis.md)
+for how Redis CDC works (SCAN reconciliation + a target-vs-source delete sweep, not
+triggers) and its two wrinkles (a Redis sync still keeps its state store on
+Postgres; copy progress is coarse). Redis is topology-shaped rather than a single
+host, and carries engine-specific selection and CDC tuning.
+
+| Field | Type | Notes |
+|---|---|---|
+| `mode` | `standalone`\|`cluster`\|`sentinel` | default `standalone`; `sentinel` is parsed but experimental (failover not hardened in v1) |
+| `host` / `port` | string / int | standalone seed (port default 6379) |
+| `nodes` | list of `host:port` | seed nodes for `cluster`/`sentinel` (also allowed for standalone) |
+| `db` | int | logical DB index (standalone only; **must be 0 in cluster**) |
+| `user` / `password` | string | ACL user (Redis 6+); use `${VAR}` for the password |
+| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | same spectrum as Postgres `sslmode` |
+| `sentinel_master` | string | required when `mode: sentinel` |
+| `read_from_replica` | bool | offload **value** reads to replicas; delete detection still reads the master (a lagging replica would cause false deletes) |
+| `types` | list | optional type filter: `string`/`list`/`set`/`zset`/`hash`/`stream` (needs Redis 6.0+ for server-side `SCAN … TYPE`) |
+| `scan_count` | int | `SCAN COUNT` hint per call (default 512); distinct from the neutral drain batch |
+| `reconcile_interval` | duration | cadence of the rolling upsert reconciliation scan |
+| `delete_sweep_interval` | duration | cadence of the target-vs-source delete sweep (bounds delete-propagation latency) |
+| `big_key_warn_bytes` | size | DUMP-and-warn above this (`MEMORY USAGE`); `0` = off |
+| `big_key_refuse_bytes` | size | block loud above this; must be ≥ `big_key_warn_bytes` |
+| `notifications` | bool | enable the lossy keyspace-notification latency accelerator (default off; never trusted for correctness) |
+| `ttl_mode` | `relative`\|`absttl` | `relative` (default) is clock-skew-safe; `absttl` is opt-in for trusted clocks |
+| `params` | map | extra engine-internal params |
+
+Selection for a Redis sync is **key-pattern globs** (Redis `SCAN … MATCH`
+semantics), not `schema.table` — see [Selection](#selection) below.
+
 **`state_store`** is where replicare keeps its *own* operational state (sync
 progress, cursors, the ownership lock) — a dedicated `replicare_state` schema it
 creates and owns. It may point at the target DB, the source DB, or a separate
 Postgres. (This is distinct from the source-side delta/track tables, which always
-live on the source.)
+live on the source. Redis writes nothing to the source at all, so a Redis sync's
+*only* durable state is here — see [the Redis engine page](redis.md).)
 
 ## `syncs`
 
@@ -118,6 +150,12 @@ are **skipped with a warning** (they can't be captured). An FK pointing from a
 selected table to an *excluded* one triggers a dangling-FK warning — the target
 must already satisfy that parent.
 
+For **Redis**, `include`/`exclude` are **key-pattern globs** using Redis `SCAN …
+MATCH` semantics (`*`, `?`, `[…]`, hash-tags), matched **exclude-wins**. There are
+no tables, keys, or FKs — the "unit" is the logical keyspace (one DB, or DB 0 in
+cluster). An optional `types` filter in the `redis:` block narrows selection to
+specific value types.
+
 ### `tuning` (per sync)
 
 | Field | Type | Default | Meaning |
@@ -131,6 +169,10 @@ must already satisfy that parent.
 Durations use Go syntax (`ms`, `s`, `m`, `h`); sizes accept `KB`/`MB`/`GB`/`TB`
 (×1000) or `KiB`/`MiB`/`GiB` (×1024), or a bare byte count. Defaults favor low
 source pressure — see [operations.md](operations.md) for tuning guidance.
+
+For **Redis**, the neutral `retention.*` knobs are inert (there is no source-side
+delta queue to bound); Redis pacing lives in the `redis:` block instead
+(`scan_count`, `reconcile_interval`, `delete_sweep_interval`).
 
 ## Full example
 

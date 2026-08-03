@@ -104,6 +104,44 @@ independently of tracing.
 See [the MySQL engine page](mysql.md) for the full requirements and the two
 operational wrinkles.
 
+## Redis-specific issues
+
+- **`validate` blocks: newer source → older target (RDB version).** `RESTORE`
+  rejects a payload whose RDB version exceeds the target's max, so replicare blocks
+  a newer→older pair up front (the error mentions the version gap). Upgrade the
+  target to at least the source's version, or replicate the other direction.
+- **`validate` blocks: a source module is missing on the target.** Module-defined
+  types (RedisJSON, RedisBloom, …) produce opaque `DUMP` payloads only the identical
+  module can `RESTORE`. Load the module on the target, or exclude those keys.
+- **Every apply fails loud with a `RESTORE` permission error.** `RESTORE` is an
+  `@dangerous` ACL command and is **not** in the usual read-write presets — grant it
+  explicitly with `+restore` on the target role (see
+  [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt)).
+- **A copy refuses on a big key.** Above `big_key_refuse_bytes` replicare blocks
+  loud rather than doing torn incremental transport (which would be unfaithful).
+  Raise the cap if the key genuinely must replicate, or exclude it. Below the cap
+  but above `big_key_warn_bytes` you'll see a big-key WARN but the copy proceeds.
+- **A deleted key still exists on the target.** Deletes are **not captured** —
+  they're found by the periodic target-vs-source sweep, so a source `DEL` converges
+  only after the next sweep completes (bounded by `delete_sweep_interval`). Watch
+  `replicare_delete_reconciliation_lag_seconds`; shorten `delete_sweep_interval` for
+  faster delete propagation (at more source/target scan load). Upserts converge
+  faster via the rolling reconciliation scan.
+- **Keyspace notifications missed a change.** Notifications are a *lossy accelerator
+  only* (fire-and-forget, lost on disconnect, node-local in cluster). A missed event
+  is always caught by the next reconciliation/sweep; on a subscription gap replicare
+  forces a full pass. Never rely on them for correctness — they only cut latency.
+- **"Redis→Redis but it wants a Postgres?"** Yes — replicare's own state store is
+  Postgres regardless of the data engine (v1's only `StateStore` backend). Point it
+  at any small Postgres; it's just control-plane bookkeeping, and Redis writes
+  nothing to its own source. See [the Redis engine page](redis.md).
+- **The daemon refuses to connect to Dragonfly.** Dragonfly is blocked in v1 (its
+  RDB `DUMP`/`RESTORE` compatibility is unverified). Valkey and (best-effort) KeyDB
+  are accepted; a non-Redis-family server is refused at connect.
+
+See [the Redis engine page](redis.md) for the full requirements, the two pre-flight
+gates, and the operational wrinkles.
+
 ## Getting more detail
 
 Set `logging.level: debug` and `logging.format: text` for verbose, readable

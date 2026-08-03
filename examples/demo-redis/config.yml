@@ -1,0 +1,41 @@
+# replicare Redis demo config: replicate keys matching `app:*` from the 6.2 source
+# to the 7.4 target. Redis CDC is capture-less — SCAN reconciliation for upserts
+# (every pass re-reads present keys and RESTOREs them, idempotent) and a durable
+# target-vs-source diff for deletes (redis-plan §0.3/§0.4). Values move via
+# DUMP -> RESTORE REPLACE, VALUE-faithful, never transformed (CLAUDE.md §1.7). The
+# state store is a separate Postgres (v1's only StateStore backend, CLAUDE.md §9) —
+# the replicated DATA is Redis -> Redis, single-engine (a sync never crosses
+# engines, CLAUDE.md §6).
+logging:
+  level: info
+  format: text
+
+observability:
+  status_addr: ":8080"
+  metrics_addr: ":9090"
+
+state_store:
+  engine: postgres
+  postgres: { host: state, port: 5432, database: replicare_state, user: postgres, password: postgres, sslmode: disable }
+
+sources:
+  cache:
+    engine: redis
+    # mode defaults to standalone; db defaults to 0. Point at the source node.
+    redis: { host: source, port: 6379 }
+
+targets:
+  replica:
+    engine: redis
+    redis: { host: target, port: 6379 }
+
+syncs:
+  - name: cache-to-replica
+    source: cache
+    targets: [replica]
+    # Selection is KEY-pattern globs (Redis SCAN MATCH semantics), not schema.table.
+    include: ["app:*"]
+    tuning:
+      # drain_interval paces the rolling reconciliation SCAN; the delete sweep runs
+      # on each healthy pass (delete latency is bounded by this, not instant).
+      drain_interval: 1s
