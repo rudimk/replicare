@@ -208,3 +208,17 @@ tasks:
       - defer: { task: harness:mysql:down }
       - defer: { task: harness:down }
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 ./internal/daemon/...
+
+  test:integration:tri:
+    desc: Run daemon tri-engine coexistence tests against ALL THREE harnesses (Postgres + MySQL + Redis)
+    cmds:
+      # RM9 runs Redis, Postgres and MySQL syncs in one daemon: the Postgres pair
+      # (source+target+state store), the MySQL pair, and the standalone Redis pair
+      # (6.2 source -> 7.4 target). Standalone Redis, not cluster, for coexistence.
+      - task: harness:up
+      - task: harness:mysql:up
+      - task: harness:redis:up
+      - defer: { task: harness:redis:down }
+      - defer: { task: harness:mysql:down }
+      - defer: { task: harness:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 REPLICARE_REDIS=1 go test -count=1 -p 1 ./internal/daemon/...
