@@ -41,6 +41,9 @@ type Syncer struct {
 	// used when the engine implements the KeyLister/KeyExister capability (Redis);
 	// nil/unused for capture-driven engines.
 	sweepCursors map[engine.TableRef]uint64
+	// sweepStarted stamps the start of each unit's current delete-sweep pass, so its
+	// duration (the delete-reconciliation-lag gauge, RM8) is published on completion.
+	sweepStarted map[engine.TableRef]time.Time
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture

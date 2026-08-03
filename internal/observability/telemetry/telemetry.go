@@ -107,6 +107,23 @@ func (t *Telemetry) SetReplicationLag(sync string, target engine.TargetID, table
 	t.reg.Gauge(observability.MetricReplicationLagSeconds).WithLabelValues(sync, string(target), table.String()).Set(seconds)
 }
 
+// SetDeleteLag publishes how long the last completed delete-reconciliation sweep
+// took for a unit — the staleness signal for Redis's capture-less deletes (RM8).
+func (t *Telemetry) SetDeleteLag(sync string, target engine.TargetID, table engine.TableRef, seconds float64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricDeleteReconcileLag).WithLabelValues(sync, string(target), table.String()).Set(seconds)
+}
+
+// AddDeletes advances the delete-sweep counter for a unit.
+func (t *Telemetry) AddDeletes(sync string, target engine.TargetID, table engine.TableRef, n int64) {
+	if t.reg == nil || n <= 0 {
+		return
+	}
+	t.reg.Counter(observability.MetricDeletesReconciled).WithLabelValues(sync, string(target), table.String()).Add(float64(n))
+}
+
 // SetThroughput publishes the current apply/copy throughput for a sync (rows/sec).
 func (t *Telemetry) SetThroughput(sync string, rowsPerSec float64) {
 	if t.reg == nil {
