@@ -129,13 +129,15 @@ health signals.
 - [CLI reference](docs/cli.md) — every command.
 - [Operations](docs/operations.md) — tuning, health, retention, restarts.
 - [Troubleshooting](docs/troubleshooting.md) — common problems and fixes.
+- [Postgres engine](docs/postgres.md) — the reference engine (trigger CDC, faithful `COPY`, FK components).
 - [MySQL engine](docs/mysql.md) — the MySQL→MySQL engine.
+- [Redis engine](docs/redis.md) — the Redis→Redis engine (SCAN reconciliation, delete sweep, `DUMP`/`RESTORE`).
 
 ## Status
 
-v1 ships **Postgres → Postgres** and **MySQL → MySQL** (single source → one or more targets,
-one-way; a sync never crosses engines, and both can run in one daemon). **Redis** is planned; the
-engine core is designed to accommodate it. Multi-master and HA/leader-election are on the roadmap.
+v1 ships **Postgres → Postgres**, **MySQL → MySQL**, and **Redis → Redis** (single source → one or
+more targets, one-way; a sync never crosses engines, and all three can run in one daemon).
+Multi-master and HA/leader-election are on the roadmap.
 
 ## License
 

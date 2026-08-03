@@ -11,7 +11,7 @@ schema knows how to interpret a Redis sync's rows.
 
 > The StateStore is the *daemon's own* operational state. It is **not** where
 > Redis change-capture lives — Redis has no source-side delta/track tables; its
-> CDC is SCAN reconciliation (see [redis-version-support](redis-version-support.md)).
+> CDC is SCAN reconciliation (see [the Redis engine page](redis.md) and CLAUDE.md §3.2).
 
 ## The overloads
 

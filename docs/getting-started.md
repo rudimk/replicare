@@ -152,6 +152,11 @@ replicare run config.yml               # start replicating (Ctrl-C / SIGTERM to 
 findings (incompatible/missing types) before running. Once running, check
 progress any time with `replicare status config.yml`.
 
+Two more commands you'll reach for later: **`replicare capture install|remove`** to
+pre-provision (or tear down) the source-side trigger capture out of band, and
+**`replicare reseed --sync <s> --target <t>`** to force a laggard or diverged target
+to re-copy. See the [CLI reference](cli.md).
+
 ### 5. Deploy
 
 Install the binary and the sample [systemd unit](../deploy/replicare.service), or
@@ -164,5 +169,7 @@ for tuning, monitoring, retention/reseed, and troubleshooting.
 - [CLI reference](cli.md) — every command.
 - [Operations](operations.md) — tuning, health signals, retention, restarts.
 - [Troubleshooting](troubleshooting.md) — common problems and fixes.
+- [Architecture](architecture.md) — how the pipeline works end to end (capture → copy → stream → apply → checkpoint).
+- [Postgres engine](postgres.md) — the reference engine: trigger CDC, faithful `COPY`, FK components, least-privilege grants.
 - [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](../examples/demo-mysql/).
 - [Redis engine](redis.md) — Redis→Redis specifics: SCAN reconciliation, the delete sweep, TTL, cluster, and ACLs.

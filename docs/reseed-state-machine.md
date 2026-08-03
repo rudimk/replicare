@@ -1,9 +1,12 @@
 # M5c — Delta purge, bounded retention & forced-reseed state machine
 
-**Status:** design artifact for M5c (the Momus B3 pre-work). It specifies the
-purge mechanics, the retention caps, and — the load-bearing part — the reseed
-state machine, with a stated invariant for **why no source change is lost across
-the handoff**. Section refs (§3.4, §4, §3.3, §8.1) point at `CLAUDE.md`.
+**Status: implemented and shipped.** This began as the design artifact for the
+purge/retention/reseed work and is now the reference for the code that ships it:
+`internal/reseed` (the state machine) and `internal/pipeline/stream.go` (the daemon
+loop that enforces retention and drives reseeds every pass). It specifies the purge
+mechanics, the retention caps, and — the load-bearing part — the reseed state
+machine, with a stated invariant for **why no source change is lost across the
+handoff**. Section refs (§3.4, §4, §3.3, §8.1) point at `CLAUDE.md`.
 
 This re-derives the two guarantees M5c has to hold together: **capture-first
 initial copy** (§4) and **crash-safe at-least-once consumption** (§3.3).
