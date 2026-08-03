@@ -75,6 +75,17 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if err != nil {
 		return fail(fmt.Errorf("introspect target: %w", err))
 	}
+	// Prime every copy-worker source with the SYNC selection. Engines that filter
+	// by selection at copy-read time (Redis: key-glob SCAN) need each worker to hold
+	// the real selection before the copy layer's later per-table column probe
+	// introspects it with a table-ref selection (first-write-wins; otherwise a Redis
+	// worker would filter its SCAN by the unit ref and copy nothing). Harmless —
+	// a redundant read-only introspect — for capture-driven engines (Postgres/MySQL).
+	for _, w := range workers {
+		if _, err := w.Src.Introspect(ctx, sel); err != nil {
+			return fail(fmt.Errorf("introspect copy source: %w", err))
+		}
+	}
 	srcVer, err := source.ServerVersion(ctx)
 	if err != nil {
 		return fail(fmt.Errorf("source version: %w", err))
