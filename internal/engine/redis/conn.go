@@ -57,6 +57,10 @@ type conn struct {
 // Do delegates to the routing client.
 func (c *conn) Do(ctx context.Context, args ...any) *goredis.Cmd { return c.uc.Do(ctx, args...) }
 
+// pipeline returns a routing-aware pipeliner: in cluster mode go-redis groups the
+// queued commands by owning node, so per-key RESTORE dispatches correctly.
+func (c *conn) pipeline() goredis.Pipeliner { return c.uc.Pipeline() }
+
 // Close releases the client.
 func (c *conn) Close() error { return c.uc.Close() }
 
@@ -88,6 +92,20 @@ func (c *conn) masters(ctx context.Context) ([]string, error) {
 		}
 	}
 	return addrs, nil
+}
+
+// forEachShard runs fn against every master's command surface: each shard master
+// in cluster mode (concurrently, via ForEachMaster — the per-master parallelism
+// unit, redis-plan §0.5), or the single primary otherwise. The per-node client
+// keeps SCAN and the following DUMP/PTTL local to one keyspace, sidestepping
+// cluster cross-slot limits (redis-plan §0.5). fn must be safe for concurrent use.
+func (c *conn) forEachShard(ctx context.Context, fn func(ctx context.Context, rc goredis.Cmdable) error) error {
+	if c.cluster != nil {
+		return c.cluster.ForEachMaster(ctx, func(ctx context.Context, cl *goredis.Client) error {
+			return fn(ctx, cl)
+		})
+	}
+	return fn(ctx, c.uc)
 }
 
 // open builds a mode-appropriate client from a resolved ConnConfig (topology +

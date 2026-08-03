@@ -15,6 +15,12 @@ import (
 type Source struct {
 	cfg engine.ConnConfig
 	db  *conn
+	// sel is the compiled sync key-selection, learned from the first Introspect
+	// (the daemon introspects with the real sync selection before copy; RM4's
+	// CopyChunk applies it at SCAN time). nil means match-all. First-write-wins so
+	// the copy layer's later column-probe Introspect (a unit-ref selection) does
+	// not clobber the real key-globs. See introspect.go / copy.go.
+	sel *selection
 }
 
 var _ engine.Source = (*Source)(nil)
@@ -57,6 +63,9 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	if s.db == nil {
 		return nil, errNotConnected
 	}
+	if s.sel == nil {
+		s.sel = compileSelection(sel)
+	}
 	return introspect(ctx, s.db, s.cfg, sel)
 }
 func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
@@ -64,12 +73,6 @@ func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
 }
 func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error {
 	return errNotImplemented // RM7
-}
-func (s *Source) PlanChunks(context.Context, engine.TableRef, engine.ChunkOptions) ([]engine.Chunk, error) {
-	return nil, errNotImplemented // RM4
-}
-func (s *Source) CopyChunk(context.Context, engine.Chunk, io.Writer) error {
-	return errNotImplemented // RM4
 }
 func (s *Source) ReadDirtyKeys(context.Context, engine.TableRef, engine.TargetID, int) ([]engine.DirtyKey, error) {
 	return nil, errNotImplemented // RM5
