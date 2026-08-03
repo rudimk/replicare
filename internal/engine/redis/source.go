@@ -26,6 +26,9 @@ type Source struct {
 	// monotonic per-unit change-id (a lag/ordering hint only; §0.4).
 	recon    *reconState
 	changeID int64
+
+	// notify is the optional keyspace-notification accelerator (RM7); nil when off.
+	notify *notifier
 }
 
 var _ engine.Source = (*Source)(nil)
@@ -43,8 +46,10 @@ func (s *Source) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close releases the client. Safe on an unconnected Source.
+// Close stops the notification accelerator (if any) and releases the client. Safe
+// on an unconnected Source.
 func (s *Source) Close(context.Context) error {
+	s.stopNotifier()
 	if s.db == nil {
 		return nil
 	}
@@ -73,11 +78,6 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	}
 	return introspect(ctx, s.db, s.cfg, sel)
 }
-func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
-	return errNotImplemented // RM7 (keyspace-notification subscription)
-}
-func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error {
-	return errNotImplemented // RM7
-}
 
+// InstallCapture / RemoveCapture — see notify.go (RM7, the keyspace-notification accelerator).
 // ReadDirtyKeys, RereadCurrent, ConfirmConsumed, DeltaBacklog, Purge — see stream.go (RM5).

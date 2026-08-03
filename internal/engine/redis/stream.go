@@ -66,11 +66,37 @@ func (s *Source) ReadDirtyKeys(ctx context.Context, _ engine.TableRef, _ engine.
 		s.recon = &reconState{scanners: sc, cursors: make([]uint64, len(sc)), done: make([]bool, len(sc))}
 	}
 	tun := tuningFromParams(s.cfg.Params)
-	keys, _, err := scanBatch(ctx, s.recon, tun.scanCount, max, s.sel)
+	batch := make([]engine.DirtyKey, 0, max)
+
+	// Priority: notification-flagged keys are drained AHEAD of the rolling scan
+	// (RM7), so a flagged change converges before the next full-scan boundary. A
+	// subscription gap forces a fresh full pass (dropped events are lossy). The keys
+	// are re-read the same way as scanned keys, so a `set` and a `del` both flow
+	// through the Op-agnostic re-read → RESTORE-or-DEL apply path.
+	if s.notify != nil {
+		flagged, gapped := s.notify.drain(max)
+		if gapped {
+			s.recon.reset()
+		}
+		for _, k := range flagged {
+			if s.sel == nil || s.sel.match(k) {
+				s.changeID++
+				batch = append(batch, engine.DirtyKey{
+					DeltaID: engine.DeltaID(s.changeID),
+					Op:      engine.OpUpdate,
+					Key:     engine.KeyValues{k},
+				})
+			}
+		}
+		if len(batch) >= max {
+			return batch, nil
+		}
+	}
+
+	keys, _, err := scanBatch(ctx, s.recon, tun.scanCount, max-len(batch), s.sel)
 	if err != nil {
 		return nil, err
 	}
-	batch := make([]engine.DirtyKey, 0, len(keys))
 	for _, k := range keys {
 		s.changeID++
 		batch = append(batch, engine.DirtyKey{
