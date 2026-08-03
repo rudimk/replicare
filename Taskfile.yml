@@ -150,6 +150,46 @@ tasks:
       # would otherwise clobber each other's schemas.
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 {{.PKG}}
 
+  harness:redis:up:
+    desc: Start the multi-version standalone Redis test harness (6.2 source + 7.4 target)
+    cmds:
+      - docker compose -f test/harness-redis/docker-compose.yml up -d --wait
+
+  harness:redis:down:
+    desc: Stop and remove the standalone Redis test harness (ephemeral data discarded)
+    cmds:
+      - docker compose -f test/harness-redis/docker-compose.yml down -v
+
+  harness:redis:config:
+    desc: Validate the standalone Redis harness compose file
+    cmds:
+      - docker compose -f test/harness-redis/docker-compose.yml config -q
+
+  harness:redis:cluster:up:
+    desc: Start the 3-node Redis Cluster harness and assert cluster_state:ok (Linux/host-net only)
+    cmds:
+      - docker compose -f test/harness-redis-cluster/docker-compose.yml up -d --wait node1 node2 node3
+      - docker compose -f test/harness-redis-cluster/docker-compose.yml up cluster-init
+      # Poll until the cluster forms (a node healthcheck can't assert this without
+      # deadlocking the one-shot init).
+      - >-
+        for i in $(seq 1 30); do
+          redis-cli -p 7000 cluster info 2>/dev/null | grep -q 'cluster_state:ok' && { echo "cluster_state:ok"; exit 0; };
+          sleep 1;
+        done; echo "cluster did not reach state ok" >&2; exit 1
+
+  harness:redis:cluster:down:
+    desc: Stop and remove the Redis Cluster harness
+    cmds:
+      - docker compose -f test/harness-redis-cluster/docker-compose.yml down -v
+
+  test:integration:redis:
+    desc: Run Redis integration tests against the 6.2->7.4 standalone harness (brings it up/down)
+    cmds:
+      - task: harness:redis:up
+      - defer: { task: harness:redis:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1 go test -count=1 -p 1 {{.PKG}}
+
   test:integration:dual:
     desc: Run daemon engine-coexistence tests against BOTH harnesses (Postgres + MySQL)
     cmds:

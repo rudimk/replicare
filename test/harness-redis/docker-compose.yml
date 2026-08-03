@@ -1,0 +1,41 @@
+# Multi-version standalone Redis test harness for replicare.
+#
+# An OLD source Redis (6.2) and a MODERN target Redis (7.4) exercise the
+# old-source -> modern-target path replicare is designed for (CLAUDE.md §1.6) and
+# the RDB-version directional gate (redis-plan §0.2: older/equal source ->
+# newer/equal target works; newer -> older fails loud).
+#
+# Usage:
+#   task harness:redis:up      # start both, wait for healthy
+#   task harness:redis:down    # stop and remove (data is ephemeral)
+#
+# Data is NOT persisted (--save "" --appendonly no) so each run starts clean.
+# Ports 6390/6391 avoid a local Redis (6379), the Postgres harness (5440/5441),
+# and the MySQL harness (3340/3341), so harnesses can coexist (the tri-engine
+# test, RM9).
+
+services:
+  source-redis:
+    # 6.2 is the modern-recommended-minus floor exercised in CI; the engine's
+    # best-effort source floor is 3.0 (RESTORE REPLACE). See
+    # docs/redis-version-support.md.
+    image: redis:6.2
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6390:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  target-redis:
+    image: redis:7.4
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6391:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20

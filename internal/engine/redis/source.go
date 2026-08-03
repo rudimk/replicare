@@ -1,0 +1,84 @@
+package redis
+
+import (
+	"context"
+	"io"
+
+	"github.com/rudimk/replicare/internal/engine"
+)
+
+// Source is the Redis read side: topology/version introspection (RM1/RM2), SCAN
+// initial snapshot (RM4), SCAN reconciliation + DUMP re-read (RM5), and durable
+// delete detection (RM6). RM0 implements only the connection lifecycle and the
+// version/fork probe; the remaining methods are stubs until their milestones
+// (see .sisyphus/redis-plan.md).
+type Source struct {
+	cfg engine.ConnConfig
+	db  client
+}
+
+var _ engine.Source = (*Source)(nil)
+
+// Connect opens the (standalone, RM0) Redis client and pings it.
+func (s *Source) Connect(ctx context.Context) error {
+	if s.db != nil {
+		return nil
+	}
+	c, err := open(ctx, s.cfg)
+	if err != nil {
+		return err
+	}
+	s.db = c
+	return nil
+}
+
+// Close releases the client. Safe on an unconnected Source.
+func (s *Source) Close(context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	err := s.db.Close()
+	s.db = nil
+	return err
+}
+
+// ServerVersion returns the numeric server version and refuses unsupported forks.
+func (s *Source) ServerVersion(ctx context.Context) (int, error) {
+	if s.db == nil {
+		return 0, errNotConnected
+	}
+	return serverVersion(ctx, s.db)
+}
+
+// --- stubs until their milestones (redis-plan RM2–RM7) ---
+
+func (s *Source) Introspect(context.Context, engine.Selection) (*engine.Schema, error) {
+	return nil, errNotImplemented // RM2
+}
+func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
+	return errNotImplemented // RM7 (keyspace-notification subscription)
+}
+func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error {
+	return errNotImplemented // RM7
+}
+func (s *Source) PlanChunks(context.Context, engine.TableRef, engine.ChunkOptions) ([]engine.Chunk, error) {
+	return nil, errNotImplemented // RM4
+}
+func (s *Source) CopyChunk(context.Context, engine.Chunk, io.Writer) error {
+	return errNotImplemented // RM4
+}
+func (s *Source) ReadDirtyKeys(context.Context, engine.TableRef, engine.TargetID, int) ([]engine.DirtyKey, error) {
+	return nil, errNotImplemented // RM5
+}
+func (s *Source) RereadCurrent(context.Context, engine.TableRef, []engine.KeyValues, io.Writer) error {
+	return errNotImplemented // RM5
+}
+func (s *Source) ConfirmConsumed(context.Context, engine.TableRef, engine.TargetID, []engine.DeltaID) error {
+	return errNotImplemented // RM5
+}
+func (s *Source) Purge(context.Context, engine.TableRef, []engine.TargetID, engine.RetentionPolicy) (engine.PurgeStats, error) {
+	return engine.PurgeStats{}, errNotImplemented // RM6 (no source-side capture to purge)
+}
+func (s *Source) DeltaBacklog(context.Context, engine.TableRef, engine.TargetID) (engine.DeltaBacklog, error) {
+	return engine.DeltaBacklog{}, errNotImplemented // RM5
+}

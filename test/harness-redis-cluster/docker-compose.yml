@@ -1,0 +1,69 @@
+# 3-node Redis Cluster test harness for replicare (redis-plan RM0, Sisyphus H6).
+#
+# Redis Cluster + docker + host access is a known pain: nodes gossip their own
+# addresses, so a host client that learns topology (CLUSTER SHARDS/SLOTS) must be
+# able to reach the announced addresses. We use **network_mode: host** (Linux) so
+# every node binds a distinct port directly on 127.0.0.1 and announces 127.0.0.1
+# — the simplest reliable path. (Docker Desktop/Mac lacks host networking; this
+# harness is Linux-only, which is fine since Redis integration is a local gate.)
+#
+# Nodes: 3 masters, no replicas — client ports 7000/7001/7002, bus ports
+# 17000/17001/17002 (port+10000). The one-shot `cluster-init` forms the cluster.
+#
+# Usage:
+#   task harness:redis:cluster:up     # start nodes + form cluster, assert ok
+#   task harness:redis:cluster:down
+
+services:
+  node1:
+    image: redis:7.4
+    network_mode: host
+    command: >-
+      redis-server --port 7000 --cluster-enabled yes --cluster-config-file nodes-7000.conf
+      --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7000", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  node2:
+    image: redis:7.4
+    network_mode: host
+    command: >-
+      redis-server --port 7001 --cluster-enabled yes --cluster-config-file nodes-7001.conf
+      --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7001", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  node3:
+    image: redis:7.4
+    network_mode: host
+    command: >-
+      redis-server --port 7002 --cluster-enabled yes --cluster-config-file nodes-7002.conf
+      --cluster-node-timeout 5000 --cluster-announce-ip 127.0.0.1
+      --save "" --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "7002", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # One-shot cluster bootstrap: runs once all nodes answer PING, forms the cluster,
+  # then exits. The task polls CLUSTER INFO for cluster_state:ok afterward (a node
+  # healthcheck can't assert cluster_state without deadlocking against this init).
+  cluster-init:
+    image: redis:7.4
+    network_mode: host
+    depends_on:
+      node1: { condition: service_healthy }
+      node2: { condition: service_healthy }
+      node3: { condition: service_healthy }
+    command: >-
+      redis-cli --cluster create 127.0.0.1:7000 127.0.0.1:7001 127.0.0.1:7002 --cluster-yes
+    restart: "no"
