@@ -48,6 +48,11 @@ const (
 	MetricApplyBatchSeconds     = "replicare_apply_batch_seconds"
 	MetricErrorsTotal           = "replicare_errors_total"
 	MetricPhaseInfo             = "replicare_table_phase_info"
+	// Delete-reconciliation signals (redis-plan RM8). For capture-driven engines
+	// (Postgres/MySQL) deletes flow through the delta path and these stay unset;
+	// Redis, whose deletes are found by the target-vs-source sweep, publishes them.
+	MetricDeleteReconcileLag = "replicare_delete_reconciliation_lag_seconds"
+	MetricDeletesReconciled  = "replicare_deletes_reconciled_total"
 )
 
 // Metrics is the full metric registry. M6 asserts the running registry matches.
@@ -65,6 +70,8 @@ var Metrics = []Metric{
 	{MetricApplyBatchSeconds, Histogram, "Apply batch duration", []string{LabelSync, LabelTarget}},
 	{MetricErrorsTotal, Counter, "Errors by category", []string{LabelSync, "category"}},
 	{MetricPhaseInfo, Gauge, "Table phase (initial_copy/streaming) as an info gauge", []string{LabelSync, LabelTable, LabelPhase}},
+	{MetricDeleteReconcileLag, Gauge, "Seconds the last completed delete-reconciliation sweep took (staleness of capture-less deletes)", []string{LabelSync, LabelTarget, LabelTable}},
+	{MetricDeletesReconciled, Counter, "Keys deleted by the target-vs-source delete sweep", []string{LabelSync, LabelTarget, LabelTable}},
 }
 
 // Span names for OTel traces. Drain/apply spans against an unreachable target

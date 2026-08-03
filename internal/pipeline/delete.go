@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -74,14 +75,30 @@ func (s *Syncer) deleteReconcile(ctx context.Context) error {
 	if s.sweepCursors == nil {
 		s.sweepCursors = map[engine.TableRef]uint64{}
 	}
+	if s.sweepStarted == nil {
+		s.sweepStarted = map[engine.TableRef]time.Time{}
+	}
 	for _, ref := range s.Replicable {
-		// deleted count is surfaced by the delete-reconciliation-lag metric in RM8
-		// (observability verification); RM6 lands the correctness machinery.
-		_, next, err := DeleteSweepStep(ctx, lister, exister, s.Sink, ref, s.sweepCursors[ref], s.DrainBatch)
+		// Stamp the start of a fresh rolling pass (cursor at 0 and not yet timed).
+		if s.sweepCursors[ref] == 0 && s.sweepStarted[ref].IsZero() {
+			s.sweepStarted[ref] = time.Now()
+		}
+		deleted, next, err := DeleteSweepStep(ctx, lister, exister, s.Sink, ref, s.sweepCursors[ref], s.DrainBatch)
 		if err != nil {
 			return err
 		}
+		if deleted > 0 {
+			s.Tel.AddDeletes(s.Name, s.Target, ref, int64(deleted))
+		}
 		s.sweepCursors[ref] = next
+		// A completed rolling pass (next==0) publishes how long it took — the
+		// delete-reconciliation staleness signal.
+		if next == 0 {
+			if st := s.sweepStarted[ref]; !st.IsZero() {
+				s.Tel.SetDeleteLag(s.Name, s.Target, ref, time.Since(st).Seconds())
+			}
+			s.sweepStarted[ref] = time.Time{}
+		}
 	}
 	return nil
 }
