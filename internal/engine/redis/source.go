@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"io"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -21,6 +20,12 @@ type Source struct {
 	// the copy layer's later column-probe Introspect (a unit-ref selection) does
 	// not clobber the real key-globs. See introspect.go / copy.go.
 	sel *selection
+
+	// recon is the streaming reconciliation SCAN state (RM5), held across
+	// ReadDirtyKeys calls so a pass is bounded, not buffered. changeID is the
+	// monotonic per-unit change-id (a lag/ordering hint only; §0.4).
+	recon    *reconState
+	changeID int64
 }
 
 var _ engine.Source = (*Source)(nil)
@@ -74,18 +79,5 @@ func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
 func (s *Source) RemoveCapture(context.Context, []engine.TableRef) error {
 	return errNotImplemented // RM7
 }
-func (s *Source) ReadDirtyKeys(context.Context, engine.TableRef, engine.TargetID, int) ([]engine.DirtyKey, error) {
-	return nil, errNotImplemented // RM5
-}
-func (s *Source) RereadCurrent(context.Context, engine.TableRef, []engine.KeyValues, io.Writer) error {
-	return errNotImplemented // RM5
-}
-func (s *Source) ConfirmConsumed(context.Context, engine.TableRef, engine.TargetID, []engine.DeltaID) error {
-	return errNotImplemented // RM5
-}
-func (s *Source) Purge(context.Context, engine.TableRef, []engine.TargetID, engine.RetentionPolicy) (engine.PurgeStats, error) {
-	return engine.PurgeStats{}, errNotImplemented // RM6 (no source-side capture to purge)
-}
-func (s *Source) DeltaBacklog(context.Context, engine.TableRef, engine.TargetID) (engine.DeltaBacklog, error) {
-	return engine.DeltaBacklog{}, errNotImplemented // RM5
-}
+
+// ReadDirtyKeys, RereadCurrent, ConfirmConsumed, DeltaBacklog, Purge — see stream.go (RM5).

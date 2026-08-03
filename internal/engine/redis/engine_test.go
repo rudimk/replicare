@@ -121,11 +121,11 @@ func TestDBIndex(t *testing.T) {
 func TestStubsNotImplemented(t *testing.T) {
 	ctx := context.Background()
 	s := &Source{}
-	if _, err := s.ReadDirtyKeys(ctx, engine.TableRef{}, "t", 10); err != errNotImplemented {
-		t.Errorf("Source.ReadDirtyKeys stub = %v, want errNotImplemented", err)
+	if err := s.InstallCapture(ctx, nil); err != errNotImplemented {
+		t.Errorf("Source.InstallCapture stub = %v, want errNotImplemented", err)
 	}
 	sink := &Sink{}
-	if _, err := sink.BeginApply(ctx, false, nil); err != errNotImplemented {
-		t.Errorf("Sink.BeginApply stub = %v, want errNotImplemented", err)
+	if err := sink.ApplyPass(ctx, engine.TableRef{}, nil, nil, nil); err != errNotImplemented {
+		t.Errorf("Sink.ApplyPass stub = %v, want errNotImplemented", err)
 	}
 }
