@@ -1,0 +1,92 @@
+# End-to-end replicare demo for Redis: an OLD source Redis (6.2), a MODERN target
+# Redis (7.4), and replicare replicating keys matching `app:*` from one to the
+# other — the old-source -> modern-target path replicare is built for
+# (redis-plan §0.2: RESTORE accepts an older payload on a newer server, never the
+# reverse). Redis CDC is capture-less SCAN reconciliation: replicare writes
+# NOTHING to the source (redis-plan §0.3).
+#
+#   # from the repo root, build the image first:
+#   task docker
+#   # then run the demo:
+#   cd examples/demo-redis && docker compose up
+#
+# The one-shot `seed` service writes a handful of app:* keys on the source; watch
+# replicare copy them into the target, then in another shell:
+#   docker compose exec source \
+#     redis-cli SET app:live hello    # a new key streams in
+#   docker compose exec source \
+#     redis-cli DEL app:1             # a delete propagates via the sweep
+#   docker compose exec target redis-cli KEYS 'app:*'
+#
+# Operator surface while it runs:
+#   curl localhost:8080/healthz ; curl localhost:8080/status ; curl localhost:9090/metrics
+#   # Redis-specific series: replicare_delete_reconciliation_lag_seconds,
+#   #                        replicare_deletes_reconciled_total
+#
+# The state store is Postgres (v1's only StateStore backend, CLAUDE.md §9): even a
+# Redis -> Redis sync needs it for the daemon's progress/cursors/ownership. A tiny
+# Postgres sidecar holds that state — the replicated DATA moves Redis -> Redis.
+
+services:
+  source:
+    image: redis:6.2
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  target:
+    image: redis:7.4
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # One-shot seeder: puts a few app:* keys on the source so the initial copy has
+  # something to move. Exits 0 after seeding.
+  seed:
+    image: redis:7.4
+    depends_on:
+      source:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        for i in 1 2 3 4 5; do redis-cli -h source SET "app:$$i" "v$$i"; done;
+        redis-cli -h source RPUSH app:list a b c;
+        redis-cli -h source HSET app:hash f1 v1 f2 v2;
+        redis-cli -h source ZADD app:zset 1 one 2 two;
+        echo seeded
+
+  # State store (v1 StateStore backend is Postgres, CLAUDE.md §9). Holds only the
+  # daemon's operational state — no replicated data.
+  state:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: replicare_state
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d replicare_state"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  replicare:
+    image: replicare:latest
+    depends_on:
+      source:
+        condition: service_healthy
+      target:
+        condition: service_healthy
+      state:
+        condition: service_healthy
+    volumes:
+      - ./config.yml:/etc/replicare/config.yml:ro
+    command: ["run", "/etc/replicare/config.yml"]
+    ports:
+      - "8080:8080" # status API
+      - "9090:9090" # Prometheus /metrics

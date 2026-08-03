@@ -93,6 +93,14 @@ instead: the source role needs `SELECT`+`TRIGGER` on the replicated tables and
 ownership of the `replicare` capture database; the target role needs the four DML
 verbs plus `CREATE TEMPORARY TABLES`. See [the MySQL engine page](mysql.md).
 
+For **Redis**, use the ACL presets
+[`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt) and
+[`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt): the source role
+is read-only (`+scan +dump +pttl +exists +type +memory|usage`); the target role
+needs `+restore +del +scan +exists +module|list`. Note the foot-gun — `RESTORE` is
+`@dangerous` and must be granted explicitly with `+restore`. See
+[the Redis engine page](redis.md).
+
 ### 3. Write a config
 
 Copy [`../examples/replicare.yml`](../examples/replicare.yml) and edit the
@@ -126,6 +134,12 @@ For a **MySQL** sync, set `engine: mysql` with `mysql:` blocks (see the
 store stays on Postgres. A ready-to-run example is in
 [`../examples/demo-mysql/config.yml`](../examples/demo-mysql/config.yml).
 
+For a **Redis** sync, set `engine: redis` with `redis:` blocks (see the
+[Redis connection block](configuration.md#redis-connection-block)); the state store
+still stays on Postgres (Redis writes nothing to the source, so *all* its durable
+state lives there). Selection uses **key-pattern globs** (`include: ["app:*"]`)
+rather than `schema.table`. See [the Redis engine page](redis.md).
+
 ### 4. Validate, then run
 
 ```sh
@@ -151,3 +165,4 @@ for tuning, monitoring, retention/reseed, and troubleshooting.
 - [Operations](operations.md) — tuning, health signals, retention, restarts.
 - [Troubleshooting](troubleshooting.md) — common problems and fixes.
 - [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](../examples/demo-mysql/).
+- [Redis engine](redis.md) — Redis→Redis specifics: SCAN reconciliation, the delete sweep, TTL, cluster, and ACLs.

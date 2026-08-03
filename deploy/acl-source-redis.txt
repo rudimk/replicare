@@ -1,0 +1,48 @@
+# Least-privilege Redis 6+ ACL for the replicare daemon on a SOURCE Redis
+# (redis-plan §0.5, CLAUDE.md §12). Redis CDC is capture-less: replicare only
+# READS the source — SCAN reconciliation for upserts, DUMP+PTTL to move values
+# verbatim, EXISTS to detect deletes. It writes NOTHING to the source and needs
+# NO admin. Apply with `redis-cli ACL SETUSER ...` or drop the SETUSER line into
+# a redis.conf `user` directive / ACL file. Replace the name and set a real
+# password; scope the key pattern to what you replicate.
+#
+# NOTE: keys are matched by the sync's selection globs at SCAN time; the ACL key
+# pattern below is an independent, defense-in-depth restriction on what the role
+# may read. Use `~*` for the whole keyspace or a tighter `~app:*`.
+
+ACL SETUSER replicare on >CHANGE-ME ~* resetchannels \
+  +ping +info \
+  +scan +type +dump +pttl +exists +memory|usage
+
+# Command-by-command rationale:
+#   +ping            liveness on connect
+#   +info            server version + fork detection (redis-plan §1.6) and INFO stats
+#   +scan            the reconciliation SCAN (upserts) and the target-vs-source diff
+#   +type            optional server-side `SCAN ... TYPE` selection (Redis 6.0+)
+#   +dump            value-faithful read (RESTORE payload) for copy + streaming re-read
+#   +pttl            TTL capture (relative-TTL default; -1 no-expiry, -2 gone)
+#   +exists          delete detection — MissingAtSource (master-pinned)
+#   +memory|usage    big-key DUMP-warn / refuse-cap sizing (skip if not using caps)
+#
+# NO write/admin commands: no SET/DEL/RESTORE, no CONFIG (except the optional
+# accelerator below), no FLUSH*, no REPLICAOF, no CLUSTER admin. Read-only.
+
+# --- OPTIONAL: keyspace-notification accelerator (config `notifications: true`) ---
+# Only if you enable the lossy latency accelerator (redis-plan RM7). It needs to
+# SUBSCRIBE to keyevent channels and, on managed self-hosted Redis, to flip the
+# `notify-keyspace-events` config. On ElastiCache/managed tiers set that via a
+# parameter group instead and OMIT `+config|set` here (CONFIG SET is refused).
+#
+# ACL SETUSER replicare +psubscribe +subscribe \
+#   +config|get +config|set
+#   (grant `resetchannels &__keyevent@*__:*` to scope subscribable channels)
+#
+# Correctness never depends on notifications; if they are off or unprivileged the
+# rolling SCAN reconciliation still converges.
+
+# --- Cluster ---
+# Grant the SAME user on EVERY master node. replicare runs SCAN, the delete
+# sweep, and (optionally) the per-node notification subscription per master, and
+# reads topology via CLUSTER SHARDS/SLOTS — so also allow:
+#
+# ACL SETUSER replicare +cluster|shards +cluster|slots +cluster|nodes

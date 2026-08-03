@@ -5,15 +5,16 @@
 selected data, then continuously replicates **inserts, updates, and deletes** to keep the targets
 converged with the source.
 
-It is written in Go and ships as a single static binary. **Postgres** and **MySQL** are supported
-today; Redis is planned.
+It is written in Go and ships as a single static binary. **Postgres**, **MySQL**, and **Redis** are
+all supported today.
 
 ## Why it's different
 
-- **No privileged change stream required.** replicare does **not** need the Postgres WAL, a
-  `REPLICATION` role, or a `wal_level` change. It captures changes with ordinary, grantable
-  privileges using trigger-based CDC (Bucardo-style), so it works on managed databases and old
-  servers where logical replication isn't available.
+- **No privileged change stream required.** replicare does **not** need the Postgres WAL, the MySQL
+  binlog, or a Redis change feed. On Postgres/MySQL it captures changes with ordinary, grantable
+  privileges using trigger-based CDC (Bucardo-style); on Redis it uses capture-less `SCAN`
+  reconciliation (writing nothing to the source) with optional keyspace-notification acceleration.
+  So it works on managed databases and old servers where logical replication isn't available.
 - **Least privilege.** On the source it needs only `CREATE`-on-database (or a pre-created owned
   schema) plus `USAGE`, `TRIGGER`, and `SELECT`. On the target, just `SELECT/INSERT/UPDATE/DELETE`
   on the pre-existing tables. See [`deploy/grants-source.sql`](deploy/grants-source.sql) and

@@ -1,0 +1,38 @@
+# Least-privilege Redis 6+ ACL for the replicare daemon on a TARGET Redis
+# (redis-plan §0.2/§0.5, CLAUDE.md §12). replicare applies data with
+# RESTORE ... REPLACE (value-faithful load + streaming upsert) and DEL (the
+# target-vs-source delete sweep). Apply with `redis-cli ACL SETUSER ...`.
+# Replace the name, set a real password, and scope the key pattern.
+#
+# ############################################################################
+# #  FOOT-GUN: RESTORE is an @dangerous command and MUST be granted           #
+# #  EXPLICITLY (`+restore`). It is the ONE elevated command replicare needs   #
+# #  on the target — without it every apply fails loud. Granting it lets the   #
+# #  role overwrite any key in the ACL's key pattern, so scope `~...` tightly. #
+# ############################################################################
+
+ACL SETUSER replicare on >CHANGE-ME ~* resetchannels \
+  +ping +info \
+  +restore +del +scan +exists +module|list
+
+# Command-by-command rationale:
+#   +ping         liveness on connect
+#   +info         target server version (the RDB-version pre-flight gate) + stats
+#   +restore      value-faithful apply — RESTORE ... REPLACE (the @dangerous one)
+#   +del          delete propagation — the target-vs-source diff DELs missing keys
+#   +scan         enumerate the target keyspace for the delete sweep
+#   +exists       verify apply / sweep bookkeeping
+#   +module|list  module pre-flight gate (a source module absent here blocks the sync)
+#
+# NO CONFIG, no FLUSH*, no REPLICAOF, no CLUSTER admin, no SUBSCRIBE. The target
+# only receives RESTOREs and DELs within the key pattern.
+#
+# replicare NEVER creates or alters target types, modules, or the schema; a
+# missing module or an older RDB version fails loud at pre-flight rather than
+# being "repaired" (CLAUDE.md §1.7). The pre-existing target is your responsibility.
+
+# --- Cluster ---
+# Grant the SAME user on EVERY master node; per-key RESTORE/DEL route by slot and
+# the delete sweep SCANs each master. Also allow topology discovery:
+#
+# ACL SETUSER replicare +cluster|shards +cluster|slots +cluster|nodes
