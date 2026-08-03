@@ -17,6 +17,25 @@ import (
 // version/fork probe only.
 var errNotImplemented = fmt.Errorf("redis: not implemented (skeleton engine; see .sisyphus/redis-plan.md)")
 
+// Internal ConnConfig.Params keys (rc_-prefixed) that carry the topology + CDC
+// tuning from the config block (RM0.5) to the Source/Sink (RM1+). rc_ params are
+// engine-internal and never forwarded to the driver.
+const (
+	paramMode                = "rc_mode"
+	paramNodes               = "rc_nodes"
+	paramDB                  = "rc_db"
+	paramSentinelMaster      = "rc_sentinel_master"
+	paramReadReplica         = "rc_read_replica"
+	paramNotifications       = "rc_notifications"
+	paramScanCount           = "rc_scan_count"
+	paramReconcileInterval   = "rc_reconcile_interval"
+	paramDeleteSweepInterval = "rc_delete_sweep_interval"
+	paramBigKeyWarn          = "rc_big_key_warn"
+	paramBigKeyRefuse        = "rc_big_key_refuse"
+	paramTTLMode             = "rc_ttl_mode"
+	paramTypes               = "rc_types"
+)
+
 // client is the minimal command surface RM0 needs from go-redis, satisfied by
 // *goredis.Client (standalone). RM1 generalizes connection to standalone /
 // Sentinel / Cluster behind the same Source/Sink methods.
