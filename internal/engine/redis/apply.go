@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"io"
 
 	"github.com/rudimk/replicare/internal/engine"
@@ -14,9 +15,16 @@ import (
 // the per-pass atomicity the relational engines provide is neither available nor
 // needed here (each key converges independently). Deletes are RM6.
 
-// redisApplyTx applies one streaming drain pass for the Redis unit.
+// redisApplyTx applies one streaming drain pass for the Redis unit. It tracks which
+// keys StageUpsert applied so DeleteAbsent honors the neutral contract exactly:
+// delete only the passed keys that were NOT staged (upserted) this pass. That makes
+// both paths correct with one implementation — the RM5 upsert pass stages the
+// present keys then "deletes absent" the same set (none absent → no deletes), while
+// the RM6 delete sweep stages nothing then "deletes absent" the missing keys (all
+// absent → all DELeted).
 type redisApplyTx struct {
-	db *conn
+	db     *conn
+	staged map[string]bool
 }
 
 var _ engine.ApplyTx = (*redisApplyTx)(nil)
@@ -28,20 +36,38 @@ func (s *Sink) BeginApply(_ context.Context, _ bool, _ []engine.TableRef) (engin
 	if s.db == nil {
 		return nil, errNotConnected
 	}
-	return &redisApplyTx{db: s.db}, nil
+	return &redisApplyTx{db: s.db, staged: map[string]bool{}}, nil
 }
 
 // StageUpsert reads the faithful re-read framing and applies it with RESTORE ...
-// REPLACE. For Redis this IS the upsert — there is no separate staging table.
+// REPLACE, recording each key as staged. For Redis this IS the upsert — there is no
+// separate staging table.
 func (tx *redisApplyTx) StageUpsert(ctx context.Context, _ engine.TableRef, _ []string, reread io.Reader) error {
-	_, err := restoreStream(ctx, tx.db, reread)
+	_, err := restoreStream(ctx, tx.db, reread, tx.staged)
 	return err
 }
 
-// DeleteAbsent is a no-op in RM5: streaming deletes are the durable target-vs-source
-// diff of RM6, not this present-key upsert path. The keys handed here are exactly the
-// present ones just re-read, so none are absent.
-func (tx *redisApplyTx) DeleteAbsent(context.Context, engine.TableRef, []engine.KeyValues) error {
+// DeleteAbsent DELs the passed keys that were NOT staged this pass (absent at the
+// source). The RM6 sweep calls it with the missing keys and no prior StageUpsert, so
+// every key is deleted; the RM5 upsert pass calls it with the just-staged keys, so
+// none are. DEL routes each key to its owning shard.
+func (tx *redisApplyTx) DeleteAbsent(ctx context.Context, _ engine.TableRef, keys []engine.KeyValues) error {
+	pipe := tx.db.pipeline()
+	n := 0
+	for _, kv := range keys {
+		k := redisKey(kv)
+		if tx.staged[k] {
+			continue // upserted this pass — not a delete
+		}
+		pipe.Del(ctx, k)
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("redis: DEL sweep: %w", err)
+	}
 	return nil
 }
 

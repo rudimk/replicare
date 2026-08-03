@@ -121,6 +121,15 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 	s.touchCursors(ctx)
 
+	// Delete reconciliation (redis-plan §0.4): AFTER the drain, on a healthy pass
+	// (you cannot DEL on a down target). A no-op for capture-driven engines
+	// (Postgres/MySQL don't implement KeyLister/KeyExister). Best-effort and
+	// idempotent — a failed sweep is logged and retried next pass, never aborting
+	// streaming.
+	if err := s.deleteReconcile(ctx); err != nil {
+		s.log(ctx, "delete reconciliation error", err)
+	}
+
 	// Reseed the target when either the retention cap forced it (Enforce, above) or
 	// an operator flagged it via `replicare reseed` (a cursor marked needs_reseed).
 	needReseed := containsTarget(enf.Reseeded, s.Target)

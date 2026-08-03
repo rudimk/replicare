@@ -66,31 +66,45 @@ func (s *Source) ReadDirtyKeys(ctx context.Context, _ engine.TableRef, _ engine.
 		s.recon = &reconState{scanners: sc, cursors: make([]uint64, len(sc)), done: make([]bool, len(sc))}
 	}
 	tun := tuningFromParams(s.cfg.Params)
-	r := s.recon
+	keys, _, err := scanBatch(ctx, s.recon, tun.scanCount, max, s.sel)
+	if err != nil {
+		return nil, err
+	}
+	batch := make([]engine.DirtyKey, 0, len(keys))
+	for _, k := range keys {
+		s.changeID++
+		batch = append(batch, engine.DirtyKey{
+			DeltaID: engine.DeltaID(s.changeID),
+			Op:      engine.OpUpdate,
+			Key:     engine.KeyValues{k},
+		})
+	}
+	return batch, nil
+}
 
-	batch := make([]engine.DirtyKey, 0, max)
-	for len(batch) < max {
+// scanBatch collects up to ~max selected keys from the held per-shard SCAN state,
+// advancing the cursors. It is the shared bounded-pass primitive behind both the
+// source reconciliation (ReadDirtyKeys) and the target sweep (ScanTargetKeys).
+// passComplete is true when THIS call finished the rolling pass (the state was
+// reset for the next one); the empty batch it returns signals the caller to idle.
+func scanBatch(ctx context.Context, r *reconState, scanCount int64, max int, sel *selection) (keys []string, passComplete bool, err error) {
+	for len(keys) < max {
 		if r.allDone() {
-			r.reset() // rolling: next call starts a fresh pass
-			break
+			r.reset()
+			return keys, true, nil
 		}
 		if r.done[r.idx] {
 			r.idx = (r.idx + 1) % len(r.scanners)
 			continue
 		}
-		keys, cur, err := r.scanners[r.idx].Scan(ctx, r.cursors[r.idx], "", tun.scanCount).Result()
+		ks, cur, err := r.scanners[r.idx].Scan(ctx, r.cursors[r.idx], "", scanCount).Result()
 		if err != nil {
-			return nil, fmt.Errorf("redis: reconcile SCAN: %w", err)
+			return nil, false, fmt.Errorf("redis: SCAN: %w", err)
 		}
 		r.cursors[r.idx] = cur
-		for _, k := range keys {
-			if s.sel == nil || s.sel.match(k) {
-				s.changeID++
-				batch = append(batch, engine.DirtyKey{
-					DeltaID: engine.DeltaID(s.changeID),
-					Op:      engine.OpUpdate,
-					Key:     engine.KeyValues{k},
-				})
+		for _, k := range ks {
+			if sel == nil || sel.match(k) {
+				keys = append(keys, k)
 			}
 		}
 		if cur == 0 {
@@ -98,7 +112,41 @@ func (s *Source) ReadDirtyKeys(ctx context.Context, _ engine.TableRef, _ engine.
 			r.idx = (r.idx + 1) % len(r.scanners)
 		}
 	}
-	return batch, nil
+	return keys, false, nil
+}
+
+// MissingAtSource returns the keys that do NOT exist at the source — the target
+// keys to delete (redis-plan §0.4). It reads the MASTER (replica read routing is
+// never enabled on our clients, RM1), so a lagging replica cannot report a
+// just-written key absent and cause a false delete (redis-plan §0.5, Momus M5).
+func (s *Source) MissingAtSource(ctx context.Context, _ engine.TableRef, keys []engine.KeyValues) ([]engine.KeyValues, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	strs := make([]string, len(keys))
+	pipe := s.db.pipeline()
+	cmds := make([]*goredis.IntCmd, len(keys))
+	for i, kv := range keys {
+		strs[i] = redisKey(kv)
+		cmds[i] = pipe.Exists(ctx, strs[i]) // routes to the owning master
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, fmt.Errorf("redis: EXISTS pipeline: %w", err)
+	}
+	var missing []engine.KeyValues
+	for i, c := range cmds {
+		n, err := c.Result()
+		if err != nil {
+			return nil, fmt.Errorf("redis: EXISTS %q: %w", strs[i], err)
+		}
+		if n == 0 {
+			missing = append(missing, engine.KeyValues{strs[i]})
+		}
+	}
+	return missing, nil
 }
 
 // RereadCurrent DUMPs the current value+TTL of each dirty key into the framing —
