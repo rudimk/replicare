@@ -120,10 +120,8 @@ func TestDBIndex(t *testing.T) {
 // wired without a real connection.
 func TestStubsNotImplemented(t *testing.T) {
 	ctx := context.Background()
-	s := &Source{}
-	if err := s.InstallCapture(ctx, nil); err != errNotImplemented {
-		t.Errorf("Source.InstallCapture stub = %v, want errNotImplemented", err)
-	}
+	// ApplyPass is the one remaining stub: the Redis apply path goes through the
+	// component ApplyTx (BeginApply), not the single-table ApplyPass.
 	sink := &Sink{}
 	if err := sink.ApplyPass(ctx, engine.TableRef{}, nil, nil, nil); err != errNotImplemented {
 		t.Errorf("Sink.ApplyPass stub = %v, want errNotImplemented", err)
