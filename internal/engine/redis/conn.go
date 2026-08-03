@@ -52,6 +52,13 @@ type conn struct {
 	cluster     *goredis.ClusterClient // non-nil in cluster mode (ForEachMaster)
 	primaryAddr string
 	readReplica bool
+
+	// scanners are persistent per-shard clients used by the streaming
+	// reconciliation SCAN (RM5), whose cursor must survive across ticks. In cluster
+	// mode these are dedicated per-master clients (owned here, closed on Close); in
+	// standalone/sentinel it is just the routing client. Built lazily.
+	scanners []goredis.Cmdable
+	owned    []*goredis.Client // scanner clients we constructed and must Close
 }
 
 // Do delegates to the routing client.
@@ -61,8 +68,45 @@ func (c *conn) Do(ctx context.Context, args ...any) *goredis.Cmd { return c.uc.D
 // queued commands by owning node, so per-key RESTORE dispatches correctly.
 func (c *conn) pipeline() goredis.Pipeliner { return c.uc.Pipeline() }
 
-// Close releases the client.
-func (c *conn) Close() error { return c.uc.Close() }
+// Close releases the routing client and any per-shard scanner clients.
+func (c *conn) Close() error {
+	for _, cl := range c.owned {
+		_ = cl.Close()
+	}
+	c.owned, c.scanners = nil, nil
+	return c.uc.Close()
+}
+
+// shardScanners returns one persistent command surface per master, for the
+// streaming reconciliation SCAN whose cursor must persist across calls (RM5). In
+// cluster mode it builds a dedicated client per master (so SCAN and the following
+// per-key DUMP stay node-local); otherwise it is the single routing client. Built
+// once and cached; the cluster clients are closed by Close.
+func (c *conn) shardScanners(ctx context.Context, cc engine.ConnConfig) ([]goredis.Cmdable, error) {
+	if c.scanners != nil {
+		return c.scanners, nil
+	}
+	if c.cluster == nil {
+		c.scanners = []goredis.Cmdable{c.uc}
+		return c.scanners, nil
+	}
+	addrs, err := c.masters(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg := tlsConfig(cc.TLS, cc.Host)
+	for _, addr := range addrs {
+		cl := goredis.NewClient(&goredis.Options{
+			Addr:      addr,
+			Username:  cc.User,
+			Password:  cc.Password,
+			TLSConfig: tlsCfg,
+		})
+		c.scanners = append(c.scanners, cl)
+		c.owned = append(c.owned, cl)
+	}
+	return c.scanners, nil
+}
 
 // masters returns the addresses of every master node: all shard masters in
 // cluster mode, or the single primary otherwise. Used for the per-shard SCAN

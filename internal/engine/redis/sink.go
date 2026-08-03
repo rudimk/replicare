@@ -81,9 +81,11 @@ func (s *Sink) BulkLoad(ctx context.Context, _ engine.TableRef, _ []string, r io
 func (s *Sink) DeleteRange(context.Context, engine.TableRef, engine.KeyValues, engine.KeyValues) error {
 	return nil
 }
+
+// ApplyPass is unused by the Redis path: streaming apply goes through the
+// component ApplyTx (BeginApply, see apply.go), not the single-table ApplyPass.
 func (s *Sink) ApplyPass(context.Context, engine.TableRef, []string, []engine.KeyValues, io.Reader) error {
-	return errNotImplemented // RM5
+	return errNotImplemented // Redis uses BeginApply/ApplyTx (apply.go)
 }
-func (s *Sink) BeginApply(context.Context, bool, []engine.TableRef) (engine.ApplyTx, error) {
-	return nil, errNotImplemented // RM5 (thin ApplyTx: RESTORE REPLACE + DEL)
-}
+
+// BeginApply — see apply.go (RM5, the thin RESTORE-REPLACE ApplyTx).
