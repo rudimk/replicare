@@ -1,8 +1,12 @@
 # replicare — Redis Engine Implementation Plan (v2)
 
-**Status:** **Revised after one Sisyphus (pre-planning) + one Momus (design) pass.** v2 resolves every
-BLOCKER/HIGH on paper. Third engine after Postgres (shipped) and MySQL (shipped). Section refs like §3.2
-point at `CLAUDE.md`. Single-engine rule ⇒ **Redis → Redis only**.
+**Status:** **APPROVED to execute** after one Sisyphus (pre-planning) + **two** Momus (design) passes —
+the 2nd Momus pass returned **APPROVED-WITH-NITS** with every prior BLOCKER/MAJOR verified resolved
+against the actual neutral code, and its four remaining specification tightenings (delete-sweep in-memory
+state machine; bounded cursor-per-batch not whole-pass buffering; the `ApplyTx.DeleteAbsent`-with-empty-
+staging delete mechanism; the `streamOnce` invocation site) are folded in below. Third engine after
+Postgres (shipped) and MySQL (shipped). Section refs like §3.2 point at `CLAUDE.md`. Single-engine rule ⇒
+**Redis → Redis only**.
 
 > **What v2 changed vs the v1 draft (the load-bearing corrections):**
 > 1. **Delete reconciliation is now a durable target-vs-source keyspace diff (baseline), not an
@@ -157,7 +161,8 @@ wire format.** The neutral layer survives because it treats `engine.TableRef`, `
   is caught by the next sweep/reconciliation. On subscription gap → force a reconciliation + a
   delete-sweep for that shard. The **in-memory seen-set is now an optional low-latency accelerator**, not
   a correctness mechanism, and can be dropped freely under memory pressure (so **no reseed-from-memory
-  trigger, no new StateStore field** — Momus M9 resolved: the durable sweep is stateless-per-cycle).
+  trigger, no new StateStore field** — Momus M9 resolved: the durable sweep needs nothing persisted,
+  carrying only bounded in-memory cursor/phase state, §0.4).
 - **N/A (huge simplification vs relational):** no source capture tables ⇒ **no source bloat we create,
   no autovacuum, no delta purge, no `xmin`/history-list trap, no retention-cap math.** `Purge` is a
   no-op (or trims a notification change-log if one is used). "Reseed" = force a full reconciliation +
@@ -192,12 +197,21 @@ wire format.** The neutral layer survives because it treats `engine.TableRef`, `
   reverse-binary index, **not durably resumable** across rehashes/restarts. The reused StateStore records
   **coarse phase** ("snapshot complete for unit X", streaming) only; **`CopyProgress.Watermark` stays
   nil** and the copy layer's `DeleteRange`/`Lo`/keyset-watermark are **no-ops for Redis** (§0.5, Momus
-  M5). Crash mid-snapshot ⇒ restart re-`SCAN`s the unit from 0 (idempotent). The delete-sweep is
-  **stateless per cycle** (re-scans the target each interval), so it needs **no StateStore field**
-  (Momus M9). `ConfirmConsumed`/`DeltaID` are largely vestigial: "consumed" is a lag/phase hint;
-  crash-safety means "reprocessed on the next full pass," not the next tick (Momus m1) — stated
-  explicitly because `DrainComponentRetrying`'s retry re-calls `ReadDirtyKeys`, which *advances* the SCAN
-  cursor (harmless only because Redis raises no transient errors).
+  M5). Crash mid-snapshot ⇒ restart re-`SCAN`s the unit from 0 (idempotent).
+- **DECISION (the delete-sweep is DURABLY-stateless but carries a bounded IN-MEMORY pass-boundary state
+  machine — Momus 2nd-pass A).** "Stateless" means **no StateStore field** (a full target-vs-source
+  re-diff each cycle needs nothing durable; a crash just restarts the cycle from cursor 0 — Momus M9). It
+  does **not** mean state-free at runtime: a full target `SCAN` of a large unit **spans many ticks**, so
+  the `Syncer` holds, **per unit, in memory**: (a) the live target-`SCAN` cursor carried across ticks,
+  (b) a **mid-sweep / new-cycle phase flag**, and (c) a **`delete_sweep_interval` cadence timer** so the
+  sweep fires on its own interval, not every `DrainInterval` tick. This is a second pass-boundary state
+  machine, structurally like RM5's — specified as such. It is **bounded**: one cursor + one bounded batch
+  per tick, **never the whole keyset** (see the keyset-memory decision in RM5/decision-log).
+- **DECISION (checkpoint/consume semantics).** `ConfirmConsumed`/`DeltaID` are largely vestigial:
+  "consumed" is a lag/phase hint; crash-safety means "reprocessed on the next full pass," not the next
+  tick (Momus m1) — stated explicitly because `DrainComponentRetrying`'s retry re-calls `ReadDirtyKeys`,
+  which *advances* the SCAN cursor (harmless only because Redis raises no transient errors, so the retry
+  loop never actually fires — invariant verified against `retry.go`, Momus 2nd-pass E).
 
 ### 0.5 Cluster, topology, selection, big-keys, TTL, ACL specifics Redis breaks
 - **DECISION (Cluster = per-master-node everything).** `SCAN`, notification subscription, and the
@@ -338,8 +352,9 @@ arbitrary-byte key names survive introspection round-trip.
 
 ### RM3 — StateStore integration (REUSED — Postgres, no new code)
 **Goal:** Confirm a Redis sync runs on the neutral Postgres StateStore — testing + docs only.
-**Deliverables:** **no new StateStore code** (Momus M9 resolved: delete-sweep is stateless-per-cycle,
-seen-set is a droppable accelerator ⇒ no new field). Docs of overloads: `TableRef`→unit;
+**Deliverables:** **no new StateStore code** (Momus M9 resolved: the delete-sweep persists nothing —
+bounded in-memory cursor/phase only — and the seen-set is a droppable accelerator ⇒ no new field). Docs
+of overloads: `TableRef`→unit;
 **coarse phase checkpointing** (snapshot-complete-per-unit, `Watermark` nil); `DeltaID`→per-unit change-id
 (RQ-2). Ownership advisory lock reused.
 **Acceptance:** a Redis sync def round-trips; per-unit copy-progress + cursor rows persist/reload;
@@ -365,9 +380,12 @@ restart converges; already-expired key skipped.
 ### RM5 — Streaming upsert convergence (reconciliation SCAN → thin ApplyTx) — TRUE FIRST STREAMING
 **Goal:** Continuous **write/overwrite** convergence via the single-member-component path (the honest,
 deterministic half; deletes are RM6). *(Split from v1 RM4 per Sisyphus H5.)*
-**Deliverables:** **`ReadDirtyKeys`** drives the rolling reconciliation SCAN (present keys as `Op=I/U`),
-with the **pass-boundary state machine** (buffer the pass, slice into `max`-sized batches across ticks —
-Sisyphus H3/Momus specify); **`RereadCurrent`** DUMPs dirty keys into the framing (big-key handling here
+**Deliverables:** **`ReadDirtyKeys`** drives the rolling reconciliation SCAN (present keys as `Op=I/U`)
+via a **bounded pass-boundary state machine (Momus 2nd-pass B): hold the live source-`SCAN` cursor across
+ticks and return ONE bounded batch (≤ `max`) per `ReadDirtyKeys` call — NEVER buffer the whole pass**
+(that would be gigabytes for a large keyspace and would contradict RM11's "backpressure without unbounded
+memory"). Per-unit in-memory state = the SCAN cursor + a pass-phase flag; memory is O(batch), not
+O(keyset). **`RereadCurrent`** DUMPs dirty keys into the framing (big-key handling here
 too, Momus m3); the **thin `ApplyTx`** (RESTORE REPLACE); **`ConfirmConsumed`** advances the per-unit
 change-id/phase; **`DeltaBacklog`** reports reconciliation backlog/age. Runs on `stream.go` unchanged.
 **Acceptance (6.2→7.4 + cluster) — keystone:** post-copy `SET`/overwrite/`EXPIRE`/type-change on the
@@ -380,12 +398,17 @@ reprocessed next full pass (idempotent, Momus m1); arbitrary-byte keys round-tri
 **Goal:** Correct, durable delete propagation — the §3.3-aligned set-difference. *(v2 first-class
 milestone; the riskiest delete machinery, separated from RM5 per Sisyphus H5 / Momus M4.)*
 **Deliverables:** the **additive optional `KeyLister`/`KeyExister` interfaces** + the **neutral pipeline
-delete-reconciliation step** (§0.4, guarded no-op for PG/MySQL); the Redis Sink `ScanTargetKeys` +
-Source `MissingAtSource` (**master-pinned**, Momus M5); **copy→stream cutover full sweep** (orphan window,
-Momus M3); **restart full sweep**; the **stateless-per-cycle** sweep on `delete_sweep_interval`;
-**optional seen-set + notification `del`/`expired` accelerators** feeding `Op=D` through the existing
-`DeleteAbsent` (droppable under memory pressure — no reseed trigger); the **delete-reconciliation-lag**
-metric (Momus M7).
+delete-reconciliation step** (§0.4, guarded no-op for PG/MySQL). **Invocation site (Momus 2nd-pass D):**
+in `streamOnce`, in the **healthy-pass section AFTER the drain** (you cannot `DEL` on a down target
+anyway), **bounded per tick** and fired on the `delete_sweep_interval` cadence. **Delete mechanism
+(Momus 2nd-pass C — `DeleteAbsent` is on `ApplyTx`, not `Sink`):** the step opens an `ApplyTx` and calls
+`DeleteAbsent(missing)` with **empty staging** — nothing staged ⇒ every passed key is "absent" ⇒ all
+`DEL`ed, exactly the intent — then `Commit`. Redis Sink `ScanTargetKeys` (carries the in-memory target
+cursor across ticks, §0.4) + Source `MissingAtSource` (**master-pinned**, Momus M5); the full
+target-vs-source diff **subsumes** the copy→stream cutover orphan window and restart case (every sweep is
+a full diff — no special-casing, Momus 2nd-pass M3); **optional seen-set + notification `del`/`expired`
+accelerators** feeding `Op=D` through the same `DeleteAbsent` path (droppable under memory pressure — no
+reseed trigger); the **delete-reconciliation-lag** metric (Momus M7).
 **Acceptance (6.2→7.4 + cluster):** a key deleted at source converges (target `DEL`) within one sweep
 interval (driven, not timed — Sisyphus M6); a key **deleted during the copy window** converges via the
 cutover sweep (Momus M3); a **replica-lag false-delete** is prevented (delete detection master-pinned,
@@ -479,7 +502,8 @@ bloat/purge, type-coercion) is **absent**; the reinvested depth is the three abo
 | Upsert CDC | **SCAN full-keyspace reconciliation** (re-read every pass, idempotent RESTORE); nothing written to source. |
 | Delete CDC | **Durable target-vs-source keyspace diff (baseline, §3.3-aligned)** via the additive interface; **notifications + optional seen-set = accelerators only** (droppable, no reseed trigger). Cutover + restart run a full sweep. |
 | Delete detection reads | **Master-pinned** (replica lag would cause false deletes); value reads may use replicas. |
-| Checkpointing | **Coarse phase** (per-unit snapshot-complete); SCAN cursor **not** durably resumable; `Watermark`/`DeleteRange`/`Lo` **no-ops**; sweep **stateless per cycle** (no new StateStore field). |
+| Checkpointing | **Coarse phase** (per-unit snapshot-complete); SCAN cursor **not** durably resumable; `Watermark`/`DeleteRange`/`Lo` **no-ops**; sweep persists **nothing durable** but carries **bounded in-memory** cursor+phase+cadence state (a pass-boundary state machine, §0.4). |
+| Keyset memory | **Bounded, O(batch) not O(keyset):** both the reconciliation scan (RM5) and the delete-sweep (RM6) hold a live SCAN cursor across ticks and emit ONE bounded batch per call — **never buffer a whole pass** (consistent with RM11 "backpressure without unbounded memory"). The seen-set accelerator is the only optional O(keyset) structure, and it is droppable. |
 | Copy shape | **One atomic chunk per unit**; intra-unit parallelism **inside `CopyChunk`**; restart re-copies the unit idempotently. |
 | Cluster | Per-master SCAN + subscription + delete-sweep; topology via `CLUSTER SHARDS`/`SLOTS`; parallelism unit = shard; per-key ops sidestep cross-slot. |
 | Selection | key-pattern globs + DB index (0 only in cluster); one full SCAN + client-side match; `SCAN TYPE` (6.0+) when type-scoped. |
