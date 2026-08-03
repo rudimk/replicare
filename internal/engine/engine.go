@@ -178,6 +178,30 @@ type ApplyTx interface {
 	Rollback(ctx context.Context) error
 }
 
+// KeyLister and KeyExister are OPTIONAL capabilities for engines whose deletes are
+// NOT captured by a source-side change log — Redis, whose CDC is SCAN
+// reconciliation with no delete stream (redis-plan §0.4). Capture-driven engines
+// (Postgres/MySQL) do NOT implement them: their deletes flow through the normal
+// delta path, and the pipeline's delete-reconciliation step type-asserts these and
+// is a no-op when absent. They come as a pair — deletes-by-diff need both the
+// target scan (Sink) and the source-exists check (Source) — and the pipeline
+// (Syncer) is the only place that holds both.
+type KeyLister interface { // implemented by the Redis Sink
+	// ScanTargetKeys returns the next bounded batch of target keys for a unit and a
+	// continuation token (next==0 means the rolling target scan just completed a
+	// full pass). The engine may carry the real per-shard cursor internally; cursor
+	// is a coarse continue(≠0)/restart(0) hint (redis-plan §0.4).
+	ScanTargetKeys(ctx context.Context, t TableRef, cursor uint64, count int) (keys []KeyValues, next uint64, err error)
+}
+
+type KeyExister interface { // implemented by the Redis Source
+	// MissingAtSource returns the subset of keys that do NOT exist at the source —
+	// the keys to delete on the target. It MUST read the source of truth (the
+	// master), never a replica, so replica lag cannot cause a false delete
+	// (redis-plan §0.5).
+	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
+}
+
 // ChunkMethod is how a table is split for parallel copy (CLAUDE.md §4.1).
 type ChunkMethod string
 

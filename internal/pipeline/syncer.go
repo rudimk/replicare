@@ -35,6 +35,12 @@ type Syncer struct {
 	DrainBatch    int
 	DrainInterval time.Duration
 	Retention     engine.RetentionPolicy
+
+	// sweepCursors holds the per-unit target-scan cursor for the delete
+	// reconciliation sweep (redis-plan §0.4), carried across streaming passes. Only
+	// used when the engine implements the KeyLister/KeyExister capability (Redis);
+	// nil/unused for capture-driven engines.
+	sweepCursors map[engine.TableRef]uint64
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture

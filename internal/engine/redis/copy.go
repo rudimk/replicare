@@ -221,8 +221,10 @@ const restoreBatch = 256
 
 // restoreStream reads the DUMP framing and applies each record with RESTORE ...
 // REPLACE, batched into pipelines. A single failing RESTORE (bad payload, target
-// RDB too old, etc.) halts loud — never silently skipped (CLAUDE.md §1.7).
-func restoreStream(ctx context.Context, db *conn, r io.Reader) (int64, error) {
+// RDB too old, etc.) halts loud — never silently skipped (CLAUDE.md §1.7). When
+// staged is non-nil, each restored key is recorded there (so a later DeleteAbsent
+// in the same ApplyTx knows which keys were upserted this pass).
+func restoreStream(ctx context.Context, db *conn, r io.Reader, staged map[string]bool) (int64, error) {
 	var total int64
 	recs := make([]record, 0, restoreBatch)
 
@@ -238,6 +240,9 @@ func restoreStream(ctx context.Context, db *conn, r io.Reader) (int64, error) {
 				args = append(args, "ABSTTL")
 			}
 			cmds[i] = pipe.Do(ctx, args...)
+			if staged != nil {
+				staged[string(rec.key)] = true
+			}
 		}
 		if _, err := pipe.Exec(ctx); err != nil {
 			for i, c := range cmds {
