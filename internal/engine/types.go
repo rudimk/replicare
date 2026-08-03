@@ -91,6 +91,20 @@ func (t Table) HasUsableKey() bool {
 // Schema is the set of introspected tables for a source or target.
 type Schema struct {
 	Tables []Table
+	// Capabilities carries server-side capability info gathered at introspection
+	// (which the pure Preflight function cannot probe itself — it has no
+	// connection). The Redis engine populates it so the pre-flight module gate can
+	// compare source vs target (redis-plan §0.2). Zero-valued and ignored for
+	// engines that don't use it (Postgres/MySQL).
+	Capabilities Capabilities
+}
+
+// Capabilities is engine-neutral server capability data surfaced through Schema.
+type Capabilities struct {
+	// Modules lists loaded server module names (Redis: MODULE LIST). A source
+	// module absent on the target means a module-typed value cannot be RESTOREd
+	// faithfully, so pre-flight blocks it.
+	Modules []string
 }
 
 // Selection describes which tables a sync replicates: include/exclude lists with

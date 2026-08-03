@@ -52,8 +52,12 @@ func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 
 // --- stubs until their milestones (redis-plan RM2–RM7) ---
 
-func (s *Source) Introspect(context.Context, engine.Selection) (*engine.Schema, error) {
-	return nil, errNotImplemented // RM2
+// Introspect synthesizes the unit pseudo-schema + module capabilities (RM2).
+func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.Schema, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	return introspect(ctx, s.db, s.cfg, sel)
 }
 func (s *Source) InstallCapture(context.Context, []engine.TableRef) error {
 	return errNotImplemented // RM7 (keyspace-notification subscription)

@@ -37,16 +37,11 @@ func (redisEngine) NewSink(cfg engine.ConnConfig) (engine.Sink, error) {
 	return &Sink{cfg: cfg}, nil
 }
 
-// Preflight classifies an introspected source against an introspected target.
-// The full Redis pre-flight (RDB-version directional gate + module-presence gate,
-// no type-coercion axis) lands in RM2; this RM0 skeleton returns a minimal report
-// so the engine registers and the daemon dispatch compiles.
+// Preflight classifies an introspected source against an introspected target
+// (RM2): the RDB-version directional gate + module-presence gate, no type-coercion
+// axis; every unit is a single-member acyclic component.
 func (redisEngine) Preflight(syncName string, srcVersion, tgtVersion int, source, target *engine.Schema) *engine.PreflightReport {
-	return &engine.PreflightReport{
-		Sync:          syncName,
-		SourceVersion: srcVersion,
-		TargetVersion: tgtVersion,
-	}
+	return buildPreflight(syncName, srcVersion, tgtVersion, source, target)
 }
 
 // Compile-time assertion that redisEngine satisfies the interface.

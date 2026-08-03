@@ -121,8 +121,8 @@ func TestDBIndex(t *testing.T) {
 func TestStubsNotImplemented(t *testing.T) {
 	ctx := context.Background()
 	s := &Source{}
-	if _, err := s.Introspect(ctx, engine.Selection{}); err != errNotImplemented {
-		t.Errorf("Source.Introspect stub = %v, want errNotImplemented", err)
+	if _, err := s.PlanChunks(ctx, engine.TableRef{}, engine.ChunkOptions{}); err != errNotImplemented {
+		t.Errorf("Source.PlanChunks stub = %v, want errNotImplemented", err)
 	}
 	sink := &Sink{}
 	if _, err := sink.BeginApply(ctx, false, nil); err != errNotImplemented {
