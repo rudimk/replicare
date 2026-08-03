@@ -44,6 +44,29 @@ func copyUnit(t *testing.T, ctx context.Context, src *Source, sink *Sink) int64 
 	return n
 }
 
+// runCopy drives one initial copy like copyUnit but RETURNS the error instead of
+// failing the test — for negative paths (e.g. the big-key refuse cap).
+func runCopy(ctx context.Context, src *Source, sink *Sink) (int64, error) {
+	ref := unitRef(src.cfg)
+	chunks, err := src.PlanChunks(ctx, ref, engine.ChunkOptions{})
+	if err != nil {
+		return 0, err
+	}
+	pr, pw := io.Pipe()
+	errc := make(chan error, 1)
+	go func() {
+		e := src.CopyChunk(ctx, chunks[0], pw)
+		_ = pw.CloseWithError(e)
+		errc <- e
+	}()
+	n, loadErr := sink.BulkLoad(ctx, ref, []string{"key"}, pr, engine.LoadDirect)
+	_ = pr.CloseWithError(loadErr)
+	if cErr := <-errc; cErr != nil {
+		return 0, cErr
+	}
+	return n, loadErr
+}
+
 func mustConnectPair(t *testing.T, ctx context.Context, sc, tc engine.ConnConfig) (*Source, *Sink) {
 	t.Helper()
 	src := &Source{cfg: sc}
