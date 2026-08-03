@@ -14,7 +14,7 @@ import (
 // (see .sisyphus/redis-plan.md).
 type Source struct {
 	cfg engine.ConnConfig
-	db  client
+	db  *conn
 }
 
 var _ engine.Source = (*Source)(nil)

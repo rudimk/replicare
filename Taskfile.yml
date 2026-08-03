@@ -190,6 +190,13 @@ tasks:
       - defer: { task: harness:redis:down }
       - REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1 go test -count=1 -p 1 {{.PKG}}
 
+  test:integration:redis:cluster:
+    desc: Run Redis cluster integration tests against the 3-node cluster harness (Linux/host-net)
+    cmds:
+      - task: harness:redis:cluster:up
+      - defer: { task: harness:redis:cluster:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_REDIS_CLUSTER=1 go test -count=1 -p 1 ./internal/engine/redis/
+
   test:integration:dual:
     desc: Run daemon engine-coexistence tests against BOTH harnesses (Postgres + MySQL)
     cmds:
