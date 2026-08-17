@@ -1,0 +1,146 @@
+# Default values for the replicare chart.
+# replicare is configured by a single YAML file that this chart renders into a
+# ConfigMap and mounts at /etc/replicare/config.yml, then runs with `replicare run`.
+
+image:
+  repository: replicare
+  # Defaults to the chart's appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# replicare is single-active per sync: a second daemon just stands by on the
+# state store's ownership lock, so more than one replica is wasted (and never
+# runs two writers). The chart pins this to 1 and uses a Recreate rollout so the
+# old pod fully exits before the new one starts. Overriding above 1 is unsupported.
+replicaCount: 1
+
+# ---------------------------------------------------------------------------
+# The replicare config, rendered VERBATIM into a ConfigMap at
+# /etc/replicare/config.yml. Put your whole config here. Reference secrets as
+# ${VAR} (any field supports env expansion) and supply those vars via `secret`
+# or `extraEnv` below — keep passwords/tokens OUT of this block.
+#
+# IMPORTANT: the observability addresses here MUST match `service.ports` below
+# (defaults :8080 status, :9090 metrics), or the probes/Service won't line up.
+# ---------------------------------------------------------------------------
+config: |
+  logging:
+    level: info
+    format: json
+
+  observability:
+    status_addr: ":8080"
+    metrics_addr: ":9090"
+    # otlp_endpoint: "otel-collector:4317"   # optional OTLP/gRPC trace export
+
+  # replicare's own state (progress, cursors, ownership) — v1 backend is Postgres,
+  # regardless of the data engine (a MySQL→MySQL or Redis→Redis sync still needs it).
+  # NB: ${VAR} placeholders must be QUOTED — replicare expands env vars after the
+  # YAML is parsed, and an unquoted ${...} is not valid YAML.
+  state_store:
+    engine: postgres
+    postgres: { host: state-postgres, port: 5432, database: replicare_state, user: replicare, password: "${STATE_PW}", sslmode: require }
+
+  sources:
+    app:
+      engine: redis
+      redis: { host: my-redis.default.svc.cluster.local, port: 6379, password: "${SRC_PW:-}" }
+
+  targets:
+    replica:
+      engine: redis
+      redis: { host: my-elasticache-primary, port: 6379, tls: require, user: "${EC_USER}", password: "${EC_PW}" }
+
+  syncs:
+    - name: app-to-replica
+      source: app
+      targets: [replica]
+      include: ["*"]
+      tuning: { drain_interval: 1s }
+
+# ---------------------------------------------------------------------------
+# Secrets that fill the ${VAR} placeholders in `config`.
+#   - env: rendered into a chart-managed Secret and injected via envFrom.
+#   - existingSecret: reference a Secret you manage yourself (takes precedence;
+#     when set, `env` is ignored and no Secret is created by the chart).
+# Prefer existingSecret in production so secrets never live in values/Helm state.
+# ---------------------------------------------------------------------------
+secret:
+  existingSecret: ""
+  env: {}
+  #  STATE_PW: "postgres-password"
+  #  EC_USER:  "replicare"
+  #  EC_PW:    "elasticache-token"
+
+# Extra plain (non-secret) environment variables.
+extraEnv: []
+#  - name: TZ
+#    value: UTC
+
+service:
+  type: ClusterIP
+  annotations: {}
+  ports:
+    status: 8080   # /status + /healthz (must match config observability.status_addr)
+    metrics: 9090  # Prometheus /metrics (must match config observability.metrics_addr)
+
+# Prometheus Operator ServiceMonitor for the /metrics endpoint.
+serviceMonitor:
+  enabled: false
+  # namespace: monitoring
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+  relabelings: []
+  metricRelabelings: []
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# Applied to the pod; the container also drops privileges (non-root, read-only FS).
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  runAsGroup: 65534
+  fsGroup: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# Liveness/readiness both hit /healthz on the status port.
+livenessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+readinessProbe:
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+priorityClassName: ""
+
+# Extra volumes / mounts (e.g. a CA bundle for verify-full TLS).
+extraVolumes: []
+extraVolumeMounts: []

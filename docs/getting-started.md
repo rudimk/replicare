@@ -159,9 +159,11 @@ to re-copy. See the [CLI reference](cli.md).
 
 ### 5. Deploy
 
-Install the binary and the sample [systemd unit](../deploy/replicare.service), or
-run the [Docker image](../README.md#install). See [operations.md](operations.md)
-for tuning, monitoring, retention/reseed, and troubleshooting.
+Install the binary and the sample [systemd unit](../deploy/replicare.service),
+run the [Docker image](../README.md#install), or deploy on Kubernetes with the
+[Helm chart](../deploy/helm/replicare/) (`helm install my-replicare deploy/helm/replicare -f values.yaml`).
+See [operations.md](operations.md) for tuning, monitoring, retention/reseed, and
+troubleshooting.
 
 ## Next
 

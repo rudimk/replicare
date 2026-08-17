@@ -1,0 +1,24 @@
+apiVersion: v2
+name: replicare
+description: >-
+  replicare — an open-source, high-performance data replication daemon for
+  Postgres, MySQL, and Redis. This chart deploys the single-daemon (run) mode:
+  one replica that owns each sync via the state store's single-active lock.
+type: application
+# Chart version — bump on chart changes.
+version: 0.1.0
+# The replicare release this chart targets (image tag default). Keep in step with
+# the app; override image.tag per deployment.
+appVersion: "0.1.0"
+home: https://github.com/rudimk/replicare
+sources:
+  - https://github.com/rudimk/replicare
+keywords:
+  - replication
+  - postgres
+  - mysql
+  - redis
+  - cdc
+maintainers:
+  - name: replicare
+    url: https://github.com/rudimk/replicare

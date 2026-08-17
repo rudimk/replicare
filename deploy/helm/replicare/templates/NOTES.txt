@@ -1,0 +1,26 @@
+replicare is deployed as release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+1. Check it's running:
+   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "replicare.fullname" . }}
+   kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "replicare.fullname" . }} -f
+
+2. Operator endpoints (via the Service {{ include "replicare.fullname" . }}):
+   kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "replicare.fullname" . }} {{ .Values.service.ports.status }}:{{ .Values.service.ports.status }} {{ .Values.service.ports.metrics }}:{{ .Values.service.ports.metrics }}
+   curl localhost:{{ .Values.service.ports.status }}/healthz     # liveness
+   curl localhost:{{ .Values.service.ports.status }}/status      # per-sync progress/lag (JSON)
+   curl localhost:{{ .Values.service.ports.metrics }}/metrics    # Prometheus
+
+3. Validate a config change before it rolls out:
+   Edit `config` in your values and run `helm upgrade`; the pod recreates on the
+   config checksum. To dry-run first:
+   helm template {{ .Release.Name }} . -s templates/configmap.yaml
+
+{{- if not (or .Values.secret.existingSecret .Values.secret.env) }}
+
+NOTE: no secret is configured. If your `config` references any ${VAR} (passwords,
+tokens), set `secret.existingSecret` or `secret.env` or the daemon will fail to
+start with an "unset variable" config error.
+{{- end }}
+
+Reminder: replicare's state store is Postgres (v1's only backend) even for a
+Redis→Redis or MySQL→MySQL sync — point `state_store` at a reachable Postgres.
