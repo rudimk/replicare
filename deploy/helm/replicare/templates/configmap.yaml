@@ -5,5 +5,12 @@ metadata:
   labels:
     {{- include "replicare.labels" . | nindent 4 }}
 data:
+  # `config` may be a structured map (rendered via toYaml — the ergonomic default,
+  # so Helm can merge/override it across -f files and --set) OR a verbatim string
+  # (an escape hatch for byte-exact control). Both land as /etc/replicare/config.yml.
   config.yml: |
+    {{- if kindIs "string" .Values.config }}
     {{- .Values.config | nindent 4 }}
+    {{- else }}
+    {{- toYaml .Values.config | nindent 4 }}
+    {{- end }}

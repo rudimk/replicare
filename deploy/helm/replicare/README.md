@@ -17,27 +17,42 @@ helm install my-replicare deploy/helm/replicare \
 ## How it's configured
 
 replicare is driven by **one config file**. This chart renders the `config` value
-**verbatim** into a ConfigMap mounted at `/etc/replicare/config.yml` — so you write
-normal replicare config and get its full expressiveness (any engines, any number
-of sources/targets/syncs). See the [configuration reference](../../../docs/configuration.md).
+into a ConfigMap mounted at `/etc/replicare/config.yml` — you get replicare's full
+expressiveness (any engines, any number of sources/targets/syncs). See the
+[configuration reference](../../../docs/configuration.md).
 
-Secrets stay out of `config` using `${VAR}` placeholders (replicare expands env
-vars in **any** field), supplied via a Secret:
+`config` is a **structured YAML object** by default, so Helm merges and overrides
+it the normal way — layer `-f` files or `--set config.logging.level=debug` and only
+that field changes:
 
 ```yaml
-config: |
-  ...
+config:
+  logging: { level: info, format: json }
+  observability: { status_addr: ":8080", metrics_addr: ":9090" }
+  state_store:
+    engine: postgres           # always OUTSIDE this chart — point at your own Postgres
+    postgres: { host: state.rds, port: 5432, database: replicare_state, user: replicare, password: ${STATE_PW}, sslmode: require }
+  sources:
+    cache: { engine: redis, redis: { host: my-redis, port: 6379, password: ${SRC_PW:-} } }
   targets:
-    replica:
-      engine: redis
-      redis: { host: my-elasticache, port: 6379, tls: require, user: "${EC_USER}", password: "${EC_PW}" }
-  ...
+    ec: { engine: redis, redis: { host: my-elasticache, port: 6379, tls: require, user: ${EC_USER}, password: ${EC_PW} } }
+  syncs:
+    - { name: cache-to-ec, source: cache, targets: [ec], include: ["*"], tuning: { drain_interval: 1s } }
+```
 
+Two small caveats for the structured form: **quote any all-digit scalar** you inline
+(e.g. a numeric-only password) so it decodes as a string, not an int; `${VAR}`
+placeholders need no quoting (they render in block style). If you'd rather hand the
+daemon a **byte-exact** config, set `config` to a block-scalar **string** instead and
+it is emitted verbatim.
+
+Secrets stay out of `config` using `${VAR}` placeholders (replicare expands env vars
+in **any** field), supplied via a Secret:
+
+```yaml
 secret:
   # Option A — let the chart create a Secret (fine for dev):
-  env:
-    EC_USER: replicare
-    EC_PW:   the-token
+  env: { EC_USER: replicare, EC_PW: the-token }
   # Option B — reference a Secret you manage (preferred for prod; `env` is ignored):
   existingSecret: my-replicare-secrets
 ```
@@ -51,7 +66,7 @@ can reference.
 |---|---|---|
 | `image.repository` / `image.tag` | `replicare` / chart appVersion | the daemon image |
 | `replicaCount` | `1` | **keep at 1** — single-active per sync; more just stand by |
-| `config` | a Redis→Redis sample | your full replicare config, rendered verbatim |
+| `config` | a Redis→Redis sample | your full replicare config as a structured map (mergeable), or a string for a verbatim config |
 | `secret.existingSecret` | `""` | reference an existing Secret for `${VAR}` values |
 | `secret.env` | `{}` | chart-managed Secret (dev) |
 | `service.ports.status` / `.metrics` | `8080` / `9090` | **must match** `observability.status_addr`/`metrics_addr` in `config` |
