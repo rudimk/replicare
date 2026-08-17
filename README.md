@@ -65,6 +65,9 @@ task docker          # -> replicare:latest
 **systemd**: see [`deploy/replicare.service`](deploy/replicare.service) — a hardened sample unit
 that runs `replicare run` unprivileged and gives SIGTERM time to drain and checkpoint.
 
+**Kubernetes (Helm)**: `helm install my-replicare deploy/helm/replicare -f values.yaml` — see
+[`docs/kubernetes.md`](docs/kubernetes.md) and the [chart README](deploy/helm/replicare/README.md).
+
 ## Configure
 
 Configuration is a YAML file: an engine-neutral envelope (logging, observability, state store,
@@ -128,6 +131,7 @@ health signals.
 - [Configuration reference](docs/configuration.md) — every config field.
 - [CLI reference](docs/cli.md) — every command.
 - [Operations](docs/operations.md) — tuning, health, retention, restarts.
+- [Kubernetes (Helm)](docs/kubernetes.md) — deploy the daemon with the Helm chart.
 - [Troubleshooting](docs/troubleshooting.md) — common problems and fixes.
 - [Postgres engine](docs/postgres.md) — the reference engine (trigger CDC, faithful `COPY`, FK components).
 - [MySQL engine](docs/mysql.md) — the MySQL→MySQL engine.

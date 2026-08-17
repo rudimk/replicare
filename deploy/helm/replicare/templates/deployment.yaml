@@ -17,8 +17,8 @@ spec:
   template:
     metadata:
       annotations:
-        # Roll the pod whenever the rendered config changes.
-        checksum/config: {{ .Values.config | sha256sum }}
+        # Roll the pod whenever the rendered config changes (map or string form).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

@@ -5,6 +5,7 @@
 - **[Configuration reference](configuration.md)** — every config field, with types and defaults.
 - **[CLI reference](cli.md)** — every command and flag, with examples.
 - **[Operations](operations.md)** — tuning, health signals, retention/reseed, restarts, ownership.
+- **[Kubernetes (Helm)](kubernetes.md)** — deploy the daemon with the Helm chart.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 
 ### Engine pages
