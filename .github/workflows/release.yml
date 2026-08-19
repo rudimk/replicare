@@ -6,8 +6,9 @@ name: Release
 #   git push origin v0.1.0
 #
 # This builds static, CGO-free binaries for the common OS/arch pairs, publishes a
-# GitHub Release with the archives + a checksums file, and pushes a multi-arch
-# image to GHCR (ghcr.io/<owner>/replicare:<version> and :latest).
+# GitHub Release with the archives + a checksums file, pushes a multi-arch image to
+# GHCR (ghcr.io/<owner>/replicare:<version> and :latest), and packages + pushes the
+# Helm chart as an OCI artifact to GHCR (ghcr.io/<owner>/replicare-controller:<version>).
 
 on:
   push:
@@ -152,3 +153,34 @@ jobs:
             VERSION=${{ github.ref_name }}
             COMMIT=${{ github.sha }}
             DATE=${{ github.event.repository.updated_at }}
+
+  chart:
+    name: Package and push Helm chart (GHCR OCI)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Package and push chart
+        env:
+          # v0.1.1 -> 0.1.1. Chart + appVersion are stamped from the tag so the
+          # chart release always matches the app/image tag, no manual bump needed.
+          REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${REF#v}"
+          mkdir -p dist
+          # The chart's name (replicare-controller) becomes the final OCI path
+          # segment, so this publishes to ghcr.io/<owner>/replicare-controller
+          # -- a package distinct from the daemon image (ghcr.io/<owner>/replicare).
+          helm package deploy/helm/replicare-controller \
+            --version "${VERSION}" --app-version "${VERSION}" --destination dist
+          helm push "dist/replicare-controller-${VERSION}.tgz" \
+            "oci://ghcr.io/${{ github.repository_owner }}"
