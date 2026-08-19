@@ -65,8 +65,16 @@ task docker          # -> replicare:latest
 **systemd**: see [`deploy/replicare.service`](deploy/replicare.service) — a hardened sample unit
 that runs `replicare run` unprivileged and gives SIGTERM time to drain and checkpoint.
 
-**Kubernetes (Helm)**: `helm install my-replicare deploy/helm/replicare -f values.yaml` — see
-[`docs/kubernetes.md`](docs/kubernetes.md) and the [chart README](deploy/helm/replicare/README.md).
+**Kubernetes (Helm)**: the chart is published as an OCI artifact at
+`ghcr.io/rudimk/replicare-controller` (distinct from the daemon image
+`ghcr.io/rudimk/replicare`):
+
+```sh
+helm install my-replicare oci://ghcr.io/rudimk/replicare-controller --version 0.1.1 -f values.yaml
+```
+
+See [`docs/kubernetes.md`](docs/kubernetes.md) and the
+[chart README](deploy/helm/replicare-controller/README.md).
 
 ## Configure
 

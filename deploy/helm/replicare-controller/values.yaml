@@ -3,8 +3,10 @@
 # ConfigMap and mounts at /etc/replicare/config.yml, then runs with `replicare run`.
 
 image:
-  repository: replicare
-  # Defaults to the chart's appVersion when empty.
+  # The published daemon image. This is a DIFFERENT GHCR package from the chart
+  # (ghcr.io/rudimk/replicare-controller); point elsewhere for a private mirror.
+  repository: ghcr.io/rudimk/replicare
+  # Defaults to the chart's appVersion when empty (a matched chart+image pair).
   tag: ""
   pullPolicy: IfNotPresent
 
