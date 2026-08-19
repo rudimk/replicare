@@ -4,6 +4,9 @@
 *.exe
 *.test
 *.out
+# Stray binaries from `go build` without -o (built into the repo root).
+/replicare
+/loadgen
 
 # Coverage
 coverage.txt
