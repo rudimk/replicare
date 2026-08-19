@@ -36,18 +36,26 @@ var DefaultRetryPolicy = RetryPolicy{MaxAttempts: 5, BaseBackoff: 200 * time.Mil
 // re-read), so dependencies that landed since the last attempt resolve. Any
 // non-transient error fails immediately; exhausting the policy returns a loud
 // halt error with the deltas still dirty.
+//
+// For an acyclic component DrainComponent already advances table-by-table (a
+// successful parent confirms and drains even when a child transiently fails — see
+// there), so a retry re-reads only what is still blocked and resolves it once the
+// parent has landed. A cyclic component applies atomically, so the retry is the
+// whole-pass fallback.
 func DrainComponentRetrying(ctx context.Context, src engine.Source, sink engine.Sink,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool, policy RetryPolicy) (int, error) {
 
 	backoff := policy.BaseBackoff
 	var lastErr error
+	total := 0
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		n, err := DrainComponent(ctx, src, sink, tablesTopoOrder, target, batch, cyclic)
+		total += n
 		if err == nil {
-			return n, nil
+			return total, nil
 		}
 		if !engine.IsTransientConstraint(err) {
-			return 0, err
+			return total, err
 		}
 		lastErr = err
 		if attempt == policy.MaxAttempts {
@@ -55,7 +63,7 @@ func DrainComponentRetrying(ctx context.Context, src engine.Source, sink engine.
 		}
 		select {
 		case <-ctx.Done():
-			return 0, ctx.Err()
+			return total, ctx.Err()
 		case <-time.After(backoff):
 		}
 		backoff *= 2
@@ -63,7 +71,7 @@ func DrainComponentRetrying(ctx context.Context, src engine.Source, sink engine.
 			backoff = policy.MaxBackoff
 		}
 	}
-	return 0, fmt.Errorf("apply component HALTED: FK dependency unresolved after %d attempts; "+
+	return total, fmt.Errorf("apply component HALTED: FK dependency unresolved after %d attempts; "+
 		"deltas remain dirty and will re-apply once the dependency lands: %w",
 		policy.MaxAttempts, lastErr)
 }

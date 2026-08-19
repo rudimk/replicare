@@ -131,26 +131,52 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 
 // purgeConsumedBy deletes, in batches, delta rows consumed by every target in
 // the set (present in each target's track). With an empty set every row is
-// purgeable (count 0 = 0) — used when a single-target sync's only target is being
-// reseeded. Loops until a pass deletes fewer than batch rows.
+// purgeable — used when a single-target sync's only target is being reseeded.
+// Loops until a pass deletes fewer than batch rows.
+//
+// The consumed set is derived set-based from the (small) track table via its
+// (target, delta_id) PK — GROUP BY delta_id, one row per target — rather than a
+// per-delta correlated subquery. The original correlated form was O(delta ×
+// track): under a large partially-consumed backlog it scanned the entire delta
+// table running a track scan per row, stalling the (synchronous) streaming pass
+// that calls it every tick. Driving from delta with a semijoin to that set keeps
+// each pass O(track + batch) and lets batches make progress (already-deleted
+// deltas cannot reappear).
 func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engine.TargetID, batch int) (int64, error) {
-	q := fmt.Sprintf(`
-		WITH purgeable AS (
-			SELECT d.delta_id
-			FROM %s d
-			WHERE (SELECT count(*) FROM %s tr
-			       WHERE tr.delta_id = d.delta_id AND tr.target = ANY($1)) = $2
-			ORDER BY d.delta_id
-			LIMIT $3
-		)
-		DELETE FROM %s WHERE delta_id IN (SELECT delta_id FROM purgeable)`,
-		qualifiedCapture(deltaTableName(relID)), qualifiedCapture(trackTableName(relID)),
-		qualifiedCapture(deltaTableName(relID)))
+	deltaTbl := qualifiedCapture(deltaTableName(relID))
+	trackTbl := qualifiedCapture(trackTableName(relID))
 
-	strs := targetStrings(targets)
+	var q string
+	var args []any
+	if len(targets) == 0 {
+		// No consumers to gate on: every delta row is purgeable.
+		q = fmt.Sprintf(`
+			DELETE FROM %s WHERE delta_id IN (
+				SELECT delta_id FROM %s ORDER BY delta_id LIMIT $1
+			)`, deltaTbl, deltaTbl)
+		args = []any{batch}
+	} else {
+		q = fmt.Sprintf(`
+			WITH purgeable AS (
+				SELECT d.delta_id
+				FROM %s d
+				WHERE d.delta_id IN (
+					SELECT tr.delta_id FROM %s tr
+					WHERE tr.target = ANY($1)
+					GROUP BY tr.delta_id
+					HAVING count(*) = $2
+				)
+				ORDER BY d.delta_id
+				LIMIT $3
+			)
+			DELETE FROM %s WHERE delta_id IN (SELECT delta_id FROM purgeable)`,
+			deltaTbl, trackTbl, deltaTbl)
+		args = []any{targetStrings(targets), len(targets), batch}
+	}
+
 	var total int64
 	for {
-		ct, err := s.conn.Exec(ctx, q, strs, len(targets), batch)
+		ct, err := s.conn.Exec(ctx, q, args...)
 		if err != nil {
 			return total, err
 		}

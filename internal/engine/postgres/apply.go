@@ -76,16 +76,20 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 		return fmt.Errorf("postgres: apply: stage re-read: %w", err)
 	}
 
-	// Present keys -> upsert.
+	// Present keys -> upsert. An FK violation here is transient (a child whose
+	// parent has not landed on this target yet); classify it so the per-table drain
+	// leaves the row dirty and retries once the parent lands, rather than halting.
 	if _, err := s.conn.Exec(ctx, mergeInsertSQL(t, stg, cols, keyCols, colSetOf(keyCols), identity)); err != nil {
-		return fmt.Errorf("postgres: apply: upsert %s: %w", t, err)
+		return fmt.Errorf("postgres: apply: upsert %s: %w", t, classifyFKViolation(err))
 	}
 
-	// Dirty keys that are absent from the staging were deleted at the source.
+	// Dirty keys that are absent from the staging were deleted at the source. An FK
+	// violation on delete is likewise transient (a parent deleted before its child
+	// on a target without ON DELETE CASCADE) and resolves once the child is deleted.
 	del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
 		qualifyTable(t), inPred, keyTuple, quotedKeyList(keyCols), quoteIdentifier(stg))
 	if _, err := s.conn.Exec(ctx, del); err != nil {
-		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, err)
+		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
 	}
 
 	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
