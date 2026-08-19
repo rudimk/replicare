@@ -131,7 +131,7 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 
 	if err := applyDDL(ctx, conn, *cyclic, log); err != nil {
 		return err
@@ -180,7 +180,7 @@ func cmdDDL(ctx context.Context, args []string, log logf) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	return applyDDL(ctx, conn, *cyclic, log)
 }
 
@@ -199,12 +199,12 @@ func cmdVerify(ctx context.Context, args []string, log logf) error {
 	if err != nil {
 		return fmt.Errorf("source: %w", err)
 	}
-	defer srcConn.Close(ctx)
+	defer func() { _ = srcConn.Close(ctx) }()
 	dstConn, err := connect(ctx, *dst)
 	if err != nil {
 		return fmt.Errorf("target: %w", err)
 	}
-	defer dstConn.Close(ctx)
+	defer func() { _ = dstConn.Close(ctx) }()
 
 	if err := pinGUCs(ctx, srcConn); err != nil {
 		return err
@@ -245,7 +245,7 @@ func cmdReset(ctx context.Context, args []string, log logf) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close(ctx)
+	defer func() { _ = conn.Close(ctx) }()
 	if _, err := conn.Exec(ctx, "DROP SCHEMA IF EXISTS loadgen CASCADE"); err != nil {
 		return fmt.Errorf("drop schema: %w", err)
 	}

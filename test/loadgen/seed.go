@@ -90,10 +90,10 @@ func seed(ctx context.Context, conn *pgx.Conn, s scale, log logf) error {
 
 		// parent_id points only at a strictly-lower id -> a forest, never a cycle
 		// among categories (the self-ref is exercised without an unbounded cycle).
-		{"categories.parent_id", fmt.Sprintf(`
+		{"categories.parent_id", `
 			UPDATE loadgen.categories
 			SET parent_id = 1+floor(random()*(id-1))::bigint
-			WHERE id > 1 AND random() < 0.6`)},
+			WHERE id > 1 AND random() < 0.6`},
 
 		{"users", fmt.Sprintf(`
 			INSERT INTO loadgen.users
