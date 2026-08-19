@@ -158,12 +158,12 @@ var ddlStatements = []string{
 
 // cyclicDDL adds the two NULLABLE FK cycles, applied only under --cyclic. Both are
 // the kind pre-flight classifies as null_then_fill (never the NOT-NULL
-// non-deferrable kind it refuses). They are separated from the default schema
-// because replicare's initial copy does NOT currently converge a cyclic component
-// that has downstream children (order_items under the cyclic orders): order_items
-// is copied before orders and the target FK fails. Use --cyclic to exercise /
-// reproduce replicare's cyclic-copy path; leave it off for a schema that converges
-// today. ADD CONSTRAINT has no IF NOT EXISTS, so each is guarded on duplicate_object.
+// non-deferrable kind it refuses). They are separated from the default schema so
+// the acyclic default stays the simple, fully-converging case. Under --cyclic the
+// initial copy converges (the copier loads cyclic FK columns NULL then fills them),
+// but streaming a cyclic component under churn is limited for non-DEFERRABLE target
+// FKs (its atomic per-pass apply relies on SET CONSTRAINTS ALL DEFERRED). ADD
+// CONSTRAINT has no IF NOT EXISTS, so each is guarded on duplicate_object.
 var cyclicDDL = []string{
 	// categories self-reference (parent_id -> categories.id).
 	`DO $$

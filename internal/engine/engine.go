@@ -202,6 +202,18 @@ type KeyExister interface { // implemented by the Redis Source
 	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
 }
 
+// CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an
+// engine-specific strategy to INITIALLY COPY an FK component containing a cycle or
+// self-reference (Postgres/MySQL trigger CDC — the plain parents-first chunked copy
+// has no valid order). The copy pipeline type-asserts the Sink to this and, for a
+// cyclic component, delegates the whole component's load here instead of the chunked
+// copy; a Sink that does not implement it falls back (CLAUDE.md §4.1). The paired
+// Source is passed because the copy reads from it (the implementation may require a
+// specific concrete Source type).
+type CyclicComponentCopier interface {
+	CopyCyclicComponent(ctx context.Context, src Source, tables []TableRef) error
+}
+
 // ChunkMethod is how a table is split for parallel copy (CLAUDE.md §4.1).
 type ChunkMethod string
 

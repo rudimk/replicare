@@ -74,18 +74,20 @@ servers recompute it.
 
 ## The `--cyclic` flag
 
-By default the schema is **acyclic** and converges on replicare's initial copy
-today. `--cyclic` adds two nullable FK **cycles** — the `categories` self-reference
-and a `users ↔ orders` 2-table cycle — to exercise replicare's cyclic-copy
-(`null_then_fill`) path. Apply it consistently to source **and** target
-(`ddl --cyclic`, `run --cyclic`).
+By default the schema is **acyclic**. `--cyclic` adds two nullable FK **cycles** —
+the `categories` self-reference and a `users ↔ orders` 2-table cycle — to exercise
+replicare's cyclic-copy (`null_then_fill`) path. Apply it consistently to source
+**and** target (`ddl --cyclic`, `run --cyclic`).
 
-> **Note:** as of this writing, replicare's initial copy does **not** converge a
-> cyclic component that has downstream children (e.g. `order_items` under the
-> cyclic `orders`): the child is copied before its parent and the target FK
-> rejects it. `--cyclic` is therefore a **reproduction** switch for that
-> limitation, not a supported converging configuration. Leave it off for a schema
-> that converges.
+> **Initial copy of a cyclic component converges** (the copier loads every table
+> with its cyclic FK columns NULL, in an order that respects the non-cyclic edges,
+> then fills those columns). **Streaming a cyclic component under churn is still
+> limited:** its per-pass apply is one atomic transaction that relies on
+> `SET CONSTRAINTS ALL DEFERRED`, which is a no-op for a **standard non-DEFERRABLE**
+> target FK, so a cross-batch dependency inside the cycle can halt the pass. If you
+> exercise `--cyclic`, either make the target's cyclic FKs `DEFERRABLE` or expect
+> streaming to lag on churn to the cyclic tables. The **default (acyclic) schema has
+> no such limit** — copy and streaming both converge.
 
 ## Gotchas
 

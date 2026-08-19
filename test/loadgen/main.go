@@ -124,7 +124,7 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	scaleF := fs.Float64("scale", 1.0, "multiply default row counts (e.g. 0.1 for a quick run, 2 for ~2M events)")
 	ops := fs.Int("ops", 200, "number of churn statements when the DB is already seeded")
 	seedVal := fs.Int64("seed", 1, "RNG seed (server setseed + client op selection) for reproducibility")
-	cyclic := fs.Bool("cyclic", false, "also add the optional FK cycles (exercises replicare's cyclic-copy path; does not converge today)")
+	cyclic := fs.Bool("cyclic", false, "also add the optional FK cycles (exercises the cyclic-copy null-then-fill path; streaming under churn is limited for non-DEFERRABLE FKs)")
 	_ = fs.Parse(args)
 
 	conn, err := connect(ctx, *dsn)
