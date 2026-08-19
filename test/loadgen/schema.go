@@ -23,9 +23,10 @@ package main
 //   - audit_log        NO primary key / no unique key -> replicare skips it with
 //     a loud warning. verify() excludes it for the same reason.
 //
-// The default schema is ACYCLIC and converges on replicare today. The optional
-// --cyclic flag adds two nullable FK cycles (cyclicDDL) to exercise replicare's
-// cyclic-copy path -- see the note on cyclicDDL for the current limitation.
+// The default schema is ACYCLIC. The optional --cyclic flag adds two nullable FK
+// cycles (cyclicDDL) to exercise replicare's cyclic-copy AND cyclic-streaming
+// paths; both converge under churn with standard non-DEFERRABLE FKs (see the note
+// on cyclicDDL).
 //
 // All DDL is idempotent (CREATE ... IF NOT EXISTS; cyclicDDL guards ADD CONSTRAINT
 // on duplicate_object). It is applied to BOTH the source and, via `loadgen ddl`,
@@ -159,11 +160,12 @@ var ddlStatements = []string{
 // cyclicDDL adds the two NULLABLE FK cycles, applied only under --cyclic. Both are
 // the kind pre-flight classifies as null_then_fill (never the NOT-NULL
 // non-deferrable kind it refuses). They are separated from the default schema so
-// the acyclic default stays the simple, fully-converging case. Under --cyclic the
-// initial copy converges (the copier loads cyclic FK columns NULL then fills them),
-// but streaming a cyclic component under churn is limited for non-DEFERRABLE target
-// FKs (its atomic per-pass apply relies on SET CONSTRAINTS ALL DEFERRED). ADD
-// CONSTRAINT has no IF NOT EXISTS, so each is guarded on duplicate_object.
+// the acyclic default stays the simplest case. Under --cyclic both initial copy
+// AND streaming converge with standard non-DEFERRABLE FKs: the copier loads cyclic
+// FK columns NULL then fills them, and streaming applies each table's upsert /
+// delete / cyclic-fill in its own committed transaction so parents advance
+// across batches and the cycle is closed by a final fill phase. ADD CONSTRAINT
+// has no IF NOT EXISTS, so each is guarded on duplicate_object.
 var cyclicDDL = []string{
 	// categories self-reference (parent_id -> categories.id).
 	`DO $$

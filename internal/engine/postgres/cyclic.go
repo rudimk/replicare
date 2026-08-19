@@ -99,20 +99,10 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	}
 
 	// Cyclic FK child columns per table (the columns to NULL then fill).
-	cyclicCols := map[engine.TableRef][]string{}
-	seen := map[engine.TableRef]map[string]bool{}
-	cyclicEdge := map[string]bool{}
+	cyclicCols := cyclicColsByTable(cyc)
+	cyclicEdge := make(map[string]bool, len(cyc))
 	for _, c := range cyc {
 		cyclicEdge[fkKey(c.FK)] = true
-		if seen[c.FK.Child] == nil {
-			seen[c.FK.Child] = map[string]bool{}
-		}
-		for _, col := range c.FK.ChildCols {
-			if !seen[c.FK.Child][col] {
-				seen[c.FK.Child][col] = true
-				cyclicCols[c.FK.Child] = append(cyclicCols[c.FK.Child], col)
-			}
-		}
 	}
 
 	order := nonCyclicTopoOrder(members, cyclicEdge)

@@ -79,15 +79,17 @@ the `categories` self-reference and a `users ↔ orders` 2-table cycle — to ex
 replicare's cyclic-copy (`null_then_fill`) path. Apply it consistently to source
 **and** target (`ddl --cyclic`, `run --cyclic`).
 
-> **Initial copy of a cyclic component converges** (the copier loads every table
-> with its cyclic FK columns NULL, in an order that respects the non-cyclic edges,
-> then fills those columns). **Streaming a cyclic component under churn is still
-> limited:** its per-pass apply is one atomic transaction that relies on
-> `SET CONSTRAINTS ALL DEFERRED`, which is a no-op for a **standard non-DEFERRABLE**
-> target FK, so a cross-batch dependency inside the cycle can halt the pass. If you
-> exercise `--cyclic`, either make the target's cyclic FKs `DEFERRABLE` or expect
-> streaming to lag on churn to the cyclic tables. The **default (acyclic) schema has
-> no such limit** — copy and streaming both converge.
+> **Both initial copy and streaming of a cyclic component converge** under
+> `--cyclic`, with **standard non-DEFERRABLE** target FKs (the common real-world
+> case). Initial copy loads every table with its cyclic FK columns NULL, in an
+> order that respects the non-cyclic edges, then fills those columns. Streaming
+> uses the same NULL-then-fill idea per pass, but **per table**: each table's
+> upsert, delete, and cyclic-column fill commit independently, so a parent
+> advances through its own delta queue even when a cross-batch child is
+> transiently blocked (the same progress guarantee the acyclic drain gives),
+> and the cycle itself is closed by a final fill phase. This harness's
+> `--cyclic` schema drains cleanly under heavy churn with no `DEFERRABLE`
+> requirement.
 
 ## Gotchas
 

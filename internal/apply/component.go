@@ -58,12 +58,28 @@ func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool) (int, error) {
 
 	// Acyclic components drain table-by-table so parents make progress
-	// independently of a transiently-blocked child (drainAcyclic); only a cyclic
-	// component needs the single atomic transaction (which relies on the engine's
-	// cycle-safe strategy — Postgres SET CONSTRAINTS ALL DEFERRED, MySQL
-	// FK-checks-off + pre-commit verify).
+	// independently of a transiently-blocked child (drainAcyclic).
 	if !cyclic {
 		return drainAcyclic(ctx, src, sink, tablesTopoOrder, target, batch)
+	}
+
+	// A cyclic component whose cycle-closing FK columns are nullable drains
+	// per-table with NULL-then-fill (Postgres): parents land independently of a
+	// cross-batch child (the same livelock drainAcyclic avoids) and the cycle is
+	// closed by a final fill phase. An engine that does not offer this
+	// (NullFillCyclicSink), or a component with no nullable cyclic column (an
+	// all-DEFERRABLE cycle → empty result), falls through to the single atomic
+	// transaction, which relies on the engine's cycle-safe strategy (Postgres
+	// SET CONSTRAINTS ALL DEFERRED, MySQL FK-checks-off + whole-component
+	// pre-commit verify).
+	if nf, ok := sink.(engine.NullFillCyclicSink); ok {
+		cyclicCols, err := nf.CyclicCols(ctx, tablesTopoOrder)
+		if err != nil {
+			return 0, fmt.Errorf("apply component: resolve cyclic FK columns: %w", err)
+		}
+		if len(cyclicCols) > 0 {
+			return drainCyclicNullFill(ctx, src, sink, tablesTopoOrder, target, batch, cyclicCols)
+		}
 	}
 
 	work, total, err := gatherWork(ctx, src, tablesTopoOrder, target, batch)
@@ -186,6 +202,153 @@ func drainAcyclic(ctx context.Context, src engine.Source, sink engine.Sink,
 		total += len(w.ids)
 	}
 	return total, transient
+}
+
+// drainCyclicNullFill drains a cyclic FK component with per-table committed
+// transactions and NULL-then-fill, so it breaks BOTH livelocks a single-component
+// transaction suffers under real (non-DEFERRABLE) target FKs:
+//
+//   - Non-cyclic cross-batch edges (a child batch references a parent whose delta
+//     is in a different batch): per-table commits let the parent advance through
+//     its own queue while the blocked child stays dirty and retries — exactly the
+//     drainAcyclic fix, here applied inside a cyclic component (e.g. events→users,
+//     order_items→orders).
+//   - The cycle itself (users↔orders): the cyclic FK columns are loaded NULL in the
+//     upsert phase (breaking the cycle so a non-DEFERRABLE FK check passes now) and
+//     filled in a final phase once every referenced row is present.
+//
+// cyclicCols maps each table to its nullable cyclic FK columns (empty for a
+// non-cyclic member). Three per-table phases, matching the initial-copy NULL-fill
+// (CLAUDE.md §4.1) and the acyclic drain's ordering:
+//
+//	Phase 1 — upsert, parents→children, cyclic FK columns NULL. Non-cyclic
+//	          cross-batch dependencies resolve by per-table progress + retry.
+//	Phase 2 — delete absent, children→parents (only tables whose upsert landed).
+//	Phase 3 — fill cyclic FK columns, parents→children (only cyclic-column tables
+//	          whose upsert+delete landed). Runs LAST so nothing re-NULLs a filled
+//	          column; a still-missing cross-batch reference stays transient.
+//
+// A table is confirmed only after every applicable phase commits; a transient
+// failure in any phase leaves it dirty for the next pass (self-healing). Any
+// transient error is returned (after attempting every table) so the caller retries;
+// a non-transient error halts loud immediately.
+func drainCyclicNullFill(ctx context.Context, src engine.Source, sink engine.Sink,
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int,
+	cyclicCols map[engine.TableRef][]string) (int, error) {
+
+	work, _, err := gatherWork(ctx, src, tablesTopoOrder, target, batch)
+	if err != nil {
+		return 0, err
+	}
+	if len(work) == 0 {
+		return 0, nil
+	}
+
+	var transient error
+	upserted := make([]bool, len(work))
+	deleted := make([]bool, len(work))
+	filled := make([]bool, len(work))
+
+	// Phase 1 — upsert (cyclic FK columns NULL), parents→children.
+	for i, w := range work {
+		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, false); err != nil {
+			if engine.IsTransientConstraint(err) {
+				transient = err
+				continue
+			}
+			return 0, fmt.Errorf("apply component: upsert %s: %w", w.ref, err)
+		}
+		upserted[i] = true
+	}
+
+	// Phase 2 — deletes, children→parents (only tables whose upsert landed).
+	for i := len(work) - 1; i >= 0; i-- {
+		if !upserted[i] {
+			continue
+		}
+		if err := perTableApplyCyclic(ctx, src, sink, work[i], tablesTopoOrder, true, false); err != nil {
+			if engine.IsTransientConstraint(err) {
+				transient = err
+				continue
+			}
+			return 0, fmt.Errorf("apply component: delete %s: %w", work[i].ref, err)
+		}
+		deleted[i] = true
+	}
+
+	// Phase 3 — fill cyclic FK columns, parents→children. A non-cyclic member has
+	// nothing to fill and is done after phases 1–2.
+	for i, w := range work {
+		if len(cyclicCols[w.ref]) == 0 {
+			filled[i] = true
+			continue
+		}
+		if !upserted[i] || !deleted[i] {
+			continue
+		}
+		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, true); err != nil {
+			if engine.IsTransientConstraint(err) {
+				transient = err
+				continue
+			}
+			return 0, fmt.Errorf("apply component: fill %s: %w", w.ref, err)
+		}
+		filled[i] = true
+	}
+
+	// Confirm only tables that completed every applicable phase.
+	total := 0
+	for i, w := range work {
+		if upserted[i] && deleted[i] && filled[i] {
+			if err := src.ConfirmConsumed(ctx, w.ref, target, w.ids); err != nil {
+				return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
+			}
+			total += len(w.ids)
+		}
+	}
+	return total, transient
+}
+
+// perTableApplyCyclic runs one phase of the per-table cyclic NULL-fill drain in its
+// own committed transaction, under BeginApply(cyclic=true) so StageUpsert loads the
+// table's cyclic FK columns NULL. It always stages the re-read present rows (so the
+// cyclic fill and the delete's present/absent test have the current values); then,
+// per phase: delete the dirty keys now absent at the source (del), and/or fill the
+// cyclic FK columns from the staging (fill). Phase 1 passes both false.
+func perTableApplyCyclic(ctx context.Context, src engine.Source, sink engine.Sink,
+	w tableWork, componentTables []engine.TableRef, del, fill bool) error {
+	tx, err := sink.BeginApply(ctx, true, componentTables)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	if err := pipeStageUpsert(ctx, src, tx, w.ref, w.cols, w.distinct); err != nil {
+		return err
+	}
+	if fill {
+		filler, ok := tx.(engine.CyclicFiller)
+		if !ok {
+			return fmt.Errorf("apply component: sink tx %T does not implement CyclicFiller", tx)
+		}
+		if err := filler.FillCyclic(ctx); err != nil {
+			return err
+		}
+	}
+	if del {
+		if err := tx.DeleteAbsent(ctx, w.ref, w.distinct); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // perTableUpsert applies one table's re-read present rows in its own committed
