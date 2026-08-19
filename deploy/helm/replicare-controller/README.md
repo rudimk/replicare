@@ -1,18 +1,30 @@
-# replicare Helm chart
+# replicare-controller Helm chart
 
 Deploys the replicare daemon (`replicare run`) on Kubernetes: one replica that
 brings up and streams every sync in your config, exposing the `/status`,
 `/healthz`, and `/metrics` endpoints.
 
+The chart is published as an **OCI artifact** at
+`ghcr.io/rudimk/replicare-controller` — a package distinct from the daemon image
+(`ghcr.io/rudimk/replicare`). Both are stamped with the same version on each
+`vX.Y.Z` release.
+
 ## Install
 
 ```sh
-# from the repo:
-helm install my-replicare deploy/helm/replicare \
+# From the published OCI chart (recommended) — pin the version:
+helm install my-replicare oci://ghcr.io/rudimk/replicare-controller \
+  --version 0.1.1 \
   -f my-values.yaml
 
-# or point at a packaged chart / OCI registry once published.
+# ...or from a checkout of the repo:
+helm install my-replicare deploy/helm/replicare-controller \
+  -f my-values.yaml
 ```
+
+The chart's `appVersion` defaults `image.tag` to the matching daemon image
+(`ghcr.io/rudimk/replicare:<version>`), so a versioned OCI install pulls a matched
+chart + image pair. Override `image.tag` to decouple them.
 
 ## How it's configured
 
@@ -64,7 +76,7 @@ can reference.
 
 | Value | Default | Notes |
 |---|---|---|
-| `image.repository` / `image.tag` | `replicare` / chart appVersion | the daemon image |
+| `image.repository` / `image.tag` | `ghcr.io/rudimk/replicare` / chart appVersion | the daemon image (a separate GHCR package from this chart) |
 | `replicaCount` | `1` | **keep at 1** — single-active per sync; more just stand by |
 | `config` | a Redis→Redis sample | your full replicare config as a structured map (mergeable), or a string for a verbatim config |
 | `secret.existingSecret` | `""` | reference an existing Secret for `${VAR}` values |
@@ -93,6 +105,6 @@ can reference.
 ## Validate before applying
 
 ```sh
-helm lint deploy/helm/replicare
-helm template my-replicare deploy/helm/replicare -f my-values.yaml | kubectl apply --dry-run=client -f -
+helm lint deploy/helm/replicare-controller
+helm template my-replicare deploy/helm/replicare-controller -f my-values.yaml | kubectl apply --dry-run=client -f -
 ```

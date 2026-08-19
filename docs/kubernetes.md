@@ -1,14 +1,33 @@
 # Deploying on Kubernetes (Helm)
 
-replicare ships a Helm chart at [`deploy/helm/replicare`](../deploy/helm/replicare/)
-that runs the daemon (`replicare run`) on Kubernetes. This page is the deployment
-guide; the chart's own [README](../deploy/helm/replicare/README.md) is the
-exhaustive values reference.
+replicare ships a Helm chart — `replicare-controller` — that runs the daemon
+(`replicare run`) on Kubernetes. This page is the deployment guide; the chart's own
+[README](../deploy/helm/replicare-controller/README.md) is the exhaustive values
+reference.
+
+## Two GHCR packages
+
+Each `vX.Y.Z` release publishes two independent OCI artifacts to GHCR, stamped with
+the same version:
+
+| Artifact | Package | Pull |
+|---|---|---|
+| Daemon image | `ghcr.io/rudimk/replicare` | `docker pull ghcr.io/rudimk/replicare:0.1.1` |
+| Helm chart | `ghcr.io/rudimk/replicare-controller` | `helm pull oci://ghcr.io/rudimk/replicare-controller --version 0.1.1` |
+
+The chart's `appVersion` defaults `image.tag` to the matching daemon image, so a
+versioned chart install pulls a matched chart + image pair unless you override
+`image.tag`.
 
 ## Install
 
 ```sh
-helm install my-replicare deploy/helm/replicare -f my-values.yaml
+# From the published OCI chart (recommended) — pin the version:
+helm install my-replicare oci://ghcr.io/rudimk/replicare-controller \
+  --version 0.1.1 -f my-values.yaml
+
+# ...or from a checkout of the repo:
+helm install my-replicare deploy/helm/replicare-controller -f my-values.yaml
 ```
 
 `my-values.yaml` is where you put your config and point at your image and secrets.
@@ -138,7 +157,7 @@ SG). Watch-outs specific to that move:
 ## Validate before applying
 
 ```sh
-helm lint deploy/helm/replicare
-helm template my-replicare deploy/helm/replicare -f my-values.yaml \
+helm lint deploy/helm/replicare-controller
+helm template my-replicare deploy/helm/replicare-controller -f my-values.yaml \
   | kubectl apply --dry-run=client -f -
 ```
