@@ -130,9 +130,11 @@ exits 0. `reseed` flags a target for a full re-copy on the running daemon's next
 A degrading target — unreachable, or its delta backlog climbing toward the retention cap — is
 surfaced across metrics, logs, *and* traces simultaneously, never just one channel.
 
-A ready-to-import **Grafana dashboard** (per-table backlog/lag, catch-up, initial-copy progress,
-throughput, errors) with a configurable Prometheus data source lives at
-[`deploy/grafana/`](deploy/grafana/) — see its [README](deploy/grafana/README.md) to import it.
+To scrape `/metrics` without the Prometheus Operator (e.g. an OpenTelemetry Collector or plain
+Prometheus), see [`deploy/otel-collector-scrape.md`](deploy/otel-collector-scrape.md). A ready-to-import
+**Grafana dashboard** (per-table backlog/lag, catch-up, initial-copy progress, throughput, errors)
+with a configurable Prometheus data source lives at [`deploy/grafana/`](deploy/grafana/) — see its
+[README](deploy/grafana/README.md) to import it.
 
 See [`docs/operations.md`](docs/operations.md) for tuning, retention/reseed, and the headline
 health signals.
