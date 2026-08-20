@@ -84,6 +84,8 @@ config:
       include: ["*"]
       tuning:
         drain_interval: 1s
+        # drain_batch: 1000   # max deltas applied per table per pass; raise for a
+                              # high-volume table that lags (see docs/operations.md)
 
 # ---------------------------------------------------------------------------
 # Secrets that fill the ${VAR} placeholders in `config`.

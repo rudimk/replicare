@@ -60,6 +60,11 @@ syncs:
       - "*_audit"
     tuning:
       drain_interval: 1s
+      # Max dirty deltas applied per table per drain pass. With drain_interval
+      # this sets the per-table streaming ceiling (~drain_batch/drain_interval
+      # rows/s). Raise it for a high-volume table that lags; costs a larger
+      # re-read + apply per pass. Default 1000.
+      drain_batch: 1000
       retention:
         max_age: 24h
         max_bytes: 10GB

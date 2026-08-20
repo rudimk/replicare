@@ -69,6 +69,7 @@ type Sync struct {
 // Tuning holds engine-neutral tuning knobs.
 type Tuning struct {
 	DrainInterval Duration  `yaml:"drain_interval"`
+	DrainBatch    int       `yaml:"drain_batch"`
 	Retention     Retention `yaml:"retention"`
 	Pool          Pool      `yaml:"pool"`
 }
@@ -138,6 +139,9 @@ func (c *Config) applyDefaults() {
 	for _, s := range c.Syncs {
 		if s.Tuning.DrainInterval == 0 {
 			s.Tuning.DrainInterval = Duration(defaultDrainInterval)
+		}
+		if s.Tuning.DrainBatch == 0 {
+			s.Tuning.DrainBatch = defaultDrainBatch
 		}
 		if s.Tuning.Retention.MaxAge == 0 {
 			s.Tuning.Retention.MaxAge = Duration(defaultRetentionMaxAge)
@@ -247,6 +251,9 @@ func (c *Config) Validate() error {
 		}
 		if s.Tuning.DrainInterval <= 0 {
 			return fmt.Errorf("sync %q: drain_interval must be positive", s.Name)
+		}
+		if s.Tuning.DrainBatch <= 0 {
+			return fmt.Errorf("sync %q: drain_batch must be positive", s.Name)
 		}
 	}
 	return nil
