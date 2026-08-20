@@ -72,6 +72,94 @@ or keyword string; empty uses the standard `PG*` environment variables.
 skips). The `GENERATED … STORED` column is included and matches because both
 servers recompute it.
 
+## Running a full load test end-to-end
+
+The commands above assume replicare is already running with "your own config". Here
+is the complete rig — two Postgres instances, a state store, a config, the daemon,
+and a heavy-churn convergence loop — that this harness is meant to drive. It is the
+exact flow used to validate replicare's copy + streaming under load.
+
+**1. Two Postgres instances + a state-store database.** Any two reachable Postgres
+servers work; the quickest is two containers. replicare's state store is a third
+logical database (here, one on the target server):
+
+```sh
+docker run -d --name lg-src -e POSTGRES_PASSWORD=pw -p 55432:5432 postgres:16
+docker run -d --name lg-tgt -e POSTGRES_PASSWORD=pw -p 55433:5432 postgres:16
+# state store (replicare's own progress/cursors — NOT your data):
+docker exec lg-tgt psql -U postgres -c 'CREATE DATABASE replicare_state'
+
+export SOURCE="postgres://postgres:pw@localhost:55432/postgres"
+export TARGET="postgres://postgres:pw@localhost:55433/postgres"
+```
+
+**2. A minimal replicare config** (`loadtest.yaml`). `drain_interval` is short so
+streaming keeps up under churn:
+
+```yaml
+logging: { level: info, format: text }
+observability: { metrics_addr: ":19090", status_addr: ":18080" }
+state_store:
+  engine: postgres
+  postgres: { host: localhost, port: 55433, database: replicare_state, user: postgres, password: pw, sslmode: disable }
+sources:
+  src: { engine: postgres, postgres: { host: localhost, port: 55432, database: postgres, user: postgres, password: pw, sslmode: disable } }
+targets:
+  tgt: { engine: postgres, postgres: { host: localhost, port: 55433, database: postgres, user: postgres, password: pw, sslmode: disable } }
+syncs:
+  - name: loadtest
+    source: src
+    targets: [tgt]
+    include: ["loadgen.*"]
+    tuning: { drain_interval: 1s }
+```
+
+**3. Seed the source, create the target schema, start replicare.** Capture is
+enabled first, then the chunked copy runs — so seeding before the daemon starts is
+fine (the initial copy reproduces it):
+
+```sh
+go run ./test/loadgen run --dsn "$SOURCE"      # seed ~1M+ rows on the source
+go run ./test/loadgen ddl --dsn "$TARGET"      # create the (empty) target schema
+go run ./cmd/replicare run loadtest.yaml &     # start the daemon
+```
+
+**4. Verify the initial copy converged:**
+
+```sh
+go run ./test/loadgen verify --source "$SOURCE" --target "$TARGET" --wait 120s
+# => CONVERGED: all 9 replicated tables match
+```
+
+**5. Churn-and-verify loop — this is the actual load test.** Each round applies a
+random burst of inserts/updates/deletes (including PK-changing SKU renames) and
+asserts the target re-converges while the daemon streams deltas:
+
+```sh
+for r in 1 2 3 4; do
+  go run ./test/loadgen run --dsn "$SOURCE" --ops 800 --seed $r
+  go run ./test/loadgen verify --source "$SOURCE" --target "$TARGET" --wait 120s
+done
+```
+
+To stress **cross-batch dependencies and delta backlog** (what shook out the FK
+livelocks), churn several times back-to-back *before* verifying, so a large backlog
+builds while streaming lags, then converges:
+
+```sh
+for r in $(seq 1 8); do go run ./test/loadgen run --dsn "$SOURCE" --ops 800 --seed $r; done
+go run ./test/loadgen verify --source "$SOURCE" --target "$TARGET" --wait 300s
+```
+
+A run finishing with `CONVERGED: all 9 replicated tables match` — and the daemon log
+showing no `HALTED` / `stream pass error` — is a passing load test. For the cyclic
+variant, add `--cyclic` to **every** `ddl` and `run` (see below).
+
+> This is a manual test, distinct from `task test:integration` (the automated Go
+> suite). Those integration tests must run **serially** (`go test -p 1 ...`) because
+> they share schemas; the load test above is driven by hand and has no such
+> constraint.
+
 ## The `--cyclic` flag
 
 By default the schema is **acyclic**. `--cyclic` adds two nullable FK **cycles** —
