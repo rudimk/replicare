@@ -94,6 +94,9 @@ can reference.
 - **Port alignment.** The chart's Service/probe ports must match the addresses your
   `config` binds (`observability.status_addr`, `metrics_addr`). Defaults line up at
   `:8080`/`:9090`.
+- **Scraping metrics.** With the Prometheus Operator, set `serviceMonitor.enabled=true`.
+  Without it (e.g. an OpenTelemetry Collector or plain Prometheus), use the scrape job in
+  [`deploy/otel-collector-scrape.md`](../../otel-collector-scrape.md).
 - **Grafana dashboard.** Once `/metrics` is scraped (via `serviceMonitor.enabled`
   or your own scrape job), import [`deploy/grafana/replicare-dashboard.json`](../../grafana/README.md)
   — it has a configurable Prometheus data source and covers per-table backlog/lag,
