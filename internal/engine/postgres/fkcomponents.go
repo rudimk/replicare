@@ -96,83 +96,29 @@ func buildComponent(members []engine.Table, inSel map[engine.TableRef]bool) Comp
 	return Component{Tables: refs, Order: order, Cyclic: cyclic}
 }
 
-// topoOrder returns a topological order of the members (parents before children)
-// via Kahn's algorithm, plus the members that remain in cycles (including
-// self-references). Dependency edge: child depends on parent, so a parent is
-// emitted before its children. Ties break by qualified name for determinism.
-// Cyclic members are appended to the order after the acyclic prefix so callers
-// still get a total order to iterate.
+// topoOrder returns a valid parents-before-children order for the component and
+// the members that participate in a cycle or self-reference. It topologically
+// sorts over the NON-cyclic FK edges only — the cyclic edges are removed first
+// (identified via classifyCyclicFKs), so the remaining graph is a DAG and EVERY
+// member gets a valid position (a cyclic member is ordered by its non-cyclic
+// parents). This matters for both the cyclic initial copy and the cyclic streaming
+// apply: with the cyclic FK columns loaded/applied NULL then filled, the non-cyclic
+// edges are the real dependencies, so ordering by them (e.g. order_items after
+// orders) is what keeps the load valid. Ties break by qualified name.
 func topoOrder(members []engine.Table, memberSet, inSel map[engine.TableRef]bool) (order, cyclic []engine.TableRef) {
-	// Build dependency edges parent -> child within the component. Deduplicate
-	// (a table may have multiple FK edges to the same parent). Self-references
-	// (child == parent) are recorded as an immediate cycle.
-	children := map[engine.TableRef]map[engine.TableRef]bool{} // parent -> set of children
-	indeg := map[engine.TableRef]int{}
-	selfCycle := map[engine.TableRef]bool{}
-	for _, m := range members {
-		if _, ok := indeg[m.Ref]; !ok {
-			indeg[m.Ref] = 0
-		}
+	cyc := classifyCyclicFKs(members)
+	cyclicEdge := make(map[string]bool, len(cyc))
+	cyclicMember := map[engine.TableRef]bool{}
+	for _, c := range cyc {
+		cyclicEdge[fkKey(c.FK)] = true
+		cyclicMember[c.FK.Child] = true
+		cyclicMember[c.FK.Parent] = true
 	}
-	for _, m := range members {
-		for _, fk := range m.ForeignKeys {
-			if !inSel[fk.Parent] || !memberSet[fk.Parent] {
-				continue // dangling or cross-component (shouldn't happen within a component)
-			}
-			if fk.Child == fk.Parent {
-				selfCycle[fk.Child] = true
-				continue
-			}
-			if children[fk.Parent] == nil {
-				children[fk.Parent] = map[engine.TableRef]bool{}
-			}
-			if !children[fk.Parent][fk.Child] {
-				children[fk.Parent][fk.Child] = true
-				indeg[fk.Child]++
-			}
-		}
-	}
-
-	// Kahn's algorithm with deterministic tie-breaking.
-	var queue []engine.TableRef
-	for ref, d := range indeg {
-		if d == 0 && !selfCycle[ref] {
-			queue = append(queue, ref)
-		}
-	}
-	sort.Slice(queue, func(i, j int) bool { return queue[i].String() < queue[j].String() })
-
-	emitted := map[engine.TableRef]bool{}
-	for len(queue) > 0 {
-		n := queue[0]
-		queue = queue[1:]
-		order = append(order, n)
-		emitted[n] = true
-		// Emit children whose in-degree drops to zero.
-		kids := make([]engine.TableRef, 0, len(children[n]))
-		for c := range children[n] {
-			kids = append(kids, c)
-		}
-		sort.Slice(kids, func(i, j int) bool { return kids[i].String() < kids[j].String() })
-		for _, c := range kids {
-			indeg[c]--
-			if indeg[c] == 0 && !selfCycle[c] {
-				// Insert maintaining sorted order for determinism.
-				queue = append(queue, c)
-				sort.Slice(queue, func(i, j int) bool { return queue[i].String() < queue[j].String() })
-			}
-		}
-	}
-
-	// Anything not emitted is part of a cycle (or a self-reference).
-	for _, m := range members {
-		if !emitted[m.Ref] {
-			cyclic = append(cyclic, m.Ref)
-		}
+	order = nonCyclicTopoOrder(members, cyclicEdge)
+	for ref := range cyclicMember {
+		cyclic = append(cyclic, ref)
 	}
 	sort.Slice(cyclic, func(i, j int) bool { return cyclic[i].String() < cyclic[j].String() })
-	// Append cyclic members to the order so callers have a total iteration order.
-	order = append(order, cyclic...)
 	return order, cyclic
 }
 

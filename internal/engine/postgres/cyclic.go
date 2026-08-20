@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 
 	"github.com/rudimk/replicare/internal/engine"
@@ -25,6 +26,208 @@ import (
 //
 // Cyclic components are small, so these paths copy whole tables (unchunked) and
 // run serially on one Source/Sink.
+
+// CopyCyclicComponent is the engine.CyclicComponentCopier entry point: it copies
+// an FK component that contains a cycle or self-reference (single- or multi-table)
+// from src into this sink, choosing a cycle-safe strategy (CLAUDE.md §4.1). It is
+// invoked by the copy pipeline in place of the plain parents-first chunked copy,
+// which has no valid order for a cyclic component.
+//
+// Strategy: if every cyclic FK is DEFERRABLE, load the whole component in one
+// SET CONSTRAINTS ALL DEFERRED transaction. Otherwise (a nullable, non-deferrable
+// cycle) use NULL-then-fill across the ENTIRE component — copy every table with its
+// cyclic FK columns omitted (NULL on the target), in an order that respects only
+// the NON-cyclic edges, then fill those columns from the source. This generalizes
+// the old single-table self-ref null-fill to multi-table cycles (e.g. orders.user_id
+// <-> users.primary_order_id).
+//
+// Tables are copied whole (unchunked) here — a documented tradeoff: a cyclic
+// component gives up chunked/parallel copy for a correct load. The blocked case
+// (NOT NULL + non-deferrable) never reaches here (pre-flight fails loud).
+func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef) error {
+	pgSrc, ok := src.(*Source)
+	if !ok {
+		return fmt.Errorf("postgres: cyclic copy: source is %T, want *postgres.Source", src)
+	}
+	if s.conn == nil {
+		return errNotConnected("sink")
+	}
+
+	// Introspect the component tables to get columns, FKs, and nullability.
+	inc := make([]string, len(tables))
+	for i, t := range tables {
+		inc[i] = t.String()
+	}
+	schema, err := pgSrc.Introspect(ctx, engine.Selection{Include: inc})
+	if err != nil {
+		return fmt.Errorf("postgres: cyclic copy: introspect: %w", err)
+	}
+	inComp := make(map[engine.TableRef]bool, len(tables))
+	for _, t := range tables {
+		inComp[t] = true
+	}
+	var members []engine.Table
+	for _, t := range schema.Tables {
+		if inComp[t.Ref] {
+			members = append(members, t)
+		}
+	}
+
+	cyc := classifyCyclicFKs(members)
+	if anyBlockedCyclicFK(cyc) {
+		// Should be unreachable — pre-flight blocks this — but never load blindly.
+		return fmt.Errorf("postgres: cyclic copy: component has a NOT NULL non-deferrable cyclic FK; make it DEFERRABLE or break the cycle")
+	}
+
+	// All cyclic FKs deferrable -> one deferred transaction over the whole component.
+	if allDeferrable(cyc) {
+		return LoadCyclicDeferred(ctx, pgSrc, s, orderMembers(members))
+	}
+
+	// NULL-then-fill: null every cyclic FK column, copy in non-cyclic order, then fill.
+	return s.nullFillComponent(ctx, pgSrc, members, cyc)
+}
+
+// nullFillComponent runs the multi-table NULL-then-fill: copy each table with its
+// cyclic FK columns omitted (in an order that respects only the non-cyclic FK
+// edges, so a table always loads after its non-cyclic parents), then fill the
+// cyclic FK columns from the source.
+func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []engine.Table, cyc []CyclicFK) error {
+	byRef := make(map[engine.TableRef]engine.Table, len(members))
+	for _, t := range members {
+		byRef[t.Ref] = t
+	}
+
+	// Cyclic FK child columns per table (the columns to NULL then fill).
+	cyclicCols := cyclicColsByTable(cyc)
+	cyclicEdge := make(map[string]bool, len(cyc))
+	for _, c := range cyc {
+		cyclicEdge[fkKey(c.FK)] = true
+	}
+
+	order := nonCyclicTopoOrder(members, cyclicEdge)
+
+	// Pass 1: copy every table, omitting its cyclic FK columns (NULL on the target).
+	for _, ref := range order {
+		table := byRef[ref]
+		cols := subtractCols(transportColumns(table), cyclicCols[ref])
+		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+		if err := pipeCopy(ctx, src, ref, cols, s, sql); err != nil {
+			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
+		}
+	}
+
+	// Pass 2: fill the cyclic FK columns of each table that has them, in the same
+	// order (every referenced row now exists, so the FK holds when filled).
+	for _, ref := range order {
+		fkCols := cyclicCols[ref]
+		if len(fkCols) == 0 {
+			continue
+		}
+		table := byRef[ref]
+		pk := captureColsFor(table)
+		if len(pk) == 0 {
+			return fmt.Errorf("postgres: cyclic null-fill: %s has no usable key to fill by", ref)
+		}
+		if err := src.fillFKColumns(ctx, s, ref, table, pk, fkCols); err != nil {
+			return fmt.Errorf("postgres: cyclic null-fill pass 2 (%s): %w", ref, err)
+		}
+	}
+	return nil
+}
+
+// nonCyclicTopoOrder topologically sorts the component members using only the
+// non-cyclic in-component FK edges (cyclic edges, identified by cyclicEdge, are
+// removed first), so the result is a valid parents-before-children order for the
+// acyclic remainder. Ties break by qualified name for determinism.
+func nonCyclicTopoOrder(members []engine.Table, cyclicEdge map[string]bool) []engine.TableRef {
+	inComp := make(map[engine.TableRef]bool, len(members))
+	for _, t := range members {
+		inComp[t.Ref] = true
+	}
+	children := map[engine.TableRef][]engine.TableRef{}
+	indeg := map[engine.TableRef]int{}
+	for _, t := range members {
+		indeg[t.Ref] = 0
+	}
+	for _, t := range members {
+		for _, fk := range t.ForeignKeys {
+			if !inComp[fk.Parent] || cyclicEdge[fkKey(fk)] || fk.Child == fk.Parent {
+				continue
+			}
+			children[fk.Parent] = append(children[fk.Parent], fk.Child)
+			indeg[fk.Child]++
+		}
+	}
+	var queue []engine.TableRef
+	for ref, d := range indeg {
+		if d == 0 {
+			queue = append(queue, ref)
+		}
+	}
+	sortRefs(queue)
+	var order []engine.TableRef
+	for len(queue) > 0 {
+		n := queue[0]
+		queue = queue[1:]
+		order = append(order, n)
+		var ready []engine.TableRef
+		for _, c := range children[n] {
+			indeg[c]--
+			if indeg[c] == 0 {
+				ready = append(ready, c)
+			}
+		}
+		sortRefs(ready)
+		queue = append(queue, ready...)
+	}
+	// Any leftover (shouldn't happen once cyclic edges are removed) appended stably.
+	if len(order) < len(members) {
+		emitted := make(map[engine.TableRef]bool, len(order))
+		for _, r := range order {
+			emitted[r] = true
+		}
+		var rest []engine.TableRef
+		for _, t := range members {
+			if !emitted[t.Ref] {
+				rest = append(rest, t.Ref)
+			}
+		}
+		sortRefs(rest)
+		order = append(order, rest...)
+	}
+	return order
+}
+
+// orderMembers returns the member table refs sorted by qualified name (order is
+// irrelevant for the deferred strategy, which checks FKs only at commit).
+func orderMembers(members []engine.Table) []engine.TableRef {
+	refs := make([]engine.TableRef, len(members))
+	for i, t := range members {
+		refs[i] = t.Ref
+	}
+	sortRefs(refs)
+	return refs
+}
+
+// sortRefs orders table refs by qualified name in place (determinism).
+func sortRefs(refs []engine.TableRef) {
+	sort.Slice(refs, func(i, j int) bool { return refs[i].String() < refs[j].String() })
+}
+
+// allDeferrable reports whether every classified cyclic FK uses the deferred
+// strategy (so the whole component can load in one SET CONSTRAINTS DEFERRED txn).
+func allDeferrable(cyc []CyclicFK) bool {
+	if len(cyc) == 0 {
+		return false
+	}
+	for _, c := range cyc {
+		if c.Strategy != CyclicDeferred {
+			return false
+		}
+	}
+	return true
+}
 
 // LoadCyclicDeferred copies the given component tables into the target inside one
 // transaction with SET CONSTRAINTS ALL DEFERRED. It requires the target FKs to be

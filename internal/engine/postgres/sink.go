@@ -25,6 +25,12 @@ type Sink struct {
 // Compile-time assertion that *Sink satisfies the interface.
 var _ engine.Sink = (*Sink)(nil)
 
+// *Sink also implements the optional cyclic-component capabilities.
+var (
+	_ engine.CyclicComponentCopier = (*Sink)(nil)
+	_ engine.NullFillCyclicSink    = (*Sink)(nil)
+)
+
 // Connect opens the connection and applies session-GUC canonicalization (§4.2).
 func (s *Sink) Connect(ctx context.Context) error {
 	if s.conn != nil {
@@ -227,18 +233,59 @@ func (s *Sink) DeleteRange(ctx context.Context, t engine.TableRef, lo, hi engine
 // at-COMMIT behavior already gives cyclic components loud-before-corrupt safety.
 // The parameters exist for MySQL, which has no deferral (CLAUDE.md §8.1,
 // mysql-plan §0.2).
-func (s *Sink) BeginApply(ctx context.Context, _ bool, _ []engine.TableRef) (engine.ApplyTx, error) {
+func (s *Sink) BeginApply(ctx context.Context, cyclic bool, componentTables []engine.TableRef) (engine.ApplyTx, error) {
 	if s.conn == nil {
 		return nil, errNotConnected("sink")
+	}
+	// For a cyclic component, resolve which FK columns close the cycle so the apply
+	// can load them NULL then fill them (see pgApplyTx.cyclicCols). Done before BEGIN
+	// so an introspection error doesn't leave a transaction open.
+	var cyclicCols map[engine.TableRef][]string
+	if cyclic {
+		cc, err := s.cyclicColsFor(ctx, componentTables)
+		if err != nil {
+			return nil, fmt.Errorf("postgres: begin apply: resolve cyclic FK columns: %w", err)
+		}
+		cyclicCols = cc
 	}
 	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
 		return nil, fmt.Errorf("postgres: begin apply: %w", err)
 	}
+	// Harmless for standard (non-DEFERRABLE) FKs and correct-and-helpful when the
+	// target's cyclic FKs happen to be DEFERRABLE; the NULL-then-fill above is what
+	// makes the non-deferrable case work.
 	if _, err := s.conn.Exec(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
 		return nil, fmt.Errorf("postgres: begin apply: defer constraints: %w", err)
 	}
-	return &pgApplyTx{sink: s, staging: map[engine.TableRef]stagingInfo{}}, nil
+	return &pgApplyTx{sink: s, staging: map[engine.TableRef]stagingInfo{}, cyclicCols: cyclicCols}, nil
+}
+
+// CyclicCols implements engine.NullFillCyclicSink: it reports the nullable cyclic
+// FK child columns per table for a component, so the neutral drain can pick the
+// per-table NULL-then-fill strategy for a cyclic component (and the atomic
+// SET CONSTRAINTS ALL DEFERRED path when the result is empty — an all-DEFERRABLE
+// cycle). DEFERRABLE / NOT NULL cyclic columns are excluded (nullFillColsByTable).
+func (s *Sink) CyclicCols(ctx context.Context, componentTables []engine.TableRef) (map[engine.TableRef][]string, error) {
+	return s.cyclicColsFor(ctx, componentTables)
+}
+
+// cyclicColsFor resolves the nullable cyclic FK child columns per table for a
+// component, from the cached target metadata (columns to load NULL then fill in
+// the apply). Only NULL-then-fill (nullable) columns are returned: a DEFERRABLE
+// cyclic FK's columns may be NOT NULL and must NOT be nulled — the deferred-check
+// path handles them — so BeginApply(cyclic) on an all-DEFERRABLE cycle sets no
+// cyclicCols and relies purely on SET CONSTRAINTS ALL DEFERRED.
+func (s *Sink) cyclicColsFor(ctx context.Context, componentTables []engine.TableRef) (map[engine.TableRef][]string, error) {
+	members := make([]engine.Table, 0, len(componentTables))
+	for _, ref := range componentTables {
+		m, err := s.tableMeta(ctx, ref)
+		if err != nil {
+			return nil, err
+		}
+		members = append(members, m)
+	}
+	return nullFillColsByTable(classifyCyclicFKs(members)), nil
 }
 
 // tableMeta returns cached introspected metadata for a target table.

@@ -202,6 +202,51 @@ type KeyExister interface { // implemented by the Redis Source
 	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
 }
 
+// CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an
+// engine-specific strategy to INITIALLY COPY an FK component containing a cycle or
+// self-reference (Postgres/MySQL trigger CDC — the plain parents-first chunked copy
+// has no valid order). The copy pipeline type-asserts the Sink to this and, for a
+// cyclic component, delegates the whole component's load here instead of the chunked
+// copy; a Sink that does not implement it falls back (CLAUDE.md §4.1). The paired
+// Source is passed because the copy reads from it (the implementation may require a
+// specific concrete Source type).
+type CyclicComponentCopier interface {
+	CopyCyclicComponent(ctx context.Context, src Source, tables []TableRef) error
+}
+
+// NullFillCyclicSink is an OPTIONAL Sink capability that streams a cyclic FK
+// component with per-table NULL-then-fill instead of one component-wide
+// transaction (CLAUDE.md §4.1, §8.1). It reports, for a component, the nullable
+// cyclic FK child columns per table — the columns a NULL-then-fill apply loads
+// NULL (breaking the cycle so a non-DEFERRABLE FK check passes immediately) then
+// fills once every referenced row is present.
+//
+// A Sink that implements this opts the neutral drain into the per-table NULL-fill
+// strategy for a cyclic component: parents land independently of a cross-batch
+// child (breaking the same livelock the acyclic per-table drain avoids), and the
+// cycle is closed by a final fill phase. A non-empty result selects that path; an
+// empty result (no nullable cyclic column — e.g. an all-DEFERRABLE cycle) keeps
+// the single-transaction path. A Sink that does NOT implement it (MySQL, whose
+// cyclic strategy is FOREIGN_KEY_CHECKS=0 + a whole-component pre-commit verify)
+// always uses the single-transaction path.
+type NullFillCyclicSink interface {
+	// CyclicCols returns the nullable cyclic FK child columns per table for the
+	// component's full member set. Only columns safe to load NULL are returned;
+	// NOT NULL / DEFERRABLE cyclic columns are excluded (they belong to the
+	// single-transaction path).
+	CyclicCols(ctx context.Context, componentTables []TableRef) (map[TableRef][]string, error)
+}
+
+// CyclicFiller is an OPTIONAL ApplyTx capability paired with NullFillCyclicSink:
+// after StageUpsert has loaded a table's cyclic FK columns NULL, FillCyclic sets
+// them from the staging, once every referenced row in the component is present.
+// The tx returned by a NullFillCyclicSink's BeginApply(cyclic=true, …) implements
+// it. A transient FK violation from FillCyclic is classified transient so the
+// drain retries once the cross-batch dependency lands (§3.3).
+type CyclicFiller interface {
+	FillCyclic(ctx context.Context) error
+}
+
 // ChunkMethod is how a table is split for parallel copy (CLAUDE.md §4.1).
 type ChunkMethod string
 

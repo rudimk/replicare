@@ -79,11 +79,21 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 // tables' cursors to streaming for this target. The copy is checkpointed by the
 // StateStore, so an interrupted component resumes rather than restarting.
 func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) error {
-	progress := copy.WithProgress(func(t engine.TableRef, n int64) {
-		s.Tel.AddRowsCopied(s.Name, t, n)
-	})
-	if err := copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress); err != nil {
-		return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
+	// A cyclic component has no parents-first order, so the plain chunked copy would
+	// fail; delegate the whole component to the engine's cycle-safe copier when it
+	// offers one (Postgres/MySQL). Acyclic components (and engines without a cyclic
+	// copier) take the normal chunked path.
+	if comp.HasCycle() {
+		if err := s.copyCyclicComponent(ctx, comp); err != nil {
+			return err
+		}
+	} else {
+		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
+			s.Tel.AddRowsCopied(s.Name, t, n)
+		})
+		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress); err != nil {
+			return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
+		}
 	}
 	for _, t := range comp.Order {
 		cur, err := s.Store.LoadCursor(ctx, s.Name, s.Target, t)
@@ -99,6 +109,51 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 		Sync: s.Name, Target: string(s.Target), Level: "INFO", Event: observability.EventCutover,
 		Message: fmt.Sprintf("component of %d tables cut over to streaming", len(comp.Order)),
 	})
+	return nil
+}
+
+// copyCyclicComponent loads a cyclic FK component via the engine's cycle-safe
+// copier (Postgres/MySQL). It is coarse-checkpointed: the whole component is one
+// unit (unchunked), so on restart it re-runs unless every table is already marked
+// copied. An engine without a CyclicComponentCopier falls back to the plain chunked
+// copy (which cannot order a cycle, but preserves prior behavior rather than
+// erroring on an unexpected engine).
+func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component) error {
+	if len(s.Workers) == 0 {
+		return fmt.Errorf("syncer %s: cyclic copy: no workers", s.Name)
+	}
+	copier, ok := s.Workers[0].Sink.(engine.CyclicComponentCopier)
+	if !ok {
+		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
+			s.Tel.AddRowsCopied(s.Name, t, n)
+		})
+		return copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress)
+	}
+
+	// Coarse resume: skip if every table in the component is already copied.
+	done := 0
+	for _, t := range comp.Order {
+		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, t)
+		if err != nil {
+			return fmt.Errorf("syncer %s: cyclic copy: load progress %s: %w", s.Name, t, err)
+		}
+		if prog.Done {
+			done++
+		}
+	}
+	if done == len(comp.Order) {
+		return nil
+	}
+
+	if err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables); err != nil {
+		return fmt.Errorf("syncer %s: cyclic copy: %w", s.Name, err)
+	}
+	// Mark every table copied so cutover proceeds and a restart resumes.
+	for _, t := range comp.Order {
+		if err := s.Store.SaveCopyProgress(ctx, s.Name, state.CopyProgress{Table: t, Done: true}); err != nil {
+			return fmt.Errorf("syncer %s: cyclic copy: mark done %s: %w", s.Name, t, err)
+		}
+	}
 	return nil
 }
 

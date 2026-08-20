@@ -494,14 +494,36 @@ each sync, the engine auto-partitions the selected tables into **FK connected co
 - **Ordering within a component:** **upserts apply in topo order (parent→child); deletes apply in
   reverse (child→parent).** Cycles/self-references can't be topo-sorted → handled by the **retry
   fallback** (see §3.3). Initial copy loads a component in topo order (parents first).
-- **Streaming apply granularity (decision):** a component's coalesced changes for **one drain
-  pass** are applied in a **single target transaction** → the target is always referentially
-  consistent within the group. **Scope clarification:** the atomic unit is *the changes in one
-  pass*, **not** all rows of the component — so transaction size scales with **churn per pass**,
-  not table size. Under extreme churn a pass may exceed a batch-size cap; if so we either grow
-  the transaction or split it (relaxing strict per-group atomicity for that oversized pass) — a
-  documented tuning tension. **Initial bulk copy is NOT atomic** (it is chunked); per-component
-  atomicity is a *streaming* guarantee only.
+- **Streaming apply granularity (decision, refined):** the driving reason **per-table** apply
+  exists is that per-table dirty-key batches are cut by each table's *own* delta_id sequence, so a
+  child can reference a parent whose delta sits in a **different batch** (a PK-change cascade — e.g.
+  a renamed SKU — is the canonical case). A standard target FK is **non-DEFERRABLE**, so
+  `SET CONSTRAINTS ALL DEFERRED` is a no-op and the check fires immediately; applying the whole
+  component in **one transaction** would then roll the parent back with the transiently-blocked
+  child and **livelock** (the same split re-reads forever). Committing **per table** lets the parent
+  advance through its own delta queue and the blocked child resolve on a later pass. This holds for
+  **both** acyclic and (nullable) cyclic components:
+  - An **acyclic** component applies **per table in its own committed transaction**, in two
+    FK-ordered phases — **all upserts parent→child, then all deletes child→parent.**
+  - A **cyclic** component whose cycle-closing FK columns are **nullable** (the common real-world
+    case) applies **per table with NULL-then-fill** — the streaming analogue of the cyclic initial
+    copy (§4.1): **phase 1** upserts every table with its cyclic FK columns loaded NULL (parents→
+    children, each committed — breaking the cycle so a non-DEFERRABLE check passes, while non-cyclic
+    cross-batch deps still resolve by per-table progress); **phase 2** deletes absent (children→
+    parents); **phase 3** fills the cyclic FK columns from staging (once every referenced row is
+    present). A table is confirmed only after **all** its applicable phases commit. This is the
+    Postgres path (`NullFillCyclicSink` / `CyclicFiller`); it needs **no** `DEFERRABLE` FK.
+  - The **single-component transaction** path remains only where per-table NULL-fill does not apply:
+    an **all-DEFERRABLE** cyclic component (Postgres `SET CONSTRAINTS ALL DEFERRED` genuinely defers
+    the cycle) and **MySQL** cyclic (`FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify).
+  In every per-table case the target is still referentially consistent at **pass end** (the phases
+  are FK-ordered), but a **parent advances even when a child in the same pass transiently can't
+  apply**; a transient FK leaves the table fully dirty for the next pass and the caller
+  (`DrainComponentRetrying`) retries. **Scope clarification:** the unit is *the changes in one
+  pass*, **not** all rows of the component — so per-pass work scales with **churn per pass**, not
+  table size, and stays bounded (no unbounded re-read). **Initial bulk copy is NOT atomic** (it is
+  chunked); per-component atomicity is a *streaming* guarantee only, and only on the
+  single-transaction paths above.
 - **Giant-component problem (must handle):** real schemas often connect almost everything through
   hub tables (`users`, `tenant`, shared lookups), collapsing most of the schema into one giant
   component and erasing parallelism. *(Decision: auto-group by default, but emit a loud warning +
@@ -679,7 +701,7 @@ invasive.
 | Crash safety | read → apply to target → then track/purge on source. At-least-once, no 2PC. |
 | FK on target | **Dependency-ordered apply** within an FK component: **upserts parent→child, deletes child→parent** **+ retry fallback** for cycles/self-refs/cross-pass deps. |
 | Table grouping | Sync = user-configured selection; engine **auto-partitions into FK connected components** (over selected tables, from source catalogs). Components = units of ordering, **parallelism**, and consistency. **Auto by default; warn + override on giant component.** See §8.1. |
-| Per-component apply | A component's changes for **one drain pass** apply in a **single target transaction** (intra-group referential consistency). Bounded by churn/pass, not table size. Initial copy is chunked (not atomic). |
+| Per-component apply | **Per-table committed txns** are the default so a parent advances through its own delta queue even when a cross-batch child transiently can't apply — required for non-DEFERRABLE target FKs, where a single component txn would roll the parent back with the child and livelock under PK-change cascades (§8.1). **Acyclic** component: per table, two FK-ordered phases (all upserts parent→child, then all deletes child→parent). **Cyclic w/ nullable cycle FKs** (Postgres, the common case): per table, **NULL-then-fill** three phases (upsert cyclic cols NULL parent→child, delete child→parent, then fill cyclic cols) — converges under churn with **no `DEFERRABLE`** requirement (`NullFillCyclicSink`/`CyclicFiller`). **Single-component txn** kept only for **all-DEFERRABLE** cyclic (Postgres `SET CONSTRAINTS ALL DEFERRED`) and **MySQL** cyclic (`FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify). Confirm per table only after all its phases; transient FK → stays dirty, retried. End-of-pass consistent, bounded by churn/pass. Initial copy is chunked (not atomic). |
 | Copy chunking | **Keyset PK-range default** (balanced ranges via index-only boundary scan; composite/UUID/text keys OK), **ctid/block-range fallback**; native partitions copied per-partition. See §4.1. |
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |

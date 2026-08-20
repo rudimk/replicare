@@ -122,6 +122,42 @@ func anyChildColNullable(fk engine.ForeignKey, byRef map[engine.TableRef]engine.
 	return false
 }
 
+// cyclicColsByTable groups the cyclic FKs' child columns by child table (the
+// columns to load/apply NULL then fill), deduplicated and in first-seen order.
+func cyclicColsByTable(cyc []CyclicFK) map[engine.TableRef][]string {
+	out := map[engine.TableRef][]string{}
+	seen := map[engine.TableRef]map[string]bool{}
+	for _, c := range cyc {
+		if seen[c.FK.Child] == nil {
+			seen[c.FK.Child] = map[string]bool{}
+		}
+		for _, col := range c.FK.ChildCols {
+			if !seen[c.FK.Child][col] {
+				seen[c.FK.Child][col] = true
+				out[c.FK.Child] = append(out[c.FK.Child], col)
+			}
+		}
+	}
+	return out
+}
+
+// nullFillColsByTable is cyclicColsByTable restricted to the NULL-then-fill
+// strategy — the cyclic FK child columns that are actually nullable. This is the
+// set the STREAMING cyclic apply may load NULL: a DEFERRABLE cyclic FK's columns
+// (which may be NOT NULL) must NOT be nulled — they are handled by the
+// single-transaction SET CONSTRAINTS ALL DEFERRED path — and nulling a NOT NULL
+// column would fail loud. An empty result means the component has no nullable
+// cyclic column, so the streaming drain keeps the single-transaction path.
+func nullFillColsByTable(cyc []CyclicFK) map[engine.TableRef][]string {
+	nf := make([]CyclicFK, 0, len(cyc))
+	for _, c := range cyc {
+		if c.Strategy == CyclicNullThenFill {
+			nf = append(nf, c)
+		}
+	}
+	return cyclicColsByTable(nf)
+}
+
 // anyBlockedCyclicFK reports whether any classified cyclic FK blocks initial copy.
 func anyBlockedCyclicFK(cs []CyclicFK) bool {
 	for _, c := range cs {

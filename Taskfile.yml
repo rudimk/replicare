@@ -222,3 +222,30 @@ tasks:
       - defer: { task: harness:mysql:down }
       - defer: { task: harness:down }
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 REPLICARE_REDIS=1 go test -count=1 -p 1 ./internal/daemon/...
+
+  # loadgen: manual Postgres load + verification harness (test/loadgen). Not shipped.
+  # Pass connection info via vars, e.g. `task loadgen:seed DSN="postgres://..."`.
+  loadgen:ddl:
+    desc: 'Apply the loadgen schema to a DB (DSN=..., e.g. the target). CYCLIC=1 adds FK cycles.'
+    cmds:
+      - go run ./test/loadgen ddl --dsn "{{.DSN}}" {{if eq .CYCLIC "1"}}--cyclic{{end}}
+
+  loadgen:seed:
+    desc: 'Seed-or-churn a source DB (DSN=...). SCALE scales row counts, SEED for reproducibility.'
+    cmds:
+      - go run ./test/loadgen run --dsn "{{.DSN}}" --scale {{.SCALE | default "1.0"}} --seed {{.SEED | default "1"}}
+
+  loadgen:churn:
+    desc: 'Apply a churn burst to a seeded source DB (DSN=..., OPS=number of statements).'
+    cmds:
+      - go run ./test/loadgen run --dsn "{{.DSN}}" --ops {{.OPS | default "200"}} --seed {{.SEED | default "1"}}
+
+  loadgen:verify:
+    desc: 'Verify a target converged with the source (SRC=..., TGT=..., WAIT=e.g. 60s).'
+    cmds:
+      - go run ./test/loadgen verify --source "{{.SRC}}" --target "{{.TGT}}" --wait {{.WAIT | default "0s"}}
+
+  loadgen:reset:
+    desc: 'DROP SCHEMA loadgen CASCADE on a DB (DSN=...).'
+    cmds:
+      - go run ./test/loadgen reset --dsn "{{.DSN}}" --yes
