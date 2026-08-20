@@ -1,0 +1,454 @@
+{
+  "__inputs": [],
+  "__requires": [],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["replicare", "replication"],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Data source",
+        "multi": false,
+        "name": "datasource",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(replicare_target_up, sync)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Sync",
+        "multi": true,
+        "name": "sync",
+        "options": [],
+        "query": { "query": "label_values(replicare_target_up, sync)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(replicare_target_up{sync=~\"$sync\"}, target)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Target",
+        "multi": true,
+        "name": "target",
+        "options": [],
+        "query": { "query": "label_values(replicare_target_up{sync=~\"$sync\"}, target)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": {},
+        "datasource": { "type": "prometheus", "uid": "${datasource}" },
+        "definition": "label_values(replicare_delta_backlog_rows{sync=~\"$sync\"}, table)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Table",
+        "multi": true,
+        "name": "table",
+        "options": [],
+        "query": { "query": "label_values(replicare_delta_backlog_rows{sync=~\"$sync\"}, table)", "refId": "StandardVariableQuery" },
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "timepicker": {},
+  "timezone": "",
+  "title": "replicare — replication overview",
+  "uid": "replicare-overview",
+  "version": 1,
+  "weekStart": "",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 1,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Targets up",
+      "description": "Minimum of replicare_target_up across the selected syncs/targets. DOWN if any selected target is unreachable.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "id": 2,
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "min(replicare_target_up{sync=~\"$sync\", target=~\"$target\"})", "legendFormat": "targets up", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Max replication lag",
+      "description": "Worst per-table replication lag (age of the oldest un-applied change) across the selection.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "id": 3,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 30 }, { "color": "red", "value": 300 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max(replicare_replication_lag_seconds{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "max lag", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Total delta backlog",
+      "description": "Sum of unconsumed delta rows waiting to be applied across the selection.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "id": 4,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 10000 }, { "color": "red", "value": 100000 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum(replicare_delta_backlog_rows{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "backlog rows", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Throughput",
+      "description": "Current apply/copy throughput in rows per second across the selected syncs.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "id": 5,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rps",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "text", "value": null } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "none", "graphMode": "area", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum(replicare_throughput_rows_per_second{sync=~\"$sync\"})", "legendFormat": "rows/s", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Backlog & lag",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 6,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Delta backlog rows (per table)",
+      "description": "Unconsumed delta rows per table. Spikes after a churn burst and should drain toward 0 — that fall is the catch-up.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 7,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "stacking": { "mode": "none", "group": "A" }, "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (table) (replicare_delta_backlog_rows{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Oldest unconsumed delta age (per table)",
+      "description": "Age of the oldest un-applied change per table — how stale the target is for each table.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 8,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "stacking": { "mode": "none", "group": "A" }, "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (table) (replicare_delta_oldest_unconsumed_age_seconds{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Replication lag (per table)",
+      "description": "replicare_replication_lag_seconds per table.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "id": 9,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "stacking": { "mode": "none", "group": "A" }, "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "max by (table) (replicare_replication_lag_seconds{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delta backlog bytes (per table)",
+      "description": "Estimated unconsumed delta bytes per table — the source-footprint signal.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "id": 10,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "stacking": { "mode": "none", "group": "A" }, "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (table) (replicare_delta_backlog_bytes{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Initial copy",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "id": 11,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Initial copy progress % (per table)",
+      "description": "100 * rows_copied / rows_target. Reaches 100% when a table finishes its initial copy and transitions to streaming.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "id": 12,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "100 * sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"}) / clamp_min(sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"}), 1)", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rows copied vs target (per table)",
+      "description": "Absolute initial-copy progress: rows copied and the estimated total per table.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "id": 13,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"})", "legendFormat": "{{table}} copied", "range": true, "refId": "A" },
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"})", "legendFormat": "{{table}} target", "range": true, "refId": "B" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Throughput & apply latency",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "id": 14,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Throughput (rows/s)",
+      "description": "replicare_throughput_rows_per_second per sync.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 15,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (sync) (replicare_throughput_rows_per_second{sync=~\"$sync\"})", "legendFormat": "{{sync}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Apply batch latency (p95)",
+      "description": "95th percentile of replicare_apply_batch_seconds over 5m.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 16,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "histogram_quantile(0.95, sum by (le) (rate(replicare_apply_batch_seconds_bucket{sync=~\"$sync\", target=~\"$target\"}[5m])))", "legendFormat": "p95", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Errors & maintenance",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "id": 17,
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate (per category)",
+      "description": "rate(replicare_errors_total) by category (e.g. drain, retention). Should be flat at 0.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 41 },
+      "id": 18,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (category) (rate(replicare_errors_total{sync=~\"$sync\"}[5m]))", "legendFormat": "{{category}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delta purge rate (per table)",
+      "description": "rate(replicare_delta_purged_total) — consumed deltas being reclaimed, per table.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 41 },
+      "id": 19,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rps",
+          "custom": { "drawStyle": "line", "fillOpacity": 10, "showPoints": "never", "lineInterpolation": "linear", "axisPlacement": "auto" },
+          "color": { "mode": "palette-classic" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "calcs": [] }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum by (table) (rate(replicare_delta_purged_total{sync=~\"$sync\", table=~\"$table\"}[5m]))", "legendFormat": "{{table}}", "range": true, "refId": "A" }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Reseeds (selected range)",
+      "description": "Forced reseeds triggered by the retention cap over the dashboard time range. Non-zero means a laggard target was sacrificed to protect the source.",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 41 },
+      "id": 20,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 } ] },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "auto", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "targets": [
+        { "datasource": { "type": "prometheus", "uid": "${datasource}" }, "editorMode": "code", "expr": "sum(increase(replicare_reseed_total{sync=~\"$sync\", target=~\"$target\"}[$__range]))", "legendFormat": "reseeds", "instant": true, "refId": "A" }
+      ]
+    }
+  ]
+}

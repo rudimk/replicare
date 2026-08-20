@@ -103,6 +103,10 @@ The headline signals to watch are `replicare_target_up`, `replicare_delta_backlo
 they answer "is the target healthy, and how far behind is it?" (see [Source footprint](#source-footprint-the-thing-to-watch)
 and [When a target goes down](#when-a-target-goes-down)).
 
+A ready-to-import **Grafana dashboard** over these metrics — per-table backlog/lag, catch-up,
+initial-copy progress, throughput, and errors, with a configurable Prometheus data source — lives at
+[`deploy/grafana/`](../deploy/grafana/README.md).
+
 ### Traces (OpenTelemetry)
 
 Traces are exported via OTLP/gRPC when `observability.otlp_endpoint` is set. The span names are a
