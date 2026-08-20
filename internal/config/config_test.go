@@ -83,6 +83,7 @@ syncs:
     exclude: ["*_audit"]
     tuning:
       drain_interval: 2s
+      drain_batch: 5000
       retention:
         max_age: 12h
         max_bytes: 5GB
@@ -106,6 +107,9 @@ func TestLoadValid(t *testing.T) {
 	s := c.Syncs[0]
 	if s.Tuning.DrainInterval.Duration() != 2*time.Second {
 		t.Errorf("drain_interval = %v, want 2s", s.Tuning.DrainInterval)
+	}
+	if s.Tuning.DrainBatch != 5000 {
+		t.Errorf("drain_batch = %d, want 5000", s.Tuning.DrainBatch)
 	}
 	if s.Tuning.Retention.MaxBytes.Bytes() != 5*1000*1000*1000 {
 		t.Errorf("max_bytes = %d", s.Tuning.Retention.MaxBytes.Bytes())
@@ -142,6 +146,9 @@ syncs:
 	tn := c.Syncs[0].Tuning
 	if tn.DrainInterval.Duration() != time.Second {
 		t.Errorf("default drain_interval = %v, want 1s", tn.DrainInterval)
+	}
+	if tn.DrainBatch != 1000 {
+		t.Errorf("default drain_batch = %d, want 1000", tn.DrainBatch)
 	}
 	if tn.Pool.MaxSourceConns != 4 || tn.Pool.MaxTargetConns != 4 {
 		t.Errorf("default pool = %+v, want 4/4", tn.Pool)

@@ -23,12 +23,32 @@ Practical guidance for running replicare in production. Design rationale lives i
 | Knob | Meaning | Default |
 |---|---|---|
 | `drain_interval` | Time between streaming drain passes. Longer = more per-PK coalescing (less source load) but higher lag. | 1s |
+| `drain_batch` | Max dirty deltas applied **per table per pass**. With `drain_interval` this is the per-table streaming ceiling. | 1000 |
 | `retention.max_age` | Cap on the oldest unconsumed delta before a laggard target is reseeded. | 24h |
 | `retention.max_bytes` | Cap on the delta table's on-disk size before reseed. | off |
 | `pool.max_source_connections` / `pool.max_target_connections` | Connection caps; the copy worker pool is sized from these. | conservative |
 
 Defaults favor low source pressure. Raise the pool caps and shorten `drain_interval` for throughput;
 lengthen `drain_interval` to reduce re-read load under heavy churn.
+
+### A single high-volume table that lags
+
+Streaming applies at most `drain_batch` deltas **per table per pass**, so one table's ceiling is
+roughly `drain_batch / drain_interval` rows/s (e.g. `1000 / 1s` = ~1000 rows/s). When one big table
+(say a high-churn `events`) falls behind while the rest stay at zero backlog, you've hit that ceiling.
+Two levers, in order:
+
+1. **Shorten `drain_interval`** (`1s` → `200ms` → `100ms`): more passes/sec, linearly more throughput,
+   at the cost of more frequent re-read `SELECT`s on the source. Best when the *"Apply batch latency
+   (p95)"* is well under the interval (interval-bound).
+2. **Raise `drain_batch`** (`1000` → `5000`+): more rows per pass. More efficient than a tiny interval
+   for a genuinely large table — one COPY-to-staging + upsert of 5000 rows amortizes round-trips far
+   better than five of 1000 — and the right lever when apply latency is near/above the interval
+   (apply-bound). Costs a larger re-read and apply per pass (more source and target work in one shot).
+
+Watch `- rate(replicare_delta_backlog_rows[5m])` per table: positive means the backlog is shrinking
+(catching up). Connection-pool caps don't help here — they parallelize *across* tables/chunks, not
+within one hot table.
 
 ## Source footprint (the thing to watch)
 

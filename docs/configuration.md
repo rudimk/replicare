@@ -168,6 +168,7 @@ specific value types.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `drain_interval` | duration (`1s`, `500ms`) | `1s` | time between streaming drain passes; longer = more coalescing (less source load) but higher lag |
+| `drain_batch` | int | `1000` | max dirty deltas applied **per table per pass**; with `drain_interval` this is the per-table streaming ceiling (~`drain_batch/drain_interval` rows/s). Raise for a high-volume table that lags |
 | `retention.max_age` | duration (`24h`, `0` = off) | `24h` | oldest unconsumed delta before a laggard target is reseeded |
 | `retention.max_bytes` | size (`512MB`, `0` = off) | off | delta-table on-disk size before reseed |
 | `pool.max_source_connections` | int | 4 | source connection cap (copy worker pool is sized from it) |

@@ -7,6 +7,7 @@ import "time"
 // bounded by age so deltas can't grow forever (§3.4).
 const (
 	defaultDrainInterval   = 1 * time.Second
+	defaultDrainBatch      = 1000
 	defaultRetentionMaxAge = 24 * time.Hour
 	defaultMaxConns        = 4
 )

@@ -68,7 +68,7 @@ config:
                user: ${EC_USER}, password: ${EC_PW} }
   syncs:
     - { name: cache-to-replica, source: cache, targets: [replica], include: ["*"],
-        tuning: { drain_interval: 1s } }
+        tuning: { drain_interval: 1s, drain_batch: 1000 } }
 
 secret:
   existingSecret: my-replicare-secrets   # provides STATE_PW / SRC_PW / EC_USER / EC_PW

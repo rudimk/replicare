@@ -165,8 +165,23 @@ func workerCount(p config.Pool) int {
 
 // chunkRows / drainBatch pick conservative defaults; per-engine CDC tuning can
 // override these later via the engine block (CLAUDE.md §11).
-func chunkRows(config.Tuning) int  { return 10000 }
-func drainBatch(config.Tuning) int { return 1000 }
+func chunkRows(config.Tuning) int { return 10000 }
+
+// drainBatch is the max dirty deltas applied per table per drain pass. It is the
+// per-table streaming throughput ceiling together with drain_interval
+// (~drain_batch/drain_interval rows/s per table). Configurable via
+// tuning.drain_batch; applyDefaults fills the conservative 1000 default, so a
+// zero here (an unvalidated caller) still falls back rather than draining nothing.
+func drainBatch(t config.Tuning) int {
+	if t.DrainBatch > 0 {
+		return t.DrainBatch
+	}
+	return defaultDrainBatchFallback
+}
+
+// defaultDrainBatchFallback mirrors config.defaultDrainBatch for the zero-value
+// guard above (the config package owns the canonical default applied at load).
+const defaultDrainBatchFallback = 1000
 
 func blockingCount(r *engine.PreflightReport) int {
 	n := 0
