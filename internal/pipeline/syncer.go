@@ -36,6 +36,13 @@ type Syncer struct {
 	DrainInterval time.Duration
 	Retention     engine.RetentionPolicy
 
+	// ApplyConcurrency is how many of a component's tables may apply at once during
+	// streaming (CLAUDE.md §8 parallel delta apply). 1 (the default) is the
+	// strictly-sequential per-table drain. Higher values fan the per-table apply
+	// across a pool built from the primary connection plus the copy Workers (idle
+	// during streaming), bounded by how many pairs are available.
+	ApplyConcurrency int
+
 	// Heartbeat, if set, is called once per streaming iteration (after each pass,
 	// success or handled error) so an external liveness probe can tell a cycling
 	// loop from a wedged one (a hung query on a dropped socket). Optional; nil is a

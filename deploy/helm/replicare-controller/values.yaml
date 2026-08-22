@@ -87,8 +87,10 @@ config:
       include: ["*"]
       tuning:
         drain_interval: 1s
-        # drain_batch: 1000   # max deltas applied per table per pass; raise for a
-                              # high-volume table that lags (see docs/operations.md)
+        # drain_batch: 1000       # max deltas applied per table per pass; raise for a
+                                  # high-volume table that lags (see docs/operations.md)
+        # apply_concurrency: 1    # apply a component's tables concurrently; raise when
+                                  # SEVERAL tables backlog at once (also raise pool.* )
 
 # ---------------------------------------------------------------------------
 # Secrets that fill the ${VAR} placeholders in `config`.

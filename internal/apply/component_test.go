@@ -157,6 +157,58 @@ func (f *compFixture) assertConsistent(t *testing.T, ctx context.Context) {
 	}
 }
 
+// TestComponentParallelApplyConsistency drives the same mixed churn as the
+// sequential consistency test but through DrainComponentRetryingPool with a
+// multi-connection pool and concurrency > 1, so the parallel per-table apply path
+// (applyPhase, the connection free-list, transient-FK-under-parallelism retry) is
+// exercised and must still converge with no orphaned children.
+func TestComponentParallelApplyConsistency(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	f := newCompFixture(t, ctx)
+
+	// A 3-connection pool: the fixture's pair plus two freshly opened ones.
+	eng, _ := engine.Get("postgres")
+	pool := []Conn{{Src: f.src, Sink: f.sink}}
+	for i := 0; i < 2; i++ {
+		es, err := eng.NewSource(srcCfg())
+		if err != nil || es.Connect(ctx) != nil {
+			t.Fatalf("open pool source: %v", err)
+		}
+		ek, err := eng.NewSink(tgtCfg())
+		if err != nil || ek.Connect(ctx) != nil {
+			t.Fatalf("open pool sink: %v", err)
+		}
+		pool = append(pool, Conn{Src: es, Sink: ek})
+		t.Cleanup(func() {
+			bg := context.Background()
+			_ = es.Close(bg)
+			_ = ek.Close(bg)
+		})
+	}
+
+	// Same mixed source transaction as the sequential test.
+	exec(t, ctx, f.rawSrc, "BEGIN")
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.parent VALUES (4,'p4')")
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.child VALUES (6,4,'c6')")
+	exec(t, ctx, f.rawSrc, "DELETE FROM rc_it.child WHERE parent_id=2")
+	exec(t, ctx, f.rawSrc, "DELETE FROM rc_it.parent WHERE id=2")
+	exec(t, ctx, f.rawSrc, "UPDATE rc_it.child SET note='c1new' WHERE id=1")
+	exec(t, ctx, f.rawSrc, "UPDATE rc_it.parent SET label='p3new' WHERE id=3")
+	exec(t, ctx, f.rawSrc, "COMMIT")
+
+	for {
+		n, err := DrainComponentRetryingPool(ctx, pool, len(pool), f.topo, f.target, 100, false, fastRetry)
+		if err != nil {
+			t.Fatalf("parallel drain: %v", err)
+		}
+		if n == 0 {
+			break
+		}
+	}
+	f.assertConsistent(t, ctx)
+}
+
 func TestComponentReferentialConsistency(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

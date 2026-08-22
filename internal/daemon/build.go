@@ -100,19 +100,20 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	}
 
 	syncer := &pipeline.Syncer{
-		Name:          sync.Name,
-		Source:        source,
-		Sink:          sink,
-		Target:        engine.TargetID(targetName),
-		Workers:       workers,
-		Store:         d.store,
-		Tel:           d.tel,
-		Components:    report.Components,
-		Replicable:    report.Replicable,
-		ChunkOpts:     engine.ChunkOptions{TargetRows: chunkRows(sync.Tuning)},
-		DrainBatch:    drainBatch(sync.Tuning),
-		DrainInterval: sync.Tuning.DrainInterval.Duration(),
-		Retention:     retentionPolicy(sync.Tuning.Retention),
+		Name:             sync.Name,
+		Source:           source,
+		Sink:             sink,
+		Target:           engine.TargetID(targetName),
+		Workers:          workers,
+		Store:            d.store,
+		Tel:              d.tel,
+		Components:       report.Components,
+		Replicable:       report.Replicable,
+		ChunkOpts:        engine.ChunkOptions{TargetRows: chunkRows(sync.Tuning)},
+		DrainBatch:       drainBatch(sync.Tuning),
+		DrainInterval:    sync.Tuning.DrainInterval.Duration(),
+		ApplyConcurrency: sync.Tuning.ApplyConcurrency,
+		Retention:        retentionPolicy(sync.Tuning.Retention),
 	}
 	// Mark the streaming-liveness heartbeat once per pass (runSync registers the
 	// key after bring-up); lets /healthz restart a wedged pod.
