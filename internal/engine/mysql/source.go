@@ -57,6 +57,14 @@ func (s *Source) HealthCheck(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
+// DatabaseSize implements engine.DBSizer: the connected schema's data+index size.
+func (s *Source) DatabaseSize(ctx context.Context) (int64, error) {
+	if s.db == nil {
+		return 0, errNotConnected
+	}
+	return databaseSize(ctx, s.db)
+}
+
 // ServerVersion returns the numeric server version (e.g. 50744 for 5.7.44) and
 // refuses MariaDB (out of scope for v1).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {

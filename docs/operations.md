@@ -119,20 +119,27 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy. |
 | `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator). |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply/copy throughput. `0` on an idle, caught-up pass. |
-| `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table` | Replication lag — age of the oldest unconsumed delta (`0` when caught up). |
-| `replicare_delta_backlog_rows` | gauge | `sync`, `target`, `table` | Unconsumed delta rows (the queue depth). |
-| `replicare_delta_backlog_bytes` | gauge | `sync`, `target`, `table` | Estimated unconsumed delta bytes. |
-| `replicare_delta_oldest_unconsumed_age_seconds` | gauge | `sync`, `target`, `table` | Age of the oldest unconsumed delta (how stale the queue is). |
+| `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table`, `component` | Replication lag — age of the oldest unconsumed delta (`0` when caught up). |
+| `replicare_delta_backlog_rows` | gauge | `sync`, `target`, `table`, `component` | Unconsumed delta rows (the queue depth). |
+| `replicare_delta_backlog_bytes` | gauge | `sync`, `target`, `table`, `component` | Estimated unconsumed delta bytes. |
+| `replicare_delta_oldest_unconsumed_age_seconds` | gauge | `sync`, `target`, `table`, `component` | Age of the oldest unconsumed delta (how stale the queue is). |
 | `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability (`1`=up, `0`=down). |
+| `replicare_source_up` | gauge | `sync` | Source reachability (`1`=up, `0`=down). |
+| `replicare_source_db_bytes` | gauge | `sync` | Source database size in bytes (Postgres `pg_database_size`, MySQL `information_schema`; unset for engines that don't report it). |
+| `replicare_target_db_bytes` | gauge | `sync`, `target` | Target database size in bytes (same engine support). |
 | `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
 | `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
 | `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
 | `replicare_delete_reconciliation_lag_seconds` | gauge | `sync`, `target`, `table` | **Redis only** — duration of the last completed delete sweep (staleness of capture-less deletes). Unset for Postgres/MySQL. |
 | `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | **Redis only** — keys `DEL`ed by the target-vs-source delete sweep. Unset for Postgres/MySQL. |
 
-The headline signals to watch are `replicare_target_up`, `replicare_delta_backlog_rows`,
+The per-table backlog/lag gauges also carry a `component` label — the table's FK connected
+component (its first member; CLAUDE.md §8.1) — so you can roll lag and backlog up per component
+(`max by (component) (replicare_replication_lag_seconds)`).
+
+The headline signals to watch are `replicare_source_up`, `replicare_target_up`, `replicare_delta_backlog_rows`,
 `replicare_delta_oldest_unconsumed_age_seconds`, and `replicare_replication_lag_seconds` — together
 they answer "is the target healthy, and how far behind is it?" (see [Source footprint](#source-footprint-the-thing-to-watch)
 and [When a target goes down](#when-a-target-goes-down)).

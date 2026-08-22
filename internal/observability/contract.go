@@ -26,11 +26,12 @@ type Metric struct {
 
 // Common label keys. Kept as constants so emit sites and the registry agree.
 const (
-	LabelSync   = "sync"
-	LabelTarget = "target"
-	LabelTable  = "table"
-	LabelPhase  = "phase"
-	LabelEngine = "engine"
+	LabelSync      = "sync"
+	LabelTarget    = "target"
+	LabelTable     = "table"
+	LabelPhase     = "phase"
+	LabelEngine    = "engine"
+	LabelComponent = "component"
 )
 
 // Metric names. Prefix everything with "replicare_".
@@ -45,6 +46,9 @@ const (
 	MetricDeltaPurgedTotal      = "replicare_delta_purged_total"
 	MetricReseedTotal           = "replicare_reseed_total"
 	MetricTargetUp              = "replicare_target_up"
+	MetricSourceUp              = "replicare_source_up"
+	MetricSourceDBBytes         = "replicare_source_db_bytes"
+	MetricTargetDBBytes         = "replicare_target_db_bytes"
 	MetricApplyBatchSeconds     = "replicare_apply_batch_seconds"
 	MetricErrorsTotal           = "replicare_errors_total"
 	MetricPhaseInfo             = "replicare_table_phase_info"
@@ -60,13 +64,16 @@ var Metrics = []Metric{
 	{MetricRowsCopiedTotal, Counter, "Rows copied during initial copy", []string{LabelSync, LabelTable}},
 	{MetricRowsCopiedTarget, Gauge, "Estimated total rows to copy (denominator for progress)", []string{LabelSync, LabelTable}},
 	{MetricThroughputRows, Gauge, "Current apply/copy throughput in rows/sec", []string{LabelSync}},
-	{MetricReplicationLagSeconds, Gauge, "Replication lag in seconds", []string{LabelSync, LabelTarget, LabelTable}},
-	{MetricDeltaBacklog, Gauge, "Unconsumed delta rows", []string{LabelSync, LabelTarget, LabelTable}},
-	{MetricDeltaBacklogBytes, Gauge, "Estimated unconsumed delta bytes", []string{LabelSync, LabelTarget, LabelTable}},
-	{MetricDeltaOldestAgeSeconds, Gauge, "Age of the oldest unconsumed delta", []string{LabelSync, LabelTarget, LabelTable}},
+	{MetricReplicationLagSeconds, Gauge, "Replication lag in seconds", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
+	{MetricDeltaBacklog, Gauge, "Unconsumed delta rows", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
+	{MetricDeltaBacklogBytes, Gauge, "Estimated unconsumed delta bytes", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
+	{MetricDeltaOldestAgeSeconds, Gauge, "Age of the oldest unconsumed delta", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},
+	{MetricSourceUp, Gauge, "Source reachability (1=up, 0=down)", []string{LabelSync}},
+	{MetricSourceDBBytes, Gauge, "Source database size in bytes (engines that report it)", []string{LabelSync}},
+	{MetricTargetDBBytes, Gauge, "Target database size in bytes (engines that report it)", []string{LabelSync, LabelTarget}},
 	{MetricApplyBatchSeconds, Histogram, "Apply batch duration", []string{LabelSync, LabelTarget}},
 	{MetricErrorsTotal, Counter, "Errors by category", []string{LabelSync, "category"}},
 	{MetricPhaseInfo, Gauge, "Table phase (initial_copy/streaming) as an info gauge", []string{LabelSync, LabelTable, LabelPhase}},

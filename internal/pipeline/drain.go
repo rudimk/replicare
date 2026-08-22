@@ -43,7 +43,7 @@ func DrainTable(ctx context.Context, tm *telemetry.Telemetry, src engine.Source,
 	n, err := apply.Drain(ctx, src, sink, table, target, batch)
 	if err != nil {
 		if targetUnreachable(ctx, sink) {
-			tm.TargetUnreachable(ctx, span, sync, target, table, bl, prox, err)
+			tm.TargetUnreachable(ctx, span, sync, target, table, "", bl, prox, err)
 		} else {
 			// Target is up; the pass failed on the data (halt/retry is handled by
 			// the apply layer). Record the span error without flagging reachability.
@@ -53,9 +53,9 @@ func DrainTable(ctx context.Context, tm *telemetry.Telemetry, src engine.Source,
 	}
 
 	// Success: refresh reachability + backlog, and escalate if nearing the cap.
-	tm.TargetReachable(ctx, sync, target, table, bl)
+	tm.TargetReachable(ctx, sync, target, table, "", bl)
 	if blErr == nil && prox > 0 {
-		tm.RetentionApproaching(ctx, sync, target, table, bl, prox)
+		tm.RetentionApproaching(ctx, sync, target, table, "", bl, prox)
 	}
 	return n, nil
 }

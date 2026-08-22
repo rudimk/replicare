@@ -19,6 +19,37 @@ import (
 	"github.com/rudimk/replicare/internal/state"
 )
 
+// TestSourceTargetHealthAndSizeGauges covers the source/target reachability and
+// database-size gauges, and the component label on the backlog gauge.
+func TestSourceTargetHealthAndSizeGauges(t *testing.T) {
+	reg := prom.New()
+	tm := New(reg, nil, nil, nil)
+	ref := engine.TableRef{Schema: "public", Name: "orders"}
+
+	tm.SetSourceUp("s1", true)
+	tm.SetTargetUp("s1", "dst", false)
+	tm.SetSourceDBBytes("s1", 111)
+	tm.SetTargetDBBytes("s1", "dst", 222)
+	tm.SetBacklog("s1", "dst", ref, "public.orders", engine.DeltaBacklog{Rows: 7, Bytes: 70})
+
+	checks := []struct {
+		metric string
+		labels map[string]string
+		want   float64
+	}{
+		{observability.MetricSourceUp, map[string]string{"sync": "s1"}, 1},
+		{observability.MetricTargetUp, map[string]string{"sync": "s1", "target": "dst"}, 0},
+		{observability.MetricSourceDBBytes, map[string]string{"sync": "s1"}, 111},
+		{observability.MetricTargetDBBytes, map[string]string{"sync": "s1", "target": "dst"}, 222},
+		{observability.MetricDeltaBacklog, map[string]string{"sync": "s1", "target": "dst", "table": "public.orders", "component": "public.orders"}, 7},
+	}
+	for _, c := range checks {
+		if v, ok := gaugeValue(t, reg, c.metric, c.labels); !ok || v != c.want {
+			t.Errorf("%s%v = %v (present=%v), want %v", c.metric, c.labels, v, ok, c.want)
+		}
+	}
+}
+
 // captureSink records events in memory (stands in for the StateStore).
 type captureSink struct{ events []state.Event }
 
@@ -80,7 +111,7 @@ func TestTargetUnreachableAllChannels(t *testing.T) {
 	bl := engine.DeltaBacklog{Rows: 128, Bytes: 4096, OldestAge: 2 * time.Hour, HasBacklog: true}
 
 	ctx, span := tm.StartDrainSpan(context.Background(), "s1", "dst", ref, bl, 0.95)
-	tm.TargetUnreachable(ctx, span, "s1", "dst", ref, bl, 0.95, errors.New("connection refused"))
+	tm.TargetUnreachable(ctx, span, "s1", "dst", ref, "public.orders", bl, 0.95, errors.New("connection refused"))
 	span.End()
 
 	// Metrics: reachability down + backlog published.
@@ -89,7 +120,7 @@ func TestTargetUnreachableAllChannels(t *testing.T) {
 		t.Errorf("target_up = %v (present=%v), want 0", v, ok)
 	}
 	if v, ok := gaugeValue(t, reg, observability.MetricDeltaBacklog,
-		map[string]string{"sync": "s1", "target": "dst", "table": "public.orders"}); !ok || v != 128 {
+		map[string]string{"sync": "s1", "target": "dst", "table": "public.orders", "component": "public.orders"}); !ok || v != 128 {
 		t.Errorf("delta_backlog = %v (present=%v), want 128", v, ok)
 	}
 
@@ -137,7 +168,7 @@ func TestRetentionApproachingEscalates(t *testing.T) {
 		tm := New(prom.New(), nil, log, sink)
 		bl := engine.DeltaBacklog{Rows: 10, OldestAge: time.Hour, HasBacklog: true}
 
-		tm.RetentionApproaching(context.Background(), "s1", "dst", ref, bl, c.prox)
+		tm.RetentionApproaching(context.Background(), "s1", "dst", ref, "public.orders", bl, c.prox)
 
 		if !strings.Contains(buf.String(), c.wantLevel) {
 			t.Errorf("prox %.2f: log missing %s: %s", c.prox, c.wantLevel, buf.String())
