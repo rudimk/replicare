@@ -57,6 +57,13 @@ type Syncer struct {
 	// sweepStarted stamps the start of each unit's current delete-sweep pass, so its
 	// duration (the delete-reconciliation-lag gauge, RM8) is published on completion.
 	sweepStarted map[engine.TableRef]time.Time
+
+	// compIdx maps each replicable table to its FK-component id (the component's
+	// first sorted member), for the per-component metric label. Built lazily.
+	compIdx map[engine.TableRef]string
+	// lastDBSize throttles the DB-size metric queries (they scan catalogs, so we
+	// emit them on an interval, not every drain pass).
+	lastDBSize time.Time
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture

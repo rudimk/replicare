@@ -169,7 +169,7 @@ func TestDrainAgainstDownedTargetAllChannels(t *testing.T) {
 		t.Errorf("target_up = %v (present=%v), want 0", v, ok)
 	}
 	if v, ok := gaugeValue(t, reg, observability.MetricDeltaBacklog,
-		map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders"}); !ok || v != 7 {
+		map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders", "component": ""}); !ok || v != 7 {
 		t.Errorf("delta_backlog = %v (present=%v), want 7", v, ok)
 	}
 

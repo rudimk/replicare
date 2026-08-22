@@ -148,6 +148,19 @@ var errLocalInfileRequired = fmt.Errorf("mysql: target requires local_infile=ON 
 	"copy/apply transport, but the server has it disabled (v1 has no INSERT fallback yet). " +
 	"Enable it on the target: SET GLOBAL local_infile=1, or set local-infile=ON in my.cnf. See docs/mysql.md")
 
+// databaseSize returns the data+index size (bytes) of the connection's default
+// schema from information_schema — the MySQL analog of pg_database_size, for the
+// DB-size metric. It reflects the DSN's default database only (a MySQL schema is a
+// database); selection may span others, so treat it as an indicative figure.
+func databaseSize(ctx context.Context, db *sql.DB) (int64, error) {
+	var b sql.NullInt64
+	const q = "SELECT COALESCE(SUM(data_length + index_length), 0) FROM information_schema.tables WHERE table_schema = DATABASE()"
+	if err := db.QueryRowContext(ctx, q).Scan(&b); err != nil {
+		return 0, fmt.Errorf("mysql: database size: %w", err)
+	}
+	return b.Int64, nil
+}
+
 // serverVersion queries the connected server's version, rejects MariaDB (out of
 // scope for v1), and returns the comparable version number (§1.6).
 func serverVersion(ctx context.Context, db *sql.DB) (int, error) {

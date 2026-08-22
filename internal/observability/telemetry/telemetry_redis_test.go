@@ -18,9 +18,9 @@ func TestRedisUnitLabelsThroughReusedMetrics(t *testing.T) {
 	unit := engine.TableRef{Schema: "redis", Name: "db0"}
 	const sync, target = "redis-sync", engine.TargetID("dst")
 
-	tel.SetBacklog(sync, target, unit, engine.DeltaBacklog{Rows: 5, Bytes: 40, OldestAge: 0})
-	tel.SetReplicationLag(sync, target, unit, 2.5) // reconciliation age
-	tel.AddRowsCopied(sync, unit, 100)             // keys copied
+	tel.SetBacklog(sync, target, unit, "redis.db0", engine.DeltaBacklog{Rows: 5, Bytes: 40, OldestAge: 0})
+	tel.SetReplicationLag(sync, target, unit, "redis.db0", 2.5) // reconciliation age
+	tel.AddRowsCopied(sync, unit, 100)                          // keys copied
 	tel.SetPhase(sync, unit, "streaming")
 	tel.SetDeleteLag(sync, target, unit, 1.0)
 	tel.AddDeletes(sync, target, unit, 3)

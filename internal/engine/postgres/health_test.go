@@ -60,3 +60,25 @@ func TestHealthCheckReconnectIntegration(t *testing.T) {
 		t.Fatalf("query after reconnect: got %d err=%v", one, err)
 	}
 }
+
+// TestDatabaseSizeIntegration checks the engine.DBSizer implementation returns a
+// plausible (>0) database size for the DB-size metric.
+func TestDatabaseSizeIntegration(t *testing.T) {
+	cc := harnessConn(t, "source")
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	src := &Source{cfg: cc}
+	if err := src.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer func() { _ = src.Close(context.Background()) }()
+
+	b, err := src.DatabaseSize(ctx)
+	if err != nil {
+		t.Fatalf("database size: %v", err)
+	}
+	if b <= 0 {
+		t.Errorf("database size = %d, want > 0", b)
+	}
+}
