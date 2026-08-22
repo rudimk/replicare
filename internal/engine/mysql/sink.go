@@ -59,6 +59,16 @@ func (s *Sink) Close(ctx context.Context) error {
 	return err
 }
 
+// HealthCheck pings the target (bounded by ctx). *sql.DB re-dials a dropped
+// pooled connection on the next query, so a Ping failure means the server itself
+// is unreachable; the pipeline reconnects.
+func (s *Sink) HealthCheck(ctx context.Context) error {
+	if s.db == nil {
+		return errNotConnected
+	}
+	return s.db.PingContext(ctx)
+}
+
 // ServerVersion returns the numeric server version and refuses MariaDB.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.db == nil {

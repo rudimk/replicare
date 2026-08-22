@@ -37,7 +37,15 @@ func (s *Syncer) Stream(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-ticker.C:
-			if err := s.streamOnce(ctx); err != nil {
+			err := s.streamOnce(ctx)
+			// Heartbeat on every completed iteration — success OR handled error —
+			// so a liveness probe distinguishes a cycling loop (healthy, even when
+			// the target is down and each pass errors) from a wedged one that never
+			// returns. A pass that hangs never reaches here, so the probe goes stale.
+			if s.Heartbeat != nil {
+				s.Heartbeat()
+			}
+			if err != nil {
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 					return err
 				}
@@ -95,6 +103,11 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// is picked up once the target recovers.
 		s.Tel.IncError(s.Name, "drain")
 		s.reportDrainFailure(ctx, drainErr)
+		// A drain failure may be a dropped connection (network blip, DB failover,
+		// idle reap). Health-check both endpoints and reconnect any that are down,
+		// so the next pass runs on a live connection instead of erroring forever
+		// (Postgres holds a single conn with no auto-redial) — no process restart.
+		s.reconnectIfDown(ctx)
 		return drainErr
 	}
 	if enforceErr != nil {
@@ -218,5 +231,47 @@ func (s *Syncer) log(ctx context.Context, msg string, cause error) {
 	s.recordEvent(ctx, state.Event{
 		Sync: s.Name, Target: string(s.Target), Level: "WARN",
 		Event: "stream.pass_error", Message: msg + ": " + cause.Error(),
+	})
+}
+
+// healthTimeout bounds a HealthCheck / reconnect attempt so a dead socket fails
+// fast instead of re-wedging the streaming loop.
+const healthTimeout = 10 * time.Second
+
+// reconnectIfDown health-checks the source and target after a failed drain pass
+// and reconnects any endpoint whose connection is down. A healthy endpoint is
+// left untouched (the drain failure was a data error, handled elsewhere by the
+// loud-halt policy). Reconnection is Close + Connect, which for Postgres re-dials
+// the single pgx connection and re-applies session GUCs, and for MySQL/Redis
+// rebuilds the pooled client. Best-effort and non-fatal: a reconnect that itself
+// fails (server still down) is logged and retried on the next pass, so the daemon
+// never crash-loops on an outage — it heals when the endpoint returns.
+func (s *Syncer) reconnectIfDown(ctx context.Context) {
+	if ctx.Err() != nil {
+		return // shutting down; don't churn connections
+	}
+	s.reconnectEndpoint(ctx, "source", s.Source.HealthCheck, s.Source.Close, s.Source.Connect)
+	s.reconnectEndpoint(ctx, "target", s.Sink.HealthCheck, s.Sink.Close, s.Sink.Connect)
+}
+
+func (s *Syncer) reconnectEndpoint(ctx context.Context, role string,
+	healthCheck, closeConn, connect func(context.Context) error) {
+	hctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	healthErr := healthCheck(hctx)
+	cancel()
+	if healthErr == nil {
+		return // connection is alive; the drain failure was not connectivity
+	}
+	s.log(ctx, "reconnecting "+role+" after health check failed", healthErr)
+	_ = closeConn(context.Background())
+	cctx, ccancel := context.WithTimeout(ctx, healthTimeout)
+	defer ccancel()
+	if err := connect(cctx); err != nil {
+		s.log(ctx, "reconnect "+role+" failed (will retry next pass)", err)
+		return
+	}
+	s.recordEvent(ctx, state.Event{
+		Sync: s.Name, Target: string(s.Target), Level: "WARN",
+		Event: "stream.reconnected", Message: role + " connection re-established after failure",
 	})
 }

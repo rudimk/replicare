@@ -3,13 +3,25 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rudimk/replicare/internal/engine"
+)
+
+// Connection resilience defaults (fail fast on a dead peer instead of hanging).
+// A short TCP keepalive detects a silently-dropped socket — RDS failover, an idle
+// NAT/LB reap — within ~keepalive+probes without killing an in-flight query, so a
+// stalled drain surfaces as an error the pipeline can reconnect from, rather than
+// blocking the streaming loop indefinitely.
+const (
+	dialTimeout   = 10 * time.Second
+	dialKeepAlive = 30 * time.Second
 )
 
 // sessionGUCs is the session-GUC canonicalization applied on EVERY source-read
@@ -78,6 +90,12 @@ func pgxConfig(cc engine.ConnConfig) (*pgx.ConnConfig, error) {
 	if err != nil {
 		return nil, fmt.Errorf("postgres: parse connection config: %w", err)
 	}
+	// Bound the initial dial and set an explicit TCP keepalive so a dead peer is
+	// detected promptly (pgx's default keepalive is 5m). This never interrupts a
+	// live query — it only surfaces a broken socket as an error the pipeline can
+	// reconnect from, instead of a hang that wedges the streaming loop.
+	cfg.ConnectTimeout = dialTimeout
+	cfg.DialFunc = (&net.Dialer{Timeout: dialTimeout, KeepAlive: dialKeepAlive}).DialContext
 	return cfg, nil
 }
 

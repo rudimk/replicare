@@ -54,6 +54,16 @@ func (s *Sink) Close(ctx context.Context) error {
 	return err
 }
 
+// HealthCheck pings the target connection (bounded by ctx). A failure tells the
+// pipeline to reconnect — pgx holds a single connection with no pool/auto-redial,
+// so a dropped socket is only recovered by Close + Connect.
+func (s *Sink) HealthCheck(ctx context.Context) error {
+	if s.conn == nil {
+		return errNotConnected("sink")
+	}
+	return s.conn.Ping(ctx)
+}
+
 // ServerVersion returns the numeric target server version.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.conn == nil {

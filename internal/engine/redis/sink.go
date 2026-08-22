@@ -52,6 +52,16 @@ func (s *Sink) Close(context.Context) error {
 	return err
 }
 
+// HealthCheck pings the target (bounded by ctx). go-redis pools and re-dials on
+// its own, so a failure means the server itself is unreachable; the pipeline
+// reconnects.
+func (s *Sink) HealthCheck(ctx context.Context) error {
+	if s.db == nil {
+		return errNotConnected
+	}
+	return s.db.ping(ctx)
+}
+
 // ServerVersion returns the numeric server version and refuses unsupported forks.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.db == nil {

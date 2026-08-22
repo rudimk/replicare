@@ -200,6 +200,27 @@ and Redis syncs side by side (each sync stays single-engine). A Redis sync check
 phase (snapshot-complete-per-unit; no resumable SCAN cursor), so a crash mid-copy re-runs the whole
 `SCAN` idempotently rather than resuming a chunk — see [the Redis engine page](redis.md).
 
+## Connection resilience & the liveness probe
+
+A dropped source or target connection — RDS/managed failover, an idle NAT/LB reap, a brief network
+blip — recovers on its own, no restart needed. All connections set a bounded dial timeout and TCP
+keepalive so a dead peer surfaces as an error quickly instead of hanging, and after any failed drain
+pass the daemon health-checks both endpoints and reconnects whichever is down (Postgres re-dials its
+single connection and re-applies session GUCs; MySQL and Redis rebuild their pooled clients). A
+reconnect that can't succeed yet (the endpoint is genuinely down) is retried each pass, so the daemon
+never crash-loops on an outage — it heals when the endpoint returns. Recovery is visible as a
+`stream.reconnected` event in `/status` and the logs.
+
+`/healthz` reports **streaming liveness** as a backstop for a true wedge (e.g. a hung query no
+timeout caught). It is deliberately *not* target reachability: a loop that keeps cycling — including
+one correctly retrying against a down target — stays healthy (that state shows up in
+`replicare_target_up` and the backlog metrics instead). The probe fails only when a streaming loop
+completes no pass within `observability.stall_timeout` (default `2m`), so Kubernetes restarts a pod
+whose loop has stopped iterating. Set `stall_timeout` above your slowest expected drain pass (a large
+`drain_batch` on a slow target lengthens a pass); a negative value disables the check. Liveness
+tracking starts only once a sync reaches streaming, so a long initial copy is never mistaken for a
+wedge.
+
 ## Least-privilege grants
 
 See [`../deploy/grants-source.sql`](../deploy/grants-source.sql) and

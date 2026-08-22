@@ -114,6 +114,10 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		DrainInterval: sync.Tuning.DrainInterval.Duration(),
 		Retention:     retentionPolicy(sync.Tuning.Retention),
 	}
+	// Mark the streaming-liveness heartbeat once per pass (runSync registers the
+	// key after bring-up); lets /healthz restart a wedged pod.
+	key := healthKey(sync.Name, targetName)
+	syncer.Heartbeat = func() { d.beat.Mark(key) }
 	return syncer, cleanup, nil
 }
 

@@ -18,12 +18,19 @@ type Server struct {
 	reporter *Reporter
 	metrics  http.Handler
 	syncs    SyncLister
+	liveness LivenessFunc
 }
 
+// LivenessFunc reports whether the daemon's streaming loops are live. It returns
+// a non-nil error (naming the wedged sync) when a loop has stalled, so /healthz
+// fails and Kubernetes restarts the pod. nil means "always healthy".
+type LivenessFunc func() error
+
 // NewServer builds the surface. metrics may be nil (then /metrics 503s); syncs
-// may be nil (then /status reports nothing).
-func NewServer(reporter *Reporter, metrics http.Handler, syncs SyncLister) *Server {
-	return &Server{reporter: reporter, metrics: metrics, syncs: syncs}
+// may be nil (then /status reports nothing); liveness may be nil (then /healthz
+// is always ok).
+func NewServer(reporter *Reporter, metrics http.Handler, syncs SyncLister, liveness LivenessFunc) *Server {
+	return &Server{reporter: reporter, metrics: metrics, syncs: syncs, liveness: liveness}
 }
 
 // Handler returns the routed mux for the operator surface.
@@ -43,6 +50,13 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if s.liveness != nil {
+		if err := s.liveness(); err != nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": err.Error()})
+			return
+		}
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 

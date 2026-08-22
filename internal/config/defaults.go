@@ -10,4 +10,5 @@ const (
 	defaultDrainBatch      = 1000
 	defaultRetentionMaxAge = 24 * time.Hour
 	defaultMaxConns        = 4
+	defaultStallTimeout    = 2 * time.Minute
 )
