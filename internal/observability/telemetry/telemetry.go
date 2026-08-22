@@ -63,15 +63,46 @@ func (t *Telemetry) SetTargetUp(sync string, target engine.TargetID, up bool) {
 	t.reg.Gauge(observability.MetricTargetUp).WithLabelValues(sync, string(target)).Set(v)
 }
 
-// SetBacklog publishes a target/table's unconsumed-delta backlog gauges.
-func (t *Telemetry) SetBacklog(sync string, target engine.TargetID, table engine.TableRef, bl engine.DeltaBacklog) {
+// SetTargetDBBytes sets the per-target database-size gauge (engines that report
+// it — Postgres/MySQL; unset for engines that don't).
+func (t *Telemetry) SetTargetDBBytes(sync string, target engine.TargetID, bytes int64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricTargetDBBytes).WithLabelValues(sync, string(target)).Set(float64(bytes))
+}
+
+// SetSourceUp sets the per-sync source reachability gauge (1=up, 0=down).
+func (t *Telemetry) SetSourceUp(sync string, up bool) {
+	if t.reg == nil {
+		return
+	}
+	v := 0.0
+	if up {
+		v = 1
+	}
+	t.reg.Gauge(observability.MetricSourceUp).WithLabelValues(sync).Set(v)
+}
+
+// SetSourceDBBytes sets the per-sync source database-size gauge (engines that
+// report it — Postgres/MySQL; unset for engines that don't).
+func (t *Telemetry) SetSourceDBBytes(sync string, bytes int64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricSourceDBBytes).WithLabelValues(sync).Set(float64(bytes))
+}
+
+// SetBacklog publishes a target/table's unconsumed-delta backlog gauges. component
+// is the table's FK-component id (for per-component rollups; CLAUDE.md §8.1).
+func (t *Telemetry) SetBacklog(sync string, target engine.TargetID, table engine.TableRef, component string, bl engine.DeltaBacklog) {
 	if t.reg == nil {
 		return
 	}
 	tbl := table.String()
-	t.reg.Gauge(observability.MetricDeltaBacklog).WithLabelValues(sync, string(target), tbl).Set(float64(bl.Rows))
-	t.reg.Gauge(observability.MetricDeltaBacklogBytes).WithLabelValues(sync, string(target), tbl).Set(float64(bl.Bytes))
-	t.reg.Gauge(observability.MetricDeltaOldestAgeSeconds).WithLabelValues(sync, string(target), tbl).Set(bl.OldestAge.Seconds())
+	t.reg.Gauge(observability.MetricDeltaBacklog).WithLabelValues(sync, string(target), tbl, component).Set(float64(bl.Rows))
+	t.reg.Gauge(observability.MetricDeltaBacklogBytes).WithLabelValues(sync, string(target), tbl, component).Set(float64(bl.Bytes))
+	t.reg.Gauge(observability.MetricDeltaOldestAgeSeconds).WithLabelValues(sync, string(target), tbl, component).Set(bl.OldestAge.Seconds())
 }
 
 // AddPurged advances the purged-delta counter.
@@ -100,11 +131,11 @@ func (t *Telemetry) ObserveApplyBatch(sync string, target engine.TargetID, secon
 
 // SetReplicationLag publishes a target/table's replication lag (the age of the
 // oldest unconsumed delta, or 0 when caught up).
-func (t *Telemetry) SetReplicationLag(sync string, target engine.TargetID, table engine.TableRef, seconds float64) {
+func (t *Telemetry) SetReplicationLag(sync string, target engine.TargetID, table engine.TableRef, component string, seconds float64) {
 	if t.reg == nil {
 		return
 	}
-	t.reg.Gauge(observability.MetricReplicationLagSeconds).WithLabelValues(sync, string(target), table.String()).Set(seconds)
+	t.reg.Gauge(observability.MetricReplicationLagSeconds).WithLabelValues(sync, string(target), table.String(), component).Set(seconds)
 }
 
 // SetDeleteLag publishes how long the last completed delete-reconciliation sweep
@@ -187,13 +218,13 @@ func (t *Telemetry) StartDrainSpan(ctx context.Context, sync string, target engi
 // gauge 0 + backlog gauges; log → ERROR target.unreachable with backlog/cause;
 // durable event. span may be nil (no active drain span).
 func (t *Telemetry) TargetUnreachable(ctx context.Context, span trace.Span, sync string,
-	target engine.TargetID, table engine.TableRef, bl engine.DeltaBacklog, proximity float64, cause error) {
+	target engine.TargetID, table engine.TableRef, component string, bl engine.DeltaBacklog, proximity float64, cause error) {
 
 	if span != nil {
 		tracing.Fail(span, cause)
 	}
 	t.SetTargetUp(sync, target, false)
-	t.SetBacklog(sync, target, table, bl)
+	t.SetBacklog(sync, target, table, component, bl)
 
 	t.log.LogAttrs(ctx, slog.LevelError, "target unreachable",
 		slog.String("event", observability.EventTargetUnreachable),
@@ -218,9 +249,9 @@ func (t *Telemetry) TargetUnreachable(ctx context.Context, span trace.Span, sync
 // TargetReachable marks a target healthy again: reachability gauge 1, refreshed
 // backlog gauges, and (once, on recovery) an INFO target.recovered log + event.
 func (t *Telemetry) TargetReachable(ctx context.Context, sync string, target engine.TargetID,
-	table engine.TableRef, bl engine.DeltaBacklog) {
+	table engine.TableRef, component string, bl engine.DeltaBacklog) {
 	t.SetTargetUp(sync, target, true)
-	t.SetBacklog(sync, target, table, bl)
+	t.SetBacklog(sync, target, table, component, bl)
 	t.log.LogAttrs(ctx, slog.LevelInfo, "target reachable",
 		slog.String("event", observability.EventTargetRecovered),
 		slog.String(observability.AttrSync, sync),
@@ -234,9 +265,9 @@ func (t *Telemetry) TargetReachable(ctx context.Context, sync string, target eng
 // cap" long before a forced reseed (CLAUDE.md §3.4). At WARN and above it also
 // records a durable retention.cap_approaching event.
 func (t *Telemetry) RetentionApproaching(ctx context.Context, sync string, target engine.TargetID,
-	table engine.TableRef, bl engine.DeltaBacklog, proximity float64) {
+	table engine.TableRef, component string, bl engine.DeltaBacklog, proximity float64) {
 
-	t.SetBacklog(sync, target, table, bl)
+	t.SetBacklog(sync, target, table, component, bl)
 	level := slog.LevelInfo
 	switch {
 	case proximity >= 0.9:

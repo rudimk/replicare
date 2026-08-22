@@ -213,6 +213,15 @@ type KeyExister interface { // implemented by the Redis Source
 	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
 }
 
+// DBSizer is an OPTIONAL Source/Sink capability: report the connected database's
+// total size in bytes, which the pipeline emits as the source/target DB-size
+// metric. Relational engines implement it (Postgres pg_database_size, MySQL
+// information_schema); an engine without a meaningful single-number size (Redis)
+// omits it and the metric stays unset. Bounded by ctx like any query.
+type DBSizer interface {
+	DatabaseSize(ctx context.Context) (int64, error)
+}
+
 // CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an
 // engine-specific strategy to INITIALLY COPY an FK component containing a cycle or
 // self-reference (Postgres/MySQL trigger CDC — the plain parents-first chunked copy

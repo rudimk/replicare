@@ -46,26 +46,36 @@ current value or pass `DS_PROMETHEUS` via the import API.
 | **Sync** (`sync`) | Filter to one or more syncs (`label_values(replicare_target_up, sync)`). Defaults to *All*. |
 | **Target** (`target`) | Filter to one or more targets within the selected syncs. Defaults to *All*. |
 | **Table** (`table`) | Filter the per-table panels to one or more tables. Defaults to *All*. |
+| **Component** (`component`) | Filter the per-component panels to one or more FK components. Defaults to *All*. |
 
 ## Panels
 
+Organized into sections (Grafana rows):
+
+**Source** / **Target** — the controller checks both endpoints and emits their reachability and database size:
+
 | Panel | Query (source metric) | Reading |
 |---|---|---|
-| Targets up | `min(replicare_target_up)` | `UP` (green) / `DOWN` (red) — DOWN if any selected target is unreachable |
-| Max replication lag | `max(replicare_replication_lag_seconds)` | Worst per-table lag; green < 30s, red ≥ 300s |
-| Total delta backlog | `sum(replicare_delta_backlog_rows)` | Rows still to apply across the selection |
-| Throughput | `sum(replicare_throughput_rows_per_second)` | Current apply/copy rows/s |
-| Delta backlog rows (per table) | `replicare_delta_backlog_rows` | Per-table queue depth; spikes on churn, drains toward 0 — the catch-up view |
-| Oldest unconsumed delta age (per table) | `replicare_delta_oldest_unconsumed_age_seconds` | How stale each table is |
-| Replication lag (per table) | `replicare_replication_lag_seconds` | Lag broken down per table |
-| Delta backlog bytes (per table) | `replicare_delta_backlog_bytes` | Source-footprint signal per table |
-| Initial copy progress % (per table) | `replicare_rows_copied_total / replicare_initial_copy_rows_target` | 0→100% during initial copy |
-| Rows copied vs target (per table) | `replicare_rows_copied_total`, `replicare_initial_copy_rows_target` | Absolute copy progress |
-| Throughput (rows/s) | `replicare_throughput_rows_per_second` | Per-sync throughput over time |
-| Apply batch latency (p95) | `histogram_quantile(0.95, rate(replicare_apply_batch_seconds_bucket[5m]))` | Apply-batch tail latency |
-| Error rate (per category) | `rate(replicare_errors_total[5m])` | Should be flat at 0 |
-| Delta purge rate (per table) | `rate(replicare_delta_purged_total[5m])` | Consumed deltas being reclaimed (bloat control) |
-| Reseeds (selected range) | `increase(replicare_reseed_total[$__range])` | Non-zero = a laggard target was reseeded to protect the source |
+| Source up / Targets up | `min(replicare_source_up)` / `min(replicare_target_up)` | `UP` (green) / `DOWN` (red) — the controller's health-check of that endpoint |
+| Source / Target DB size | `replicare_source_db_bytes` / `replicare_target_db_bytes` | On-disk database size (Postgres/MySQL); the time-series shows growth and the target converging toward the source |
+
+**Replication lag** — the headline lag section:
+
+| Panel | Query | Reading |
+|---|---|---|
+| Max replication lag (SLO) | `max(replicare_replication_lag_seconds)` | Worst lag; green < 30s, amber < 5m, red beyond |
+| Catch-up ETA | `sum(delta_backlog_rows) / clamp_min(sum(throughput),1)` | Estimated seconds to converge at the current apply rate |
+| Inflow vs drain | `throughput` vs `throughput + rate(sum(delta_backlog_rows)[5m])` | Inflow above drain ⇒ the backlog is growing |
+| Replication lag / Total backlog | `replicare_replication_lag_seconds`, `sum(replicare_delta_backlog_rows)` | Per-table lag; total rows still to apply |
+
+**Per FK component** — rolled up by the `component` label:
+
+| Panel | Query | Reading |
+|---|---|---|
+| Replication lag (per component) | `max by (component) (replicare_replication_lag_seconds)` | Which FK component is behind |
+| Delta backlog (per component) | `sum by (component) (replicare_delta_backlog_rows)` | Queue depth per component |
+
+**Backlog detail (per table)**, **Initial copy**, **Throughput & apply latency**, **Errors & maintenance** — per-table backlog rows/bytes/oldest-age; copy progress % and rows-copied-vs-target; throughput and apply p95; error rate, purge rate, and reseeds. (Metrics as named.)
 
 ## Notes
 

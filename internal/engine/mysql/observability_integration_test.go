@@ -110,7 +110,7 @@ func TestObservabilityHealthyTargetNamedSeries(t *testing.T) {
 		t.Fatalf("consumed = %d, want 7", n)
 	}
 
-	labels := map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders"}
+	labels := map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders", "component": ""}
 	if v, ok := gaugeVal(t, reg, observability.MetricTargetUp, map[string]string{"sync": "s1", "target": "dst"}); !ok || v != 1 {
 		t.Errorf("target_up = %v (present=%v), want 1", v, ok)
 	}
@@ -182,7 +182,7 @@ func TestObservabilityDownedTargetTrifecta(t *testing.T) {
 		t.Errorf("target_up = %v (present=%v), want 0", v, ok)
 	}
 	if v, ok := gaugeVal(t, reg, observability.MetricDeltaBacklog,
-		map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders"}); !ok || v != 7 {
+		map[string]string{"sync": "s1", "target": "dst", "table": "rc_it.orders", "component": ""}); !ok || v != 7 {
 		t.Errorf("delta_backlog_rows = %v (present=%v), want 7", v, ok)
 	}
 

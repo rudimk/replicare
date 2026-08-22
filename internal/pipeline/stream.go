@@ -105,6 +105,10 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// is picked up once the target recovers.
 		s.Tel.IncError(s.Name, "drain")
 		s.reportDrainFailure(ctx, drainErr)
+		// Distinguish a source-side failure in the up gauges: a bounded ping tells
+		// whether the source is reachable (reportDrainFailure already handles the
+		// target-reachability signal).
+		s.Tel.SetSourceUp(s.Name, s.sourceReachable(ctx))
 		// A drain failure may be a dropped connection (network blip, DB failover,
 		// idle reap). Health-check both endpoints and reconnect any that are down,
 		// so the next pass runs on a live connection instead of erroring forever
@@ -127,13 +131,16 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		if err != nil {
 			continue
 		}
-		s.Tel.SetBacklog(s.Name, s.Target, t, bl)
-		s.Tel.SetReplicationLag(s.Name, s.Target, t, bl.OldestAge.Seconds())
+		comp := s.componentOf(t)
+		s.Tel.SetBacklog(s.Name, s.Target, t, comp, bl)
+		s.Tel.SetReplicationLag(s.Name, s.Target, t, comp, bl.OldestAge.Seconds())
 		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
-			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, bl, prox)
+			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
 		}
 	}
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
+	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
+	s.refreshDBSizes(ctx)
 	s.touchCursors(ctx)
 
 	// Delete reconciliation (redis-plan §0.4): AFTER the drain, on a healthy pass
@@ -218,7 +225,7 @@ func (s *Syncer) reportDrainFailure(ctx context.Context, cause error) {
 		repr = s.Replicable[0]
 		bl, _ = s.Source.DeltaBacklog(ctx, repr, s.Target)
 	}
-	s.Tel.TargetUnreachable(ctx, nil, s.Name, s.Target, repr, bl,
+	s.Tel.TargetUnreachable(ctx, nil, s.Name, s.Target, repr, s.componentOf(repr), bl,
 		telemetry.RetentionProximity(bl, s.Retention), cause)
 }
 
@@ -239,6 +246,61 @@ func (s *Syncer) log(ctx context.Context, msg string, cause error) {
 // healthTimeout bounds a HealthCheck / reconnect attempt so a dead socket fails
 // fast instead of re-wedging the streaming loop.
 const healthTimeout = 10 * time.Second
+
+// dbSizeInterval throttles the source/target DB-size metric: the queries scan
+// catalogs, so they run on this cadence rather than every drain pass.
+const dbSizeInterval = 30 * time.Second
+
+// componentOf returns the FK-component id of a table (the component's first sorted
+// member, per CLAUDE.md §8.1), for the per-component metric label. Built once.
+func (s *Syncer) componentOf(t engine.TableRef) string {
+	if s.compIdx == nil {
+		s.compIdx = make(map[engine.TableRef]string)
+		for _, c := range s.Components {
+			id := ""
+			if len(c.Tables) > 0 {
+				id = c.Tables[0].String()
+			}
+			for _, ref := range c.Tables {
+				s.compIdx[ref] = id
+			}
+		}
+	}
+	return s.compIdx[t]
+}
+
+// sourceReachable reports whether the source answers a bounded health-check, for
+// the source-up gauge on a failed pass.
+func (s *Syncer) sourceReachable(ctx context.Context) bool {
+	hctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+	return s.Source.HealthCheck(hctx) == nil
+}
+
+// refreshDBSizes emits the source/target database-size gauges when the engine
+// reports them (engine.DBSizer — Postgres/MySQL; a no-op otherwise), throttled to
+// dbSizeInterval. Best-effort: a failed size query is skipped, never fatal.
+func (s *Syncer) refreshDBSizes(ctx context.Context) {
+	now := time.Now()
+	if !s.lastDBSize.IsZero() && now.Sub(s.lastDBSize) < dbSizeInterval {
+		return
+	}
+	s.lastDBSize = now
+	if sz, ok := s.Source.(engine.DBSizer); ok {
+		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
+		if b, err := sz.DatabaseSize(qctx); err == nil {
+			s.Tel.SetSourceDBBytes(s.Name, b)
+		}
+		cancel()
+	}
+	if sz, ok := s.Sink.(engine.DBSizer); ok {
+		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
+		if b, err := sz.DatabaseSize(qctx); err == nil {
+			s.Tel.SetTargetDBBytes(s.Name, s.Target, b)
+		}
+		cancel()
+	}
+}
 
 // reconnectIfDown health-checks the source and target after a failed drain pass
 // and reconnects any endpoint whose connection is down. A healthy endpoint is

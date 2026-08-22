@@ -64,6 +64,18 @@ func (s *Sink) HealthCheck(ctx context.Context) error {
 	return s.conn.Ping(ctx)
 }
 
+// DatabaseSize implements engine.DBSizer: the connected database's on-disk size.
+func (s *Sink) DatabaseSize(ctx context.Context) (int64, error) {
+	if s.conn == nil {
+		return 0, errNotConnected("sink")
+	}
+	var b int64
+	if err := s.conn.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&b); err != nil {
+		return 0, fmt.Errorf("postgres: database size: %w", err)
+	}
+	return b, nil
+}
+
 // ServerVersion returns the numeric target server version.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.conn == nil {
