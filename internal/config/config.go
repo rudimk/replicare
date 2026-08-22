@@ -73,10 +73,11 @@ type Sync struct {
 
 // Tuning holds engine-neutral tuning knobs.
 type Tuning struct {
-	DrainInterval Duration  `yaml:"drain_interval"`
-	DrainBatch    int       `yaml:"drain_batch"`
-	Retention     Retention `yaml:"retention"`
-	Pool          Pool      `yaml:"pool"`
+	DrainInterval    Duration  `yaml:"drain_interval"`
+	DrainBatch       int       `yaml:"drain_batch"`
+	ApplyConcurrency int       `yaml:"apply_concurrency"`
+	Retention        Retention `yaml:"retention"`
+	Pool             Pool      `yaml:"pool"`
 }
 
 // Retention bounds source-side delta retention (CLAUDE.md §3.4).
@@ -150,6 +151,9 @@ func (c *Config) applyDefaults() {
 		}
 		if s.Tuning.DrainBatch == 0 {
 			s.Tuning.DrainBatch = defaultDrainBatch
+		}
+		if s.Tuning.ApplyConcurrency == 0 {
+			s.Tuning.ApplyConcurrency = defaultApplyConcurrency
 		}
 		if s.Tuning.Retention.MaxAge == 0 {
 			s.Tuning.Retention.MaxAge = Duration(defaultRetentionMaxAge)
@@ -262,6 +266,9 @@ func (c *Config) Validate() error {
 		}
 		if s.Tuning.DrainBatch <= 0 {
 			return fmt.Errorf("sync %q: drain_batch must be positive", s.Name)
+		}
+		if s.Tuning.ApplyConcurrency < 1 {
+			return fmt.Errorf("sync %q: apply_concurrency must be >= 1", s.Name)
 		}
 	}
 	return nil

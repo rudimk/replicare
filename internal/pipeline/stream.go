@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/rudimk/replicare/internal/apply"
@@ -68,8 +69,9 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	var drainErr error
 	var consumed int
 	drainStart := time.Now()
+	pool := s.applyPool()
 	for _, comp := range s.Components {
-		n, err := apply.DrainComponentRetrying(ctx, s.Source, s.Sink,
+		n, err := apply.DrainComponentRetryingPool(ctx, pool, len(pool),
 			comp.Order, s.Target, s.DrainBatch, comp.HasCycle(), apply.DefaultRetryPolicy)
 		consumed += n
 		if err != nil {
@@ -250,8 +252,34 @@ func (s *Syncer) reconnectIfDown(ctx context.Context) {
 	if ctx.Err() != nil {
 		return // shutting down; don't churn connections
 	}
-	s.reconnectEndpoint(ctx, "source", s.Source.HealthCheck, s.Source.Close, s.Source.Connect)
-	s.reconnectEndpoint(ctx, "target", s.Sink.HealthCheck, s.Sink.Close, s.Sink.Connect)
+	// Reconnect every connection the drain uses — the primary pair (pool[0], also
+	// used for gather/telemetry) and any copy-worker pairs recruited for concurrent
+	// apply — so a dropped worker connection heals too, not just the primary.
+	for i, c := range s.applyPool() {
+		src, sink := c.Src, c.Sink
+		s.reconnectEndpoint(ctx, poolRole("source", i), src.HealthCheck, src.Close, src.Connect)
+		s.reconnectEndpoint(ctx, poolRole("target", i), sink.HealthCheck, sink.Close, sink.Connect)
+	}
+}
+
+// applyPool builds the streaming apply connection pool: the primary (source,sink)
+// pair plus up to ApplyConcurrency-1 copy-worker pairs (idle during streaming).
+// pool[0] is the primary — the connection gather and telemetry also use — so at
+// concurrency 1 the pool is exactly today's single pair.
+func (s *Syncer) applyPool() []apply.Conn {
+	conns := []apply.Conn{{Src: s.Source, Sink: s.Sink}}
+	for i := 0; i < len(s.Workers) && len(conns) < s.ApplyConcurrency; i++ {
+		conns = append(conns, apply.Conn{Src: s.Workers[i].Src, Sink: s.Workers[i].Sink})
+	}
+	return conns
+}
+
+// poolRole labels a pool endpoint for reconnect logs (primary vs. a worker pair).
+func poolRole(kind string, i int) string {
+	if i == 0 {
+		return kind
+	}
+	return kind + " worker " + strconv.Itoa(i)
 }
 
 func (s *Syncer) reconnectEndpoint(ctx context.Context, role string,

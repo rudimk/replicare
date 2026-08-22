@@ -44,12 +44,22 @@ var DefaultRetryPolicy = RetryPolicy{MaxAttempts: 5, BaseBackoff: 200 * time.Mil
 // whole-pass fallback.
 func DrainComponentRetrying(ctx context.Context, src engine.Source, sink engine.Sink,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool, policy RetryPolicy) (int, error) {
+	return DrainComponentRetryingPool(ctx, []Conn{{Src: src, Sink: sink}}, 1, tablesTopoOrder, target, batch, cyclic, policy)
+}
+
+// DrainComponentRetryingPool is DrainComponentRetrying with a connection pool:
+// each attempt runs DrainComponentPool, so a component's tables apply across up to
+// `concurrency` connections. concurrency<=1 (or a single-Conn pool) is the original
+// sequential retry. Behaviour is otherwise identical — each retry is a fresh pass
+// and exhausting the policy halts loud with the deltas still dirty.
+func DrainComponentRetryingPool(ctx context.Context, pool []Conn, concurrency int,
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool, policy RetryPolicy) (int, error) {
 
 	backoff := policy.BaseBackoff
 	var lastErr error
 	total := 0
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
-		n, err := DrainComponent(ctx, src, sink, tablesTopoOrder, target, batch, cyclic)
+		n, err := DrainComponentPool(ctx, pool, concurrency, tablesTopoOrder, target, batch, cyclic)
 		total += n
 		if err == nil {
 			return total, nil

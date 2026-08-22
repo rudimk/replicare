@@ -4,9 +4,21 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
+
+// Conn is a source+sink pair used for per-table apply. A pool of distinct Conns
+// lets a component's tables apply CONCURRENTLY within a drain pass (CLAUDE.md §8's
+// "parallel delta apply"). Each Conn is used by at most one goroutine at a time
+// (the pool is a free-list), matching the "one connection, not concurrent-safe"
+// contract every engine's Source/Sink relies on. pool[0] is the primary pair and
+// is also used for the serial-only work (gather, the atomic cyclic path).
+type Conn struct {
+	Src  engine.Source
+	Sink engine.Sink
+}
 
 // FK-ordered component apply (CLAUDE.md §8.1). A component's dirty changes for
 // one drain pass are applied in a single target transaction so the target is
@@ -56,11 +68,34 @@ func gatherWork(ctx context.Context, src engine.Source, tablesTopoOrder []engine
 // pre-commit orphan verification over the full component (CLAUDE.md §3.3, §8.1).
 func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool) (int, error) {
+	return DrainComponentPool(ctx, []Conn{{Src: src, Sink: sink}}, 1, tablesTopoOrder, target, batch, cyclic)
+}
+
+// DrainComponentPool is DrainComponent with a connection pool: the per-table
+// upsert/delete/fill work of an (acyclic or nullable-cyclic) component runs across
+// up to `concurrency` of the pool's Conns, so several tables apply at once — the
+// fix for many tables backlogging behind a single-threaded drain. concurrency is
+// clamped to len(pool); concurrency<=1 (or a single-Conn pool) is the original
+// strictly-sequential, in-topo-order path, byte-for-byte. The atomic single-
+// transaction cyclic path (all-DEFERRABLE Postgres, MySQL cyclic) is inherently
+// one connection and always runs on pool[0].
+func DrainComponentPool(ctx context.Context, pool []Conn, concurrency int,
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int, cyclic bool) (int, error) {
+	if len(pool) == 0 {
+		return 0, fmt.Errorf("apply component: empty connection pool")
+	}
+	if concurrency > len(pool) {
+		concurrency = len(pool)
+	}
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	src, sink := pool[0].Src, pool[0].Sink
 
 	// Acyclic components drain table-by-table so parents make progress
 	// independently of a transiently-blocked child (drainAcyclic).
 	if !cyclic {
-		return drainAcyclic(ctx, src, sink, tablesTopoOrder, target, batch)
+		return drainAcyclic(ctx, pool, concurrency, tablesTopoOrder, target, batch)
 	}
 
 	// A cyclic component whose cycle-closing FK columns are nullable drains
@@ -78,7 +113,7 @@ func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
 			return 0, fmt.Errorf("apply component: resolve cyclic FK columns: %w", err)
 		}
 		if len(cyclicCols) > 0 {
-			return drainCyclicNullFill(ctx, src, sink, tablesTopoOrder, target, batch, cyclicCols)
+			return drainCyclicNullFill(ctx, pool, concurrency, tablesTopoOrder, target, batch, cyclicCols)
 		}
 	}
 
@@ -156,16 +191,25 @@ func DrainComponent(ctx context.Context, src engine.Source, sink engine.Sink,
 // either leaves it fully dirty for the next pass. Any transient error is returned
 // (after attempting every table) so the caller retries; a non-transient error
 // halts loud immediately.
-func drainAcyclic(ctx context.Context, src engine.Source, sink engine.Sink,
+func drainAcyclic(ctx context.Context, pool []Conn, concurrency int,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int) (int, error) {
-	work, _, err := gatherWork(ctx, src, tablesTopoOrder, target, batch)
+	work, _, err := gatherWork(ctx, pool[0].Src, tablesTopoOrder, target, batch)
 	if err != nil {
 		return 0, err
 	}
 	if len(work) == 0 {
 		return 0, nil
 	}
+	if concurrency <= 1 || len(pool) <= 1 {
+		return drainAcyclicSeq(ctx, pool[0], work, target)
+	}
+	return drainAcyclicParallel(ctx, pool, work, target)
+}
 
+// drainAcyclicSeq is the original strictly-sequential, in-topo-order acyclic drain
+// (concurrency 1). Kept verbatim so the default path is unchanged.
+func drainAcyclicSeq(ctx context.Context, c Conn, work []tableWork, target engine.TargetID) (int, error) {
+	src, sink := c.Src, c.Sink
 	var transient error
 	upserted := make([]bool, len(work))
 
@@ -204,6 +248,60 @@ func drainAcyclic(ctx context.Context, src engine.Source, sink engine.Sink,
 	return total, transient
 }
 
+// drainAcyclicParallel is the concurrent acyclic drain: the same two FK-ordered
+// phases, but the tables WITHIN each phase apply across the pool (bounded to
+// len(pool) concurrent tasks, each on its own Conn). FK order is not guaranteed
+// within a phase, so a child that lands before its parent (or a parent deleted
+// before its child) hits a transient FK and stays dirty for the caller's retry —
+// exactly the sequential path's transient handling. The phase barrier preserves
+// pass-end referential consistency (all upserts attempted before any delete).
+func drainAcyclicParallel(ctx context.Context, pool []Conn, work []tableWork, target engine.TargetID) (int, error) {
+	n := len(work)
+	var transient error
+
+	// Phase 1 — upserts (any order; transient FK on a not-yet-present parent).
+	e1 := applyPhase(ctx, pool, n, forwardIdx(n), func(ctx context.Context, c Conn, i int) error {
+		return perTableUpsert(ctx, c.Src, c.Sink, work[i])
+	})
+	upserted := make([]bool, n)
+	for i, e := range e1 {
+		switch {
+		case e == nil:
+			upserted[i] = true
+		case engine.IsTransientConstraint(e):
+			transient = e
+		default:
+			return 0, fmt.Errorf("apply component: upsert %s: %w", work[i].ref, e)
+		}
+	}
+
+	// Phase 2 — deletes + confirm, only tables whose upsert committed.
+	var mu sync.Mutex
+	total := 0
+	e2 := applyPhase(ctx, pool, n, reverseIdx(n, upserted), func(ctx context.Context, c Conn, i int) error {
+		if err := perTableDelete(ctx, c.Src, c.Sink, work[i]); err != nil {
+			return err
+		}
+		if err := c.Src.ConfirmConsumed(ctx, work[i].ref, target, work[i].ids); err != nil {
+			return err
+		}
+		mu.Lock()
+		total += len(work[i].ids)
+		mu.Unlock()
+		return nil
+	})
+	for i, e := range e2 {
+		switch {
+		case e == nil:
+		case engine.IsTransientConstraint(e):
+			transient = e
+		default:
+			return total, fmt.Errorf("apply component: delete/confirm %s: %w", work[i].ref, e)
+		}
+	}
+	return total, transient
+}
+
 // drainCyclicNullFill drains a cyclic FK component with per-table committed
 // transactions and NULL-then-fill, so it breaks BOTH livelocks a single-component
 // transaction suffers under real (non-DEFERRABLE) target FKs:
@@ -232,18 +330,28 @@ func drainAcyclic(ctx context.Context, src engine.Source, sink engine.Sink,
 // failure in any phase leaves it dirty for the next pass (self-healing). Any
 // transient error is returned (after attempting every table) so the caller retries;
 // a non-transient error halts loud immediately.
-func drainCyclicNullFill(ctx context.Context, src engine.Source, sink engine.Sink,
+func drainCyclicNullFill(ctx context.Context, pool []Conn, concurrency int,
 	tablesTopoOrder []engine.TableRef, target engine.TargetID, batch int,
 	cyclicCols map[engine.TableRef][]string) (int, error) {
 
-	work, _, err := gatherWork(ctx, src, tablesTopoOrder, target, batch)
+	work, _, err := gatherWork(ctx, pool[0].Src, tablesTopoOrder, target, batch)
 	if err != nil {
 		return 0, err
 	}
 	if len(work) == 0 {
 		return 0, nil
 	}
+	if concurrency <= 1 || len(pool) <= 1 {
+		return drainCyclicNullFillSeq(ctx, pool[0], work, tablesTopoOrder, target, cyclicCols)
+	}
+	return drainCyclicNullFillParallel(ctx, pool, work, tablesTopoOrder, target, cyclicCols)
+}
 
+// drainCyclicNullFillSeq is the original strictly-sequential NULL-fill cyclic drain
+// (concurrency 1). Kept verbatim so the default path is unchanged.
+func drainCyclicNullFillSeq(ctx context.Context, c Conn, work []tableWork,
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, cyclicCols map[engine.TableRef][]string) (int, error) {
+	src, sink := c.Src, c.Sink
 	var transient error
 	upserted := make([]bool, len(work))
 	deleted := make([]bool, len(work))
@@ -307,6 +415,141 @@ func drainCyclicNullFill(ctx context.Context, src engine.Source, sink engine.Sin
 		}
 	}
 	return total, transient
+}
+
+// drainCyclicNullFillParallel is the concurrent NULL-fill cyclic drain: the same
+// three FK-ordered phases (upsert-NULL, delete, fill), but tables WITHIN each phase
+// apply across the pool. Barriers between phases preserve the invariants; a table
+// blocked in any phase stays dirty for the caller's retry (transient FK), and a
+// table is confirmed only after all its applicable phases commit.
+func drainCyclicNullFillParallel(ctx context.Context, pool []Conn, work []tableWork,
+	tablesTopoOrder []engine.TableRef, target engine.TargetID, cyclicCols map[engine.TableRef][]string) (int, error) {
+	n := len(work)
+	var transient error
+
+	// Phase 1 — upsert (cyclic FK columns NULL).
+	e1 := applyPhase(ctx, pool, n, forwardIdx(n), func(ctx context.Context, c Conn, i int) error {
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, false)
+	})
+	upserted := make([]bool, n)
+	for i, e := range e1 {
+		switch {
+		case e == nil:
+			upserted[i] = true
+		case engine.IsTransientConstraint(e):
+			transient = e
+		default:
+			return 0, fmt.Errorf("apply component: upsert %s: %w", work[i].ref, e)
+		}
+	}
+
+	// Phase 2 — deletes, only tables whose upsert landed.
+	e2 := applyPhase(ctx, pool, n, reverseIdx(n, upserted), func(ctx context.Context, c Conn, i int) error {
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, true, false)
+	})
+	deleted := make([]bool, n)
+	for i, e := range e2 {
+		switch {
+		case !upserted[i]:
+		case e == nil:
+			deleted[i] = true
+		case engine.IsTransientConstraint(e):
+			transient = e
+		default:
+			return 0, fmt.Errorf("apply component: delete %s: %w", work[i].ref, e)
+		}
+	}
+
+	// Phase 3 — fill cyclic FK columns (only cyclic-column tables that landed both
+	// prior phases). A non-cyclic member is done after phases 1–2.
+	fillIdx := make([]int, 0, n)
+	filled := make([]bool, n)
+	for i := 0; i < n; i++ {
+		if len(cyclicCols[work[i].ref]) == 0 {
+			filled[i] = true
+			continue
+		}
+		if upserted[i] && deleted[i] {
+			fillIdx = append(fillIdx, i)
+		}
+	}
+	e3 := applyPhase(ctx, pool, n, fillIdx, func(ctx context.Context, c Conn, i int) error {
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, true)
+	})
+	for _, i := range fillIdx {
+		switch e := e3[i]; {
+		case e == nil:
+			filled[i] = true
+		case engine.IsTransientConstraint(e):
+			transient = e
+		default:
+			return 0, fmt.Errorf("apply component: fill %s: %w", work[i].ref, e)
+		}
+	}
+
+	// Confirm only tables that completed every applicable phase.
+	total := 0
+	for i, w := range work {
+		if upserted[i] && deleted[i] && filled[i] {
+			if err := pool[0].Src.ConfirmConsumed(ctx, w.ref, target, w.ids); err != nil {
+				return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
+			}
+			total += len(w.ids)
+		}
+	}
+	return total, transient
+}
+
+// applyPhase runs task for each work index in `order` across the pool, bounding
+// in-flight tasks to len(pool) by handing each goroutine an exclusive Conn from a
+// free-list (so no connection is used concurrently). It returns per-work-index
+// errors (len n; indices not in `order` stay nil). Used only for concurrency>1;
+// the sequential drains iterate directly to preserve strict ordering and the
+// early-halt-on-non-transient semantics.
+func applyPhase(ctx context.Context, pool []Conn, n int, order []int,
+	task func(ctx context.Context, c Conn, i int) error) []error {
+	errs := make([]error, n)
+	connCh := make(chan Conn, len(pool))
+	for _, c := range pool {
+		connCh <- c
+	}
+	var wg sync.WaitGroup
+	for _, idx := range order {
+		if ctx.Err() != nil {
+			errs[idx] = ctx.Err()
+			continue
+		}
+		c := <-connCh // blocks until a Conn frees, bounding concurrency to len(pool)
+		wg.Add(1)
+		go func(i int, c Conn) {
+			defer wg.Done()
+			defer func() { connCh <- c }()
+			errs[i] = task(ctx, c, i)
+		}(idx, c)
+	}
+	wg.Wait()
+	return errs
+}
+
+// forwardIdx returns [0, 1, …, n-1] — parents-before-children dispatch order.
+func forwardIdx(n int) []int {
+	idx := make([]int, n)
+	for i := range idx {
+		idx[i] = i
+	}
+	return idx
+}
+
+// reverseIdx returns [n-1, …, 0] filtered to indices where mask is set —
+// children-before-parents delete order, restricted to tables whose upsert landed.
+func reverseIdx(n int, mask []bool) []int {
+	idx := make([]int, 0, n)
+	for i := n - 1; i >= 0; i-- {
+		if mask[i] {
+			idx = append(idx, i)
+		}
+	}
+	return idx
 }
 
 // perTableApplyCyclic runs one phase of the per-table cyclic NULL-fill drain in its

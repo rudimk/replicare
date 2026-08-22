@@ -177,6 +177,7 @@ specific value types.
 |---|---|---|---|
 | `drain_interval` | duration (`1s`, `500ms`) | `1s` | time between streaming drain passes; longer = more coalescing (less source load) but higher lag |
 | `drain_batch` | int | `1000` | max dirty deltas applied **per table per pass**; with `drain_interval` this is the per-table streaming ceiling (~`drain_batch/drain_interval` rows/s). Raise for a high-volume table that lags |
+| `apply_concurrency` | int (≥1) | `1` | how many of a component's tables apply **concurrently** during streaming. `1` is strictly sequential; higher fans the per-table apply across the copy-worker pool (bounded by `pool.max_*_connections`). Helps when **several** tables are backlogged at once |
 | `retention.max_age` | duration (`24h`, `0` = off) | `24h` | oldest unconsumed delta before a laggard target is reseeded |
 | `retention.max_bytes` | size (`512MB`, `0` = off) | off | delta-table on-disk size before reseed |
 | `pool.max_source_connections` | int | 4 | source connection cap (copy worker pool is sized from it) |

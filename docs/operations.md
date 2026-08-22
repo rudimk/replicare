@@ -24,6 +24,7 @@ Practical guidance for running replicare in production. Design rationale lives i
 |---|---|---|
 | `drain_interval` | Time between streaming drain passes. Longer = more per-PK coalescing (less source load) but higher lag. | 1s |
 | `drain_batch` | Max dirty deltas applied **per table per pass**. With `drain_interval` this is the per-table streaming ceiling. | 1000 |
+| `apply_concurrency` | How many of a component's tables apply **concurrently** per pass. `1` is sequential; higher parallelizes across the copy-worker pool. Raise when **several** tables backlog at once. | 1 |
 | `retention.max_age` | Cap on the oldest unconsumed delta before a laggard target is reseeded. | 24h |
 | `retention.max_bytes` | Cap on the delta table's on-disk size before reseed. | off |
 | `pool.max_source_connections` / `pool.max_target_connections` | Connection caps; the copy worker pool is sized from these. | conservative |
@@ -47,8 +48,21 @@ Two levers, in order:
    (apply-bound). Costs a larger re-read and apply per pass (more source and target work in one shot).
 
 Watch `- rate(replicare_delta_backlog_rows[5m])` per table: positive means the backlog is shrinking
-(catching up). Connection-pool caps don't help here — they parallelize *across* tables/chunks, not
-within one hot table.
+(catching up).
+
+### Several tables backlogged at once
+
+The `drain_batch`/`drain_interval` levers above are per-table ceilings on a **single-threaded** drain:
+by default a pass applies each component's tables one at a time. When *several* tables are backlogged
+together, raise **`apply_concurrency`** — it applies a component's tables concurrently, across a pool
+built from the copy workers (idle during streaming), so they no longer queue behind each other. It's
+bounded by the connection caps: the pool has one primary pair plus up to `apply_concurrency-1` worker
+pairs, and worker pairs come from `pool.max_source_connections`/`max_target_connections` (so raise
+those alongside it). FK order within a component is still honored per pass (a child that lands before
+its parent hits a transient FK and retries), and cyclic components on MySQL — which apply as one
+whole-component transaction — stay sequential. This does **not** speed up a *single* hot table (that's
+still `drain_batch`/`drain_interval` + target capacity); it removes the cross-table serialization when
+many tables are hot. As always, it helps only until the **target's** write capacity saturates.
 
 ## Source footprint (the thing to watch)
 
