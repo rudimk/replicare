@@ -213,13 +213,22 @@ type KeyExister interface { // implemented by the Redis Source
 	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
 }
 
-// DBSizer is an OPTIONAL Source/Sink capability: report the connected database's
-// total size in bytes, which the pipeline emits as the source/target DB-size
-// metric. Relational engines implement it (Postgres pg_database_size, MySQL
-// information_schema); an engine without a meaningful single-number size (Redis)
-// omits it and the metric stays unset. Bounded by ctx like any query.
+// DBSizer is an OPTIONAL Source/Sink capability: report on-disk sizes the
+// pipeline emits as size metrics. Relational engines implement it (Postgres
+// pg_database_size / pg_total_relation_size, MySQL information_schema); an engine
+// without a meaningful byte size (Redis) omits it and the metrics stay unset.
+// Both methods are bounded by ctx like any query.
 type DBSizer interface {
+	// DatabaseSize is the connected database's total on-disk size — the WHOLE
+	// database, including replicare's own capture schema and any unreplicated
+	// tables on the source.
 	DatabaseSize(ctx context.Context) (int64, error)
+	// ReplicatedSize is the total on-disk size (heap + indexes + TOAST) of just
+	// the given tables — the sync's replicated selection. Unlike DatabaseSize it
+	// excludes replicare's capture schema / delta bloat and any unreplicated
+	// tables, so it is the apples-to-apples source↔target figure. Tables absent at
+	// the endpoint contribute nothing; an empty slice returns 0.
+	ReplicatedSize(ctx context.Context, tables []TableRef) (int64, error)
 }
 
 // CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an

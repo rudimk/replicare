@@ -30,6 +30,8 @@ func TestSourceTargetHealthAndSizeGauges(t *testing.T) {
 	tm.SetTargetUp("s1", "dst", false)
 	tm.SetSourceDBBytes("s1", 111)
 	tm.SetTargetDBBytes("s1", "dst", 222)
+	tm.SetSourceReplicatedBytes("s1", 88)
+	tm.SetTargetReplicatedBytes("s1", "dst", 99)
 	tm.SetBacklog("s1", "dst", ref, "public.orders", engine.DeltaBacklog{Rows: 7, Bytes: 70})
 
 	checks := []struct {
@@ -41,6 +43,8 @@ func TestSourceTargetHealthAndSizeGauges(t *testing.T) {
 		{observability.MetricTargetUp, map[string]string{"sync": "s1", "target": "dst"}, 0},
 		{observability.MetricSourceDBBytes, map[string]string{"sync": "s1"}, 111},
 		{observability.MetricTargetDBBytes, map[string]string{"sync": "s1", "target": "dst"}, 222},
+		{observability.MetricSourceReplicatedBytes, map[string]string{"sync": "s1"}, 88},
+		{observability.MetricTargetReplicatedBytes, map[string]string{"sync": "s1", "target": "dst"}, 99},
 		{observability.MetricDeltaBacklog, map[string]string{"sync": "s1", "target": "dst", "table": "public.orders", "component": "public.orders"}, 7},
 	}
 	for _, c := range checks {

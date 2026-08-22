@@ -76,6 +76,15 @@ func (s *Sink) DatabaseSize(ctx context.Context) (int64, error) {
 	return b, nil
 }
 
+// ReplicatedSize implements engine.DBSizer: the on-disk size of just the given
+// tables (§4.2 apples-to-apples source↔target figure).
+func (s *Sink) ReplicatedSize(ctx context.Context, tables []engine.TableRef) (int64, error) {
+	if s.conn == nil {
+		return 0, errNotConnected("sink")
+	}
+	return replicatedSize(ctx, s.conn, tables)
+}
+
 // ServerVersion returns the numeric target server version.
 func (s *Sink) ServerVersion(ctx context.Context) (int, error) {
 	if s.conn == nil {

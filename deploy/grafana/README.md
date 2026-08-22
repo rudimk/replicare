@@ -52,12 +52,15 @@ current value or pass `DS_PROMETHEUS` via the import API.
 
 Organized into sections (Grafana rows):
 
-**Source** / **Target** — the controller checks both endpoints and emits their reachability and database size:
+**Source** / **Target** — the controller checks both endpoints and emits their reachability and two size figures — the whole database and just the replicated tables:
 
 | Panel | Query (source metric) | Reading |
 |---|---|---|
 | Source up / Targets up | `min(replicare_source_up)` / `min(replicare_target_up)` | `UP` (green) / `DOWN` (red) — the controller's health-check of that endpoint |
-| Source / Target DB size | `replicare_source_db_bytes` / `replicare_target_db_bytes` | On-disk database size (Postgres/MySQL); the time-series shows growth and the target converging toward the source |
+| Source / Target DB size | `replicare_source_db_bytes` / `replicare_target_db_bytes` | Whole-database on-disk size (Postgres/MySQL). The source usually runs larger — it carries replicare's capture schema + delta bloat and any unreplicated tables |
+| Source / Target replicated size | `replicare_source_replicated_bytes` / `replicare_target_replicated_bytes` | Size of **just the replicated tables** — the apples-to-apples comparison; on a caught-up sync the two converge even when the whole-DB sizes differ |
+
+> Why two size figures? The whole-DB gauge counts everything in the database — including replicare's own `replicare` capture schema on the source and any tables you didn't select — so source > target is normal, not drift. The replicated-size gauge sums only the selected tables with the same function on both sides, so it's the series to watch for convergence. See [Whole-DB vs replicated size](../../docs/operations.md#whole-db-vs-replicated-size).
 
 **Replication lag** — the headline lag section:
 

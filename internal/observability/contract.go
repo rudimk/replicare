@@ -49,6 +49,14 @@ const (
 	MetricSourceUp              = "replicare_source_up"
 	MetricSourceDBBytes         = "replicare_source_db_bytes"
 	MetricTargetDBBytes         = "replicare_target_db_bytes"
+	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
+	// as opposed to the whole-database *_db_bytes above. This is the
+	// apples-to-apples source↔target figure — it excludes replicare's own capture
+	// schema and delta-table bloat on the source and any unreplicated tables, so a
+	// converged sync should show source ≈ target here even when the whole-DB
+	// gauges differ (CLAUDE.md §3.4). Engines that report a size implement it.
+	MetricSourceReplicatedBytes = "replicare_source_replicated_bytes"
+	MetricTargetReplicatedBytes = "replicare_target_replicated_bytes"
 	MetricApplyBatchSeconds     = "replicare_apply_batch_seconds"
 	MetricErrorsTotal           = "replicare_errors_total"
 	MetricPhaseInfo             = "replicare_table_phase_info"
@@ -72,8 +80,10 @@ var Metrics = []Metric{
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},
 	{MetricSourceUp, Gauge, "Source reachability (1=up, 0=down)", []string{LabelSync}},
-	{MetricSourceDBBytes, Gauge, "Source database size in bytes (engines that report it)", []string{LabelSync}},
-	{MetricTargetDBBytes, Gauge, "Target database size in bytes (engines that report it)", []string{LabelSync, LabelTarget}},
+	{MetricSourceDBBytes, Gauge, "Source database size in bytes — the whole database (engines that report it)", []string{LabelSync}},
+	{MetricTargetDBBytes, Gauge, "Target database size in bytes — the whole database (engines that report it)", []string{LabelSync, LabelTarget}},
+	{MetricSourceReplicatedBytes, Gauge, "Size in bytes of just the replicated tables on the source (heap+indexes+TOAST; engines that report it)", []string{LabelSync}},
+	{MetricTargetReplicatedBytes, Gauge, "Size in bytes of just the replicated tables on the target (heap+indexes+TOAST; engines that report it)", []string{LabelSync, LabelTarget}},
 	{MetricApplyBatchSeconds, Histogram, "Apply batch duration", []string{LabelSync, LabelTarget}},
 	{MetricErrorsTotal, Counter, "Errors by category", []string{LabelSync, "category"}},
 	{MetricPhaseInfo, Gauge, "Table phase (initial_copy/streaming) as an info gauge", []string{LabelSync, LabelTable, LabelPhase}},

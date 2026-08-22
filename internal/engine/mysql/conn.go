@@ -161,6 +161,30 @@ func databaseSize(ctx context.Context, db *sql.DB) (int64, error) {
 	return b.Int64, nil
 }
 
+// replicatedSize sums data_length+index_length over just the given tables — the
+// "replicated data only" figure that excludes replicare's own capture tables and
+// any unreplicated tables, so source and target are comparable (§4.2). It matches
+// by (table_schema, table_name) so a table absent at this endpoint contributes
+// nothing. An empty list returns 0.
+func replicatedSize(ctx context.Context, db *sql.DB, tables []engine.TableRef) (int64, error) {
+	if len(tables) == 0 {
+		return 0, nil
+	}
+	pairs := make([]string, len(tables))
+	args := make([]any, 0, len(tables)*2)
+	for i, t := range tables {
+		pairs[i] = "(?,?)"
+		args = append(args, t.Schema, t.Name)
+	}
+	q := fmt.Sprintf(`SELECT COALESCE(SUM(data_length + index_length), 0)
+FROM information_schema.tables WHERE (table_schema, table_name) IN (%s)`, strings.Join(pairs, ", "))
+	var b sql.NullInt64
+	if err := db.QueryRowContext(ctx, q, args...).Scan(&b); err != nil {
+		return 0, fmt.Errorf("mysql: replicated size: %w", err)
+	}
+	return b.Int64, nil
+}
+
 // serverVersion queries the connected server's version, rejects MariaDB (out of
 // scope for v1), and returns the comparable version number (§1.6).
 func serverVersion(ctx context.Context, db *sql.DB) (int, error) {

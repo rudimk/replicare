@@ -108,6 +108,39 @@ with backlog attributes, an `ERROR target.unreachable` log, and `replicare_targe
 climbing backlog series. The daemon keeps retrying each pass; nothing is lost. If the target stays
 down long enough to exceed the retention cap, it is reseeded on recovery.
 
+## Whole-DB vs replicated size
+
+replicare emits **two** size figures for each endpoint, and they answer different questions:
+
+- **Whole-database size** — `replicare_source_db_bytes` / `replicare_target_db_bytes`
+  (Postgres `pg_database_size`, MySQL sum over `information_schema.tables`). This is the entire
+  database the connection points at, *including* everything that is not the replicated data.
+- **Replicated-data size** — `replicare_source_replicated_bytes` /
+  `replicare_target_replicated_bytes` (`SUM(pg_total_relation_size)` — heap + indexes + TOAST —
+  or MySQL `data_length + index_length`, over **just the sync's selected tables**). Tables absent
+  at an endpoint contribute nothing; a sync with no relational selection reports `0`.
+
+**Why the whole-DB gauges usually differ while the replicated-data gauges converge.** On a healthy,
+caught-up single→single Postgres sync you will typically see `source_db_bytes` **larger** than
+`target_db_bytes`, even though the data is identical. That is expected, not drift:
+
+1. **Trigger CDC writes to the source.** replicare's own `replicare` schema lives on the *source*:
+   per-table delta and track tables, plus trigger functions. Under churn those delta tables are a
+   high-write queue that bloats before autovacuum/purge reclaims it (CLAUDE.md §3.4). None of this
+   exists on the target.
+2. **Unreplicated tables count too.** `pg_database_size` covers the *whole* database, so any table
+   on the source you did not select (audit logs, staging tables, keyless tables skipped for lacking
+   a PK) inflates the source figure but never the target's.
+3. **The state store is a separate database.** When the Postgres `StateStore` lives on the target
+   host it is its **own** database (e.g. `replicare_state`), so `pg_database_size(current_database())`
+   for the target's data database does not count it.
+
+The **replicated-data** gauges strip all of that away — same tables, same size function on both
+sides — so they are the right series for an apples-to-apples "has the target caught up to the
+source?" comparison. Watch `source_replicated_bytes` vs `target_replicated_bytes` for convergence;
+watch `source_db_bytes` (against `source_replicated_bytes`) for capture/bloat footprint on a source
+you may not own (see [Source footprint](#source-footprint-the-thing-to-watch)).
+
 ## Metrics reference
 
 Every metric replicare exposes on `/metrics` (Prometheus text format; port `9090` in the demo,
@@ -127,8 +160,10 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability (`1`=up, `0`=down). |
 | `replicare_source_up` | gauge | `sync` | Source reachability (`1`=up, `0`=down). |
-| `replicare_source_db_bytes` | gauge | `sync` | Source database size in bytes (Postgres `pg_database_size`, MySQL `information_schema`; unset for engines that don't report it). |
-| `replicare_target_db_bytes` | gauge | `sync`, `target` | Target database size in bytes (same engine support). |
+| `replicare_source_db_bytes` | gauge | `sync` | Source **whole-database** size in bytes (Postgres `pg_database_size`, MySQL `information_schema`; unset for engines that don't report it). Includes replicare's own capture schema + delta bloat and any unreplicated tables — see [Whole-DB vs replicated size](#whole-db-vs-replicated-size). |
+| `replicare_target_db_bytes` | gauge | `sync`, `target` | Target **whole-database** size in bytes (same engine support). |
+| `replicare_source_replicated_bytes` | gauge | `sync` | Size in bytes of **just the replicated tables** on the source (`SUM(pg_total_relation_size)` / MySQL `data_length+index_length` over the selection). The apples-to-apples source↔target figure — see [Whole-DB vs replicated size](#whole-db-vs-replicated-size). |
+| `replicare_target_replicated_bytes` | gauge | `sync`, `target` | Size in bytes of **just the replicated tables** on the target (same engine support). |
 | `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
 | `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
 | `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
