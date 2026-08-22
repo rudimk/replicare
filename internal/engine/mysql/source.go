@@ -65,6 +65,15 @@ func (s *Source) DatabaseSize(ctx context.Context) (int64, error) {
 	return databaseSize(ctx, s.db)
 }
 
+// ReplicatedSize implements engine.DBSizer: the data+index size of just the given
+// tables (§4.2 apples-to-apples source↔target figure).
+func (s *Source) ReplicatedSize(ctx context.Context, tables []engine.TableRef) (int64, error) {
+	if s.db == nil {
+		return 0, errNotConnected
+	}
+	return replicatedSize(ctx, s.db, tables)
+}
+
 // ServerVersion returns the numeric server version (e.g. 50744 for 5.7.44) and
 // refuses MariaDB (out of scope for v1).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {

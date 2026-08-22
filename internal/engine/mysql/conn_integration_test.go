@@ -72,3 +72,69 @@ func TestConnectAndVersion(t *testing.T) {
 	}
 	t.Logf("source=%d target=%d", sv, tv)
 }
+
+// TestSizeIntegration exercises the engine.DBSizer implementation: the whole-DB
+// size is plausible (>0), the replicated size sums only the named tables (>0 and
+// not exceeding the whole DB), a missing table contributes nothing, and an empty
+// list is 0.
+func TestSizeIntegration(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	src := &Source{cfg: srcCfg()}
+	if err := src.Connect(ctx); err != nil {
+		t.Fatalf("connect source: %v", err)
+	}
+	defer src.Close(context.Background())
+
+	if _, err := src.db.ExecContext(ctx, "CREATE TABLE IF NOT EXISTS rc_repsize (id INT PRIMARY KEY, pad VARCHAR(255))"); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	defer func() { _, _ = src.db.ExecContext(context.Background(), "DROP TABLE IF EXISTS rc_repsize") }()
+	for i := 0; i < 500; i++ {
+		if _, err := src.db.ExecContext(ctx, "INSERT IGNORE INTO rc_repsize (id, pad) VALUES (?, REPEAT('x', 200))", i); err != nil {
+			t.Fatalf("seed rows: %v", err)
+		}
+	}
+	// information_schema size stats are refreshed lazily; ANALYZE nudges them.
+	_, _ = src.db.ExecContext(ctx, "ANALYZE TABLE rc_repsize")
+
+	dbSize, err := src.DatabaseSize(ctx)
+	if err != nil {
+		t.Fatalf("database size: %v", err)
+	}
+	if dbSize <= 0 {
+		t.Errorf("database size = %d, want > 0", dbSize)
+	}
+
+	tbl := engine.TableRef{Schema: "replicare_src", Name: "rc_repsize"}
+	got, err := src.ReplicatedSize(ctx, []engine.TableRef{tbl})
+	if err != nil {
+		t.Fatalf("replicated size: %v", err)
+	}
+	if got <= 0 {
+		t.Errorf("replicated size = %d, want > 0", got)
+	}
+	if got > dbSize {
+		t.Errorf("replicated size %d exceeds whole-db size %d", got, dbSize)
+	}
+
+	withMissing, err := src.ReplicatedSize(ctx, []engine.TableRef{tbl, {Schema: "replicare_src", Name: "rc_nope"}})
+	if err != nil {
+		t.Fatalf("replicated size with missing: %v", err)
+	}
+	if withMissing != got {
+		t.Errorf("missing table changed total: got %d, want %d", withMissing, got)
+	}
+
+	empty, err := src.ReplicatedSize(ctx, nil)
+	if err != nil {
+		t.Fatalf("replicated size empty: %v", err)
+	}
+	if empty != 0 {
+		t.Errorf("empty replicated size = %d, want 0", empty)
+	}
+}

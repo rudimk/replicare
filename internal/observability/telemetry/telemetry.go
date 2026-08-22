@@ -93,6 +93,27 @@ func (t *Telemetry) SetSourceDBBytes(sync string, bytes int64) {
 	t.reg.Gauge(observability.MetricSourceDBBytes).WithLabelValues(sync).Set(float64(bytes))
 }
 
+// SetSourceReplicatedBytes sets the per-sync source replicated-data-size gauge:
+// just the selected tables, so it is comparable to the target (unlike the
+// whole-DB gauge, which also counts replicare's capture schema and unreplicated
+// tables). Engines that report it — Postgres/MySQL; unset otherwise.
+func (t *Telemetry) SetSourceReplicatedBytes(sync string, bytes int64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricSourceReplicatedBytes).WithLabelValues(sync).Set(float64(bytes))
+}
+
+// SetTargetReplicatedBytes sets the per-target replicated-data-size gauge: just
+// the selected tables, comparable to the source's replicated-data gauge. Engines
+// that report it — Postgres/MySQL; unset otherwise.
+func (t *Telemetry) SetTargetReplicatedBytes(sync string, target engine.TargetID, bytes int64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricTargetReplicatedBytes).WithLabelValues(sync, string(target)).Set(float64(bytes))
+}
+
 // SetBacklog publishes a target/table's unconsumed-delta backlog gauges. component
 // is the table's FK-component id (for per-component rollups; CLAUDE.md §8.1).
 func (t *Telemetry) SetBacklog(sync string, target engine.TargetID, table engine.TableRef, component string, bl engine.DeltaBacklog) {

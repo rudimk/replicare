@@ -277,9 +277,13 @@ func (s *Syncer) sourceReachable(ctx context.Context) bool {
 	return s.Source.HealthCheck(hctx) == nil
 }
 
-// refreshDBSizes emits the source/target database-size gauges when the engine
-// reports them (engine.DBSizer — Postgres/MySQL; a no-op otherwise), throttled to
-// dbSizeInterval. Best-effort: a failed size query is skipped, never fatal.
+// refreshDBSizes emits the source/target size gauges when the engine reports them
+// (engine.DBSizer — Postgres/MySQL; a no-op otherwise), throttled to
+// dbSizeInterval. It emits BOTH figures: the whole-database size (source counts
+// replicare's capture schema + delta bloat + unreplicated tables, so it runs
+// larger than the target) and the replicated-data size (just the selected tables,
+// the apples-to-apples source↔target comparison; CLAUDE.md §3.4). Best-effort: a
+// failed size query is skipped, never fatal.
 func (s *Syncer) refreshDBSizes(ctx context.Context) {
 	now := time.Now()
 	if !s.lastDBSize.IsZero() && now.Sub(s.lastDBSize) < dbSizeInterval {
@@ -291,12 +295,18 @@ func (s *Syncer) refreshDBSizes(ctx context.Context) {
 		if b, err := sz.DatabaseSize(qctx); err == nil {
 			s.Tel.SetSourceDBBytes(s.Name, b)
 		}
+		if b, err := sz.ReplicatedSize(qctx, s.Replicable); err == nil {
+			s.Tel.SetSourceReplicatedBytes(s.Name, b)
+		}
 		cancel()
 	}
 	if sz, ok := s.Sink.(engine.DBSizer); ok {
 		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
 		if b, err := sz.DatabaseSize(qctx); err == nil {
 			s.Tel.SetTargetDBBytes(s.Name, s.Target, b)
+		}
+		if b, err := sz.ReplicatedSize(qctx, s.Replicable); err == nil {
+			s.Tel.SetTargetReplicatedBytes(s.Name, s.Target, b)
 		}
 		cancel()
 	}

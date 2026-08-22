@@ -258,8 +258,8 @@
     },
     {
       "type": "stat",
-      "title": "Source DB size",
-      "description": "replicare_source_db_bytes \u2014 on-disk size of the source database (Postgres pg_database_size / MySQL information_schema).",
+      "title": "Source DB size (whole)",
+      "description": "replicare_source_db_bytes \u2014 on-disk size of the WHOLE source database (Postgres pg_database_size / MySQL information_schema). Includes replicare's capture schema + delta bloat and any unreplicated tables, so it usually exceeds the target.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -311,7 +311,69 @@
           },
           "editorMode": "code",
           "expr": "sum(replicare_source_db_bytes{sync=~\"$sync\"})",
-          "legendFormat": "source",
+          "legendFormat": "whole DB",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Source replicated size",
+      "description": "replicare_source_replicated_bytes \u2014 on-disk size of JUST the replicated tables (heap+indexes+TOAST). The apples-to-apples comparison with the target's replicated size.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 1
+      },
+      "id": 4,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_source_replicated_bytes{sync=~\"$sync\"})",
+          "legendFormat": "replicated",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -320,19 +382,19 @@
     },
     {
       "type": "timeseries",
-      "title": "Source DB size over time",
-      "description": "Growth of the source database on disk.",
+      "title": "Source size over time",
+      "description": "Whole-database size vs replicated-tables size on the source. The gap is replicare's capture schema + delta bloat + any unreplicated tables.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 1
+        "w": 24,
+        "x": 0,
+        "y": 5
       },
-      "id": 4,
+      "id": 5,
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -355,9 +417,11 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "calcs": []
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -371,11 +435,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "replicare_source_db_bytes{sync=~\"$sync\"}",
-          "legendFormat": "{{sync}}",
+          "expr": "sum(replicare_source_db_bytes{sync=~\"$sync\"})",
+          "legendFormat": "whole DB",
           "range": true,
-          "instant": false,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_source_replicated_bytes{sync=~\"$sync\"})",
+          "legendFormat": "replicated",
+          "range": true,
+          "refId": "B"
         }
       ]
     },
@@ -387,9 +461,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 9
+        "y": 13
       },
-      "id": 5,
+      "id": 6,
       "panels": []
     },
     {
@@ -404,9 +478,9 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 10
+        "y": 14
       },
-      "id": 6,
+      "id": 7,
       "fieldConfig": {
         "defaults": {
           "unit": "none",
@@ -482,8 +556,8 @@
     },
     {
       "type": "stat",
-      "title": "Target DB size",
-      "description": "replicare_target_db_bytes \u2014 on-disk size of the target database.",
+      "title": "Target DB size (whole)",
+      "description": "replicare_target_db_bytes \u2014 on-disk size of the WHOLE target database. The state store, when co-located, is a SEPARATE database and is not counted here.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -492,9 +566,9 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 10
+        "y": 14
       },
-      "id": 7,
+      "id": 8,
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -535,7 +609,69 @@
           },
           "editorMode": "code",
           "expr": "sum(replicare_target_db_bytes{sync=~\"$sync\", target=~\"$target\"})",
-          "legendFormat": "target",
+          "legendFormat": "whole DB",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Target replicated size",
+      "description": "replicare_target_replicated_bytes \u2014 on-disk size of JUST the replicated tables. On a caught-up sync this converges with the source's replicated size even when the whole-DB sizes differ.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 8,
+        "x": 16,
+        "y": 14
+      },
+      "id": 9,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "none",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_target_replicated_bytes{sync=~\"$sync\", target=~\"$target\"})",
+          "legendFormat": "replicated",
           "range": true,
           "instant": false,
           "refId": "A"
@@ -544,19 +680,19 @@
     },
     {
       "type": "timeseries",
-      "title": "Target DB size over time",
-      "description": "Growth of the target database on disk (watch it converge toward the source during backfill).",
+      "title": "Target size over time",
+      "description": "Whole-database vs replicated-tables size on the target. Watch replicated size converge toward the source's replicated size during backfill.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 10
+        "w": 24,
+        "x": 0,
+        "y": 18
       },
-      "id": 8,
+      "id": 10,
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -579,9 +715,11 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "calcs": []
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -595,11 +733,21 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "replicare_target_db_bytes{sync=~\"$sync\", target=~\"$target\"}",
-          "legendFormat": "{{target}}",
+          "expr": "sum(replicare_target_db_bytes{sync=~\"$sync\", target=~\"$target\"})",
+          "legendFormat": "whole DB",
           "range": true,
-          "instant": false,
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_target_replicated_bytes{sync=~\"$sync\", target=~\"$target\"})",
+          "legendFormat": "replicated",
+          "range": true,
+          "refId": "B"
         }
       ]
     },
@@ -611,9 +759,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 26
       },
-      "id": 9,
+      "id": 11,
       "panels": []
     },
     {
@@ -628,9 +776,9 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 19
+        "y": 27
       },
-      "id": 10,
+      "id": 12,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -698,9 +846,9 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 19
+        "y": 27
       },
-      "id": 11,
+      "id": 13,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -768,9 +916,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 19
+        "y": 27
       },
-      "id": 12,
+      "id": 14,
       "fieldConfig": {
         "defaults": {
           "unit": "rps",
@@ -839,9 +987,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 27
+        "y": 35
       },
-      "id": 13,
+      "id": 15,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -903,9 +1051,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 35
       },
-      "id": 14,
+      "id": 16,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -960,9 +1108,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 35
+        "y": 43
       },
-      "id": 15,
+      "id": 17,
       "panels": []
     },
     {
@@ -977,9 +1125,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 36
+        "y": 44
       },
-      "id": 16,
+      "id": 18,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1041,9 +1189,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 36
+        "y": 44
       },
-      "id": 17,
+      "id": 19,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1101,9 +1249,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 44
+        "y": 52
       },
-      "id": 18,
+      "id": 20,
       "panels": []
     },
     {
@@ -1118,9 +1266,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 45
+        "y": 53
       },
-      "id": 19,
+      "id": 21,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1182,9 +1330,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 45
+        "y": 53
       },
-      "id": 20,
+      "id": 22,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1246,9 +1394,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 53
+        "y": 61
       },
-      "id": 21,
+      "id": 23,
       "fieldConfig": {
         "defaults": {
           "unit": "bytes",
@@ -1306,9 +1454,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 61
+        "y": 69
       },
-      "id": 22,
+      "id": 24,
       "panels": []
     },
     {
@@ -1323,9 +1471,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 62
+        "y": 70
       },
-      "id": 23,
+      "id": 25,
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
@@ -1388,9 +1536,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 62
+        "y": 70
       },
-      "id": 24,
+      "id": 26,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1457,9 +1605,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 70
+        "y": 78
       },
-      "id": 25,
+      "id": 27,
       "panels": []
     },
     {
@@ -1474,9 +1622,9 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 71
+        "y": 79
       },
-      "id": 26,
+      "id": 28,
       "fieldConfig": {
         "defaults": {
           "unit": "rps",
@@ -1535,9 +1683,9 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 71
+        "y": 79
       },
-      "id": 27,
+      "id": 29,
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -1592,9 +1740,9 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 79
+        "y": 87
       },
-      "id": 28,
+      "id": 30,
       "panels": []
     },
     {
@@ -1609,9 +1757,9 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 80
+        "y": 88
       },
-      "id": 29,
+      "id": 31,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -1670,9 +1818,9 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 80
+        "y": 88
       },
-      "id": 30,
+      "id": 32,
       "fieldConfig": {
         "defaults": {
           "unit": "rps",
@@ -1731,9 +1879,9 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 80
+        "y": 88
       },
-      "id": 31,
+      "id": 33,
       "fieldConfig": {
         "defaults": {
           "unit": "short",
