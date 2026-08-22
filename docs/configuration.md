@@ -37,9 +37,17 @@ syncs:          [ ... ]   # what replicates where
 | `metrics_addr` | listen addr, e.g. `:9090` | off | serves Prometheus `/metrics` |
 | `status_addr` | listen addr, e.g. `:8080` | off | serves `/status`, `/healthz`, and `/metrics` |
 | `otlp_endpoint` | host:port, e.g. `otel:4317` | off | exports OTel traces to an OTLP/gRPC collector |
+| `stall_timeout` | duration (`2m`, `0`, negative) | `2m` | how long a streaming loop may go without completing a pass before `/healthz` reports unhealthy (so Kubernetes restarts a wedged pod). Must exceed your slowest drain pass. Unset/`0` = `2m`; a negative value disables the check |
 
 Leaving an address empty disables that endpoint. When `metrics_addr` and
 `status_addr` differ, `/metrics` is served on both.
+
+`/healthz` reflects **streaming liveness**, not target reachability: a loop that
+is cycling — even one retrying against a down target — stays healthy; only a loop
+that stops completing passes (a hung query on a dropped socket) trips
+`stall_timeout` and fails the probe. The daemon also reconnects a dropped
+source/target connection on its own between passes, so a transient blip recovers
+without a restart; the probe is the backstop for a true wedge.
 
 ## Endpoints: `state_store`, `sources`, `targets`
 

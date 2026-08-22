@@ -50,6 +50,16 @@ func (s *Source) Close(ctx context.Context) error {
 	return err
 }
 
+// HealthCheck pings the source connection (bounded by ctx). A failure tells the
+// pipeline to reconnect — pgx holds a single connection with no pool/auto-redial,
+// so a dropped socket is only recovered by Close + Connect.
+func (s *Source) HealthCheck(ctx context.Context) error {
+	if s.conn == nil {
+		return errNotConnected("source")
+	}
+	return s.conn.Ping(ctx)
+}
+
 // ServerVersion returns the numeric source server version (e.g. 90600 for 9.6).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 	if err := s.requireConn(); err != nil {

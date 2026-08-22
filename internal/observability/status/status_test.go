@@ -3,6 +3,7 @@ package status
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +12,35 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 	"github.com/rudimk/replicare/internal/state"
 )
+
+// TestServerHealthzLiveness proves /healthz returns 200 when the liveness func is
+// happy and 503 when it reports a stalled loop (so Kubernetes restarts the pod).
+func TestServerHealthzLiveness(t *testing.T) {
+	cases := []struct {
+		name     string
+		liveness LivenessFunc
+		want     int
+	}{
+		{"nil-liveness", nil, 200},
+		{"healthy", func() error { return nil }, 200},
+		{"stalled", func() error { return errors.New(`streaming loop "s1/dst" stalled`) }, 503},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := NewServer(NewReporter(&fakeReader{}), nil, nil, tc.liveness)
+			ts := httptest.NewServer(srv.Handler())
+			defer ts.Close()
+			resp, err := http.Get(ts.URL + "/healthz")
+			if err != nil {
+				t.Fatalf("healthz: %v", err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.want {
+				t.Errorf("healthz status=%d, want %d", resp.StatusCode, tc.want)
+			}
+		})
+	}
+}
 
 // fakeReader serves canned state for the Reporter without a database.
 type fakeReader struct {
@@ -95,7 +125,7 @@ func TestServerRoutes(t *testing.T) {
 		_, _ = w.Write([]byte("# HELP replicare_up test\n"))
 	})
 	srv := NewServer(NewReporter(reader), metrics,
-		func(_ context.Context) ([]string, error) { return []string{"s1"}, nil })
+		func(_ context.Context) ([]string, error) { return []string{"s1"}, nil }, nil)
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

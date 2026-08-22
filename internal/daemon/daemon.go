@@ -18,6 +18,7 @@ import (
 	"github.com/rudimk/replicare/internal/buildinfo"
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/engine"
+	"github.com/rudimk/replicare/internal/observability/health"
 	"github.com/rudimk/replicare/internal/observability/prom"
 	"github.com/rudimk/replicare/internal/observability/telemetry"
 	"github.com/rudimk/replicare/internal/observability/tracing"
@@ -33,6 +34,7 @@ type Daemon struct {
 	tel      *telemetry.Telemetry
 	tracerTP *sdktrace.TracerProvider // non-nil when OTLP export is configured
 	log      *slog.Logger
+	beat     *health.Beat // streaming-liveness heartbeat backing /healthz
 }
 
 // New builds a Daemon from a validated config. It wires the shared infrastructure
@@ -62,8 +64,12 @@ func New(cfg *config.Config, log *slog.Logger) (*Daemon, error) {
 	}
 
 	tel := telemetry.New(metrics, tracer, log, store)
-	return &Daemon{cfg: cfg, store: store, metrics: metrics, tel: tel, tracerTP: tp, log: log}, nil
+	beat := health.New(cfg.Observability.StallTimeout.Duration())
+	return &Daemon{cfg: cfg, store: store, metrics: metrics, tel: tel, tracerTP: tp, log: log, beat: beat}, nil
 }
+
+// healthKey identifies a (sync, target) streaming loop in the liveness beat.
+func healthKey(sync, target string) string { return sync + "/" + target }
 
 // Metrics exposes the Prometheus registry so the caller can serve /metrics.
 func (d *Daemon) Metrics() *prom.Registry { return d.metrics }
@@ -141,6 +147,10 @@ func (d *Daemon) runSync(ctx context.Context, sync *config.Sync) error {
 			if err := syncer.Bringup(gctx); err != nil {
 				return fmt.Errorf("daemon: bringup %q/%q: %w", sync.Name, target, err)
 			}
+			// Register the liveness heartbeat only now that streaming begins — a long
+			// initial copy must never read as a wedge. buildSyncer wired Heartbeat to
+			// mark the same key each pass.
+			d.beat.Register(healthKey(sync.Name, target))
 			d.log.Info("sync streaming", slog.String("sync", sync.Name), slog.String("target", target))
 			return syncer.Stream(gctx)
 		})

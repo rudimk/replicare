@@ -41,6 +41,11 @@ type Observability struct {
 	MetricsAddr  string `yaml:"metrics_addr"`  // Prometheus /metrics listen addr, e.g. ":9090"
 	StatusAddr   string `yaml:"status_addr"`   // health/status HTTP API listen addr
 	OTLPEndpoint string `yaml:"otlp_endpoint"` // OTLP traces/metrics endpoint
+	// StallTimeout is how long a sync's streaming loop may go without completing an
+	// iteration before /healthz reports unhealthy (so Kubernetes restarts a wedged
+	// pod). It must exceed the slowest expected drain pass. Unset/0 = default 2m; a
+	// negative value disables the staleness check.
+	StallTimeout Duration `yaml:"stall_timeout"`
 }
 
 // Endpoint is a source/target/state-store database, declared as an engine name
@@ -135,6 +140,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Logging.Format == "" {
 		c.Logging.Format = "json"
+	}
+	if c.Observability.StallTimeout == 0 {
+		c.Observability.StallTimeout = Duration(defaultStallTimeout)
 	}
 	for _, s := range c.Syncs {
 		if s.Tuning.DrainInterval == 0 {

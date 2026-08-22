@@ -7,10 +7,22 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
 	"github.com/rudimk/replicare/internal/engine"
+)
+
+// Connection resilience defaults. dialTimeout bounds the initial connect;
+// connMaxLifetime/connMaxIdleTime recycle a pooled connection so a stale one
+// (after a server restart, failover, or idle reap) is retired and re-dialed
+// rather than reused dead. *sql.DB re-dials transparently, so these keep the
+// single pooled connection fresh without any reconnect logic of our own.
+const (
+	dialTimeout     = 10 * time.Second
+	connMaxLifetime = 5 * time.Minute
+	connMaxIdleTime = 60 * time.Second
 )
 
 // paramLocalInfile is an internal ConnConfig.Params key (rc_ namespace) carrying
@@ -62,6 +74,8 @@ func dsn(cc engine.ConnConfig) (string, error) {
 		return "", err
 	}
 	cfg.TLSConfig = tlsVal
+	// Bound the initial dial so a dead peer fails fast instead of hanging.
+	cfg.Timeout = dialTimeout
 	// Session canonicalization first; user params may not override it.
 	for _, sv := range sessionVars {
 		cfg.Params[sv.name] = sv.value
@@ -95,6 +109,11 @@ func open(ctx context.Context, cc engine.ConnConfig) (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	// Retire a pooled connection after a bounded lifetime / idle window so a stale
+	// one (server restart, failover, idle reap) is re-dialed rather than reused
+	// dead — *sql.DB re-dials transparently on the next query.
+	db.SetConnMaxLifetime(connMaxLifetime)
+	db.SetConnMaxIdleTime(connMaxIdleTime)
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("mysql: connect %s:%d: %w", cc.Host, cc.Port, err)

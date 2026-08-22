@@ -47,6 +47,16 @@ func (s *Source) Close(ctx context.Context) error {
 	return err
 }
 
+// HealthCheck pings the source (bounded by ctx). *sql.DB re-dials a dropped
+// pooled connection on the next query (session vars ride the DSN), so a Ping
+// failure here means the server itself is unreachable; the pipeline reconnects.
+func (s *Source) HealthCheck(ctx context.Context) error {
+	if s.db == nil {
+		return errNotConnected
+	}
+	return s.db.PingContext(ctx)
+}
+
 // ServerVersion returns the numeric server version (e.g. 50744 for 5.7.44) and
 // refuses MariaDB (out of scope for v1).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {

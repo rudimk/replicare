@@ -12,6 +12,9 @@ observability:
   metrics_addr: ":9090"          # Prometheus /metrics
   status_addr: ":8080"           # health/status HTTP API
   otlp_endpoint: "otel:4317"     # OTLP traces/metrics target
+  stall_timeout: 2m              # /healthz fails if a streaming loop completes no
+                                 # pass within this (K8s restarts a wedged pod).
+                                 # Must exceed your slowest drain pass; <0 disables.
 
 # Daemon operational state (Postgres in v1). Distinct from the source-side
 # delta/track tables, which live on each source.

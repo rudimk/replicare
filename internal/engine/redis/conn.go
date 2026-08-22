@@ -5,11 +5,18 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
+
+// dialTimeout bounds the initial connect for every client. go-redis pools and
+// re-dials dropped connections on its own (plus its default read/write timeouts
+// fail a hung op fast), so this is the one connect-side knob worth pinning
+// explicitly for resilience parity with the other engines.
+const dialTimeout = 10 * time.Second
 
 // errNotImplemented marks a Source/Sink method that is a stub until its milestone
 // lands (redis-plan RM2–RM11).
@@ -64,6 +71,11 @@ type conn struct {
 // Do delegates to the routing client.
 func (c *conn) Do(ctx context.Context, args ...any) *goredis.Cmd { return c.uc.Do(ctx, args...) }
 
+// ping round-trips the routing client (bounded by ctx) as a liveness probe. The
+// go-redis pool re-dials dropped connections on its own, so a ping failure means
+// the server itself is unreachable.
+func (c *conn) ping(ctx context.Context) error { return c.uc.Ping(ctx).Err() }
+
 // pipeline returns a routing-aware pipeliner: in cluster mode go-redis groups the
 // queued commands by owning node, so per-key RESTORE dispatches correctly.
 func (c *conn) pipeline() goredis.Pipeliner { return c.uc.Pipeline() }
@@ -97,10 +109,11 @@ func (c *conn) shardScanners(ctx context.Context, cc engine.ConnConfig) ([]gored
 	tlsCfg := tlsConfig(cc.TLS, cc.Host)
 	for _, addr := range addrs {
 		cl := goredis.NewClient(&goredis.Options{
-			Addr:      addr,
-			Username:  cc.User,
-			Password:  cc.Password,
-			TLSConfig: tlsCfg,
+			Addr:        addr,
+			Username:    cc.User,
+			Password:    cc.Password,
+			TLSConfig:   tlsCfg,
+			DialTimeout: dialTimeout,
 		})
 		c.scanners = append(c.scanners, cl)
 		c.owned = append(c.owned, cl)
@@ -171,10 +184,11 @@ func open(ctx context.Context, cc engine.ConnConfig) (*conn, error) {
 	switch mode {
 	case modeCluster:
 		cl := goredis.NewClusterClient(&goredis.ClusterOptions{
-			Addrs:     nodes,
-			Username:  cc.User,
-			Password:  cc.Password,
-			TLSConfig: tlsCfg,
+			Addrs:       nodes,
+			Username:    cc.User,
+			Password:    cc.Password,
+			TLSConfig:   tlsCfg,
+			DialTimeout: dialTimeout,
 		})
 		c.uc, c.cluster = cl, cl
 	case modeSentinel:
@@ -185,14 +199,16 @@ func open(ctx context.Context, cc engine.ConnConfig) (*conn, error) {
 			Password:      cc.Password,
 			DB:            db,
 			TLSConfig:     tlsCfg,
+			DialTimeout:   dialTimeout,
 		})
 	default: // standalone
 		c.uc = goredis.NewClient(&goredis.Options{
-			Addr:      nodes[0],
-			Username:  cc.User,
-			Password:  cc.Password,
-			DB:        db,
-			TLSConfig: tlsCfg,
+			Addr:        nodes[0],
+			Username:    cc.User,
+			Password:    cc.Password,
+			DB:          db,
+			TLSConfig:   tlsCfg,
+			DialTimeout: dialTimeout,
 		})
 	}
 

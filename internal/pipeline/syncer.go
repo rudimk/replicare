@@ -36,6 +36,12 @@ type Syncer struct {
 	DrainInterval time.Duration
 	Retention     engine.RetentionPolicy
 
+	// Heartbeat, if set, is called once per streaming iteration (after each pass,
+	// success or handled error) so an external liveness probe can tell a cycling
+	// loop from a wedged one (a hung query on a dropped socket). Optional; nil is a
+	// no-op.
+	Heartbeat func()
+
 	// sweepCursors holds the per-unit target-scan cursor for the delete
 	// reconciliation sweep (redis-plan §0.4), carried across streaming passes. Only
 	// used when the engine implements the KeyLister/KeyExister capability (Redis);

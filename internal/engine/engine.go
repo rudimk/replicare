@@ -77,6 +77,12 @@ type Source interface {
 	// Connect opens the connection and applies session-GUC canonicalization.
 	Connect(ctx context.Context) error
 	Close(ctx context.Context) error
+	// HealthCheck verifies the connection is alive with a cheap round-trip,
+	// bounded by ctx (so a dead socket fails fast rather than hanging). A non-nil
+	// return signals the pipeline to reconnect (Close + Connect) — the daemon's
+	// recovery from a dropped connection / DB failover / idle reap without a
+	// process restart.
+	HealthCheck(ctx context.Context) error
 	// ServerVersion returns the source server version number (e.g. 90600 for
 	// 9.6) so version-tolerant code paths can branch (CLAUDE.md §1.6).
 	ServerVersion(ctx context.Context) (int, error)
@@ -124,6 +130,11 @@ type Source interface {
 type Sink interface {
 	Connect(ctx context.Context) error
 	Close(ctx context.Context) error
+	// HealthCheck verifies the connection is alive with a cheap round-trip,
+	// bounded by ctx. A non-nil return signals the pipeline to reconnect
+	// (Close + Connect), recovering from a dropped connection / DB failover /
+	// idle reap without a process restart.
+	HealthCheck(ctx context.Context) error
 	ServerVersion(ctx context.Context) (int, error)
 
 	// Introspect returns the (pre-existing) target schema for pre-flight (M1).

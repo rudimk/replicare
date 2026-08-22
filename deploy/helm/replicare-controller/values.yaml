@@ -45,6 +45,9 @@ config:
     status_addr: ":8080"
     metrics_addr: ":9090"
     # otlp_endpoint: "otel-collector:4317"   # optional OTLP/gRPC trace export
+    # stall_timeout: 2m   # /healthz fails (→ pod restart) if a streaming loop
+    #                     # completes no pass within this. Must exceed your slowest
+    #                     # drain pass; <0 disables. Default 2m.
 
   # replicare's own state (progress, cursors, ownership) — v1 backend is Postgres,
   # regardless of the data engine (a MySQL→MySQL or Redis→Redis sync still needs it),

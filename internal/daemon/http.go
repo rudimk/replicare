@@ -41,7 +41,7 @@ func (d *Daemon) StartHTTP() (*HTTPServers, error) {
 	obs := d.cfg.Observability
 
 	if obs.StatusAddr != "" {
-		srv := status.NewServer(status.NewReporter(d.store), d.metrics.Handler(), d.syncNames)
+		srv := status.NewServer(status.NewReporter(d.store), d.metrics.Handler(), d.syncNames, d.liveness)
 		addr, stop, err := listenAndServe(obs.StatusAddr, srv.Handler())
 		if err != nil {
 			return nil, fmt.Errorf("daemon: bind status_addr %q: %w", obs.StatusAddr, err)
@@ -53,7 +53,7 @@ func (d *Daemon) StartHTTP() (*HTTPServers, error) {
 	if obs.MetricsAddr != "" && obs.MetricsAddr != obs.StatusAddr {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", d.metrics.Handler())
-		mux.HandleFunc("/healthz", healthz)
+		mux.HandleFunc("/healthz", d.handleHealthz)
 		addr, stop, err := listenAndServe(obs.MetricsAddr, mux)
 		if err != nil {
 			_ = hs.Shutdown(context.Background())
@@ -77,9 +77,27 @@ func listenAndServe(addr string, h http.Handler) (string, func(context.Context) 
 	return ln.Addr().String(), srv.Shutdown, nil
 }
 
-func healthz(w http.ResponseWriter, _ *http.Request) {
+// handleHealthz is the liveness probe on the metrics address (the status address
+// serves its own via status.Server). It reports unhealthy when a streaming loop
+// has stalled, so Kubernetes restarts a wedged pod.
+func (d *Daemon) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+	if err := d.liveness(); err != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "unhealthy", "reason": err.Error()})
+		return
+	}
 	_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// liveness reports a stalled streaming loop (no completed pass within
+// stall_timeout), backing both /healthz probes. A cycling loop — even one
+// retrying against a down target — stays healthy; only a wedged loop fails.
+func (d *Daemon) liveness() error {
+	if key, stale := d.beat.Stale(); stale {
+		return fmt.Errorf("streaming loop %q stalled: no drain pass completed within stall_timeout", key)
+	}
+	return nil
 }
 
 // syncNames lists the configured sync names for the status API.
