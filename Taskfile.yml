@@ -249,3 +249,27 @@ tasks:
     desc: 'DROP SCHEMA loadgen CASCADE on a DB (DSN=...).'
     cmds:
       - go run ./test/loadgen reset --dsn "{{.DSN}}" --yes
+
+  # loadgen-redis: manual Redis load + verification harness (test/loadgen-redis).
+  # Not shipped. Pass connection specs via vars, e.g.
+  # `task loadgen-redis:seed DSN="redis://localhost:6390/0"`. Add CLUSTER=1 (and a
+  # comma-separated seed list) for a Redis Cluster target.
+  loadgen-redis:seed:
+    desc: 'Seed-or-churn a source Redis (DSN=...). SCALE scales key counts, SEED for reproducibility. CLUSTER=1 for cluster mode.'
+    cmds:
+      - go run ./test/loadgen-redis run --dsn "{{.DSN}}" --scale {{.SCALE | default "1.0"}} --seed {{.SEED | default "1"}} {{if eq .CLUSTER "1"}}--cluster{{end}}
+
+  loadgen-redis:churn:
+    desc: 'Apply a churn burst to a seeded source Redis (DSN=..., OPS=number of ops). CLUSTER=1 for cluster mode.'
+    cmds:
+      - go run ./test/loadgen-redis run --dsn "{{.DSN}}" --ops {{.OPS | default "200"}} --seed {{.SEED | default "1"}} {{if eq .CLUSTER "1"}}--cluster{{end}}
+
+  loadgen-redis:verify:
+    desc: 'Verify a target Redis converged with the source (SRC=..., TGT=..., WAIT=e.g. 60s). CLUSTER=1 for cluster mode.'
+    cmds:
+      - go run ./test/loadgen-redis verify --source "{{.SRC}}" --target "{{.TGT}}" --wait {{.WAIT | default "0s"}} {{if eq .CLUSTER "1"}}--cluster{{end}}
+
+  loadgen-redis:reset:
+    desc: 'DEL every lg:*/lgskip:* key on a Redis (DSN=...). CLUSTER=1 for cluster mode.'
+    cmds:
+      - go run ./test/loadgen-redis reset --dsn "{{.DSN}}" --yes {{if eq .CLUSTER "1"}}--cluster{{end}}
