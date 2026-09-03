@@ -299,3 +299,23 @@ and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The sour
 server`), and in **cluster** mode both also need `+cluster|shards +cluster|slots` and the same user
 granted on **every master**. Watch the foot-gun: `RESTORE` is `@dangerous` and must be granted
 explicitly with `+restore`, or every apply fails loud. See [the Redis engine page](redis.md).
+
+## Load & convergence testing
+
+Two manual load-and-verify harnesses drive replicare against broad, high-volume, realistic data and
+assert the target **converges** with the source under continuous churn. They are developer/test
+tools, run from a checkout (`go run ./test/…`), **not** part of the shipped binary:
+
+- **Postgres** — [`test/loadgen`](../test/loadgen/README.md). Seeds a rich 10-table schema chosen to
+  exercise the hard paths (FK components, composite/UUID/text PKs, PK-changing `SKU` renames,
+  `GENERATED` columns, a keyless table it must skip; optional FK cycles under `--cyclic`), churns
+  random inserts/updates/deletes, and `verify`s per-table row-count + ordered content checksum.
+- **Redis** — [`test/loadgen-redis`](../test/loadgen-redis/README.md). Seeds every value type
+  (string/hash/list/set/zset/stream + big/TTL'd keys) plus a source-only `lgskip:*` cohort the sync
+  must exclude, churns value mutations, `RENAME`s, and heavy `DEL`s (the delete-reconciliation
+  stress), and `verify`s a version-independent, type-aware content hash + TTL presence. Standalone,
+  sentinel, and cluster.
+
+Each README documents the full end-to-end rig (two databases, a Postgres state store, a config, the
+daemon, and a churn-and-verify loop). `task loadgen:*` and `task loadgen-redis:*` are the shortcuts.
+These are distinct from the automated Go suite (`task test:integration`).
