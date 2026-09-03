@@ -7,6 +7,7 @@
 # Stray binaries from `go build` without -o (built into the repo root).
 /replicare
 /loadgen
+/loadgen-redis
 
 # Coverage
 coverage.txt
