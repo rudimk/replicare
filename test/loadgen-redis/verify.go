@@ -155,7 +155,7 @@ func valueReader(ctx context.Context, p goredis.Pipeliner, k, typ, ttl string) f
 		return func() string {
 			var b strings.Builder
 			for _, z := range c.Val() {
-				b.WriteString(fmt.Sprint(z.Member))
+				fmt.Fprint(&b, z.Member)
 				b.WriteByte('=')
 				b.WriteString(strconv.FormatFloat(z.Score, 'g', -1, 64))
 				b.WriteByte('\x00')
@@ -208,7 +208,7 @@ func canonAnyMap(m map[string]any) string {
 	for _, f := range fields {
 		b.WriteString(f)
 		b.WriteByte('=')
-		b.WriteString(fmt.Sprint(m[f]))
+		fmt.Fprint(&b, m[f])
 		b.WriteByte('\x00')
 	}
 	return b.String()
