@@ -8,6 +8,14 @@
 - **[Kubernetes (Helm)](kubernetes.md)** — deploy the daemon with the Helm chart.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 
+### Design notes (forward-looking)
+
+- **[Multi-master replication](multi-master.md)** — design note for active-active
+  (multi-master) across Postgres, MySQL, and Redis: what exists today (one-way,
+  source-authoritative), why naive bidirectional wiring breaks, the mechanisms and
+  config-schema changes it would take, and the invariants that keep the existing
+  one-way path unchanged. **Not implemented — a plan.**
+
 ### Engine pages
 
 Postgres, MySQL, and Redis are all shipped. The shared docs above describe the
