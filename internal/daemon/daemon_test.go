@@ -185,6 +185,130 @@ syncs:
 	}
 }
 
+// TestDaemonFanOutTwoTargets is the MM2 acceptance: one source fans out to TWO
+// targets, each with its own independent initial-copy progress (keyed per
+// (sync, target, table)), and both converge from cold copy and stay converged
+// under a live mutation. Before MM2 the two targets shared one copy_progress row
+// and collided; this proves they no longer do.
+func TestDaemonFanOutTwoTargets(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	defer src.Close(context.Background())
+	tgt1 := dial(t, ctx, envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"))
+	defer tgt1.Close(context.Background())
+
+	// A second target DATABASE on the same target server (fan-out needs two
+	// distinct targets). CREATE/DROP DATABASE run outside a txn via autocommit.
+	const dst2DB = "replicare_dst2"
+	mustExec(t, ctx, tgt1, "DROP DATABASE IF EXISTS "+dst2DB+" WITH (FORCE)")
+	mustExec(t, ctx, tgt1, "CREATE DATABASE "+dst2DB)
+	tgt2 := dial(t, ctx, envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), dst2DB)
+
+	ddl := "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)"
+	for _, c := range []*pgx.Conn{src, tgt1, tgt2} {
+		mustExec(t, ctx, c, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		mustExec(t, ctx, c, "CREATE SCHEMA rc_it")
+		mustExec(t, ctx, c, ddl)
+	}
+	mustExec(t, ctx, src, "DROP SCHEMA IF EXISTS replicare CASCADE")
+	mustExec(t, ctx, tgt1, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	mustExec(t, ctx, src, "INSERT INTO rc_it.orders SELECT g, 'v'||g FROM generate_series(1,30) g")
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS replicare CASCADE")
+		_, _ = tgt1.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = tgt1.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+		_ = tgt2.Close(bg)
+		_, _ = tgt1.Exec(bg, "DROP DATABASE IF EXISTS "+dst2DB+" WITH (FORCE)")
+	})
+
+	cfgYAML := fmt.Sprintf(`
+logging: { level: warn, format: text }
+state_store:
+  engine: postgres
+  postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+sources:
+  src:
+    engine: postgres
+    postgres: { host: %[6]s, port: %[7]s, database: %[8]s, user: %[4]s, password: %[5]s, sslmode: disable }
+targets:
+  dst1:
+    engine: postgres
+    postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+  dst2:
+    engine: postgres
+    postgres: { host: %[1]s, port: %[2]s, database: %[9]s, user: %[4]s, password: %[5]s, sslmode: disable }
+syncs:
+  - name: fan
+    source: src
+    targets: [dst1, dst2]
+    include: ["rc_it.*"]
+    tuning: { drain_interval: 100ms }
+`,
+		envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"),
+		envd("RC_USER", "postgres"), envd("RC_PASSWORD", "postgres"),
+		envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"),
+		dst2DB)
+
+	cfg, err := config.Load(writeConfig(t, cfgYAML))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+
+	// Both targets converge from cold copy — independently.
+	if !pollUntil(t, 40*time.Second, func() bool {
+		return count(t, ctx, tgt1, "rc_it.orders") == 30 && count(t, ctx, tgt2, "rc_it.orders") == 30
+	}) {
+		t.Fatalf("fan-out initial copy did not converge: dst1=%d dst2=%d",
+			count(t, ctx, tgt1, "rc_it.orders"), count(t, ctx, tgt2, "rc_it.orders"))
+	}
+
+	// Per-target copy progress is independent: two rows (dst1, dst2) for the one
+	// table, keyed by target (the MM2 fix). State store lives on dst1's DB.
+	var progRows int
+	if err := tgt1.QueryRow(ctx,
+		"SELECT count(*) FROM replicare_state.copy_progress WHERE sync='fan' AND table_name='orders'").Scan(&progRows); err != nil {
+		t.Fatalf("count copy_progress: %v", err)
+	}
+	if progRows != 2 {
+		t.Errorf("copy_progress rows for orders = %d, want 2 (one per target)", progRows)
+	}
+
+	// A live mutation streams to BOTH targets.
+	mustExec(t, ctx, src, "INSERT INTO rc_it.orders VALUES (31, 'v31')")
+	mustExec(t, ctx, src, "DELETE FROM rc_it.orders WHERE id = 2")
+	if !pollUntil(t, 40*time.Second, func() bool {
+		return count(t, ctx, tgt1, "rc_it.orders") == 30 && count(t, ctx, tgt2, "rc_it.orders") == 30 &&
+			count(t, ctx, tgt1, "rc_it.orders WHERE id = 31") == 1 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 31") == 1 &&
+			count(t, ctx, tgt1, "rc_it.orders WHERE id = 2") == 0 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 2") == 0
+	}) {
+		t.Fatalf("streaming did not converge on both targets")
+	}
+
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon Run returned %v, want nil on graceful shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("daemon did not stop within 15s of cancellation")
+	}
+}
+
 // TestDaemonTwoConcurrentSyncs is the M7 concurrency acceptance: one daemon runs
 // two independent syncs at once, each converging its own schema.
 func TestDaemonTwoConcurrentSyncs(t *testing.T) {

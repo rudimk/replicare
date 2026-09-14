@@ -152,6 +152,12 @@ A sync is one replication job: a source, one or more targets, and a table
 selection. All targets of a sync must use the same engine as the source
 (never cross-engine).
 
+**Fan-out** (a sync with several `targets`) copies and streams each target
+**independently**: initial-copy progress is checkpointed per `(sync, target, table)`,
+so one slow or restarted target never disturbs another's watermark, and each
+converges on its own. (This is also the per-node building block of an
+active-active [cluster](#active-active-clusters-nodes-and-clusters).)
+
 ```yaml
 syncs:
   - name: app-to-warehouse    # unique; also the ownership-lock key

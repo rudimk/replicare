@@ -77,5 +77,43 @@ var schemaSet = migrate.Set{
 				)`,
 			},
 		},
+		{
+			Version: 2,
+			Name:    "copy_progress_per_target",
+			// Fan-out (and, later, an active-active mesh) copies each target
+			// independently, so initial-copy progress must be keyed per
+			// (sync, TARGET, table) — the original schema keyed only
+			// (sync, table), so two targets of one sync collided on a single row
+			// (fan-out was never hardened; CLAUDE.md §6 / multi-master plan MM2).
+			//
+			// In-place migration, progress-preserving (§14 — never drop-recreate):
+			// backfill the new target dimension from the cursors table (already
+			// target-keyed), so every (target, table) that has a cursor keeps its
+			// watermark and re-copies nothing. A copy_progress row with NO matching
+			// cursor can only exist mid-initial-copy before cutover; it has no target
+			// to attribute to and is dropped, so that one table re-copies once —
+			// idempotent and safe.
+			Statements: []string{
+				`ALTER TABLE replicare_state.copy_progress ADD COLUMN target text`,
+				// Drop the old PK so transient duplicate (sync,schema,table) rows are
+				// allowed while we fan the single row out to one row per target.
+				`ALTER TABLE replicare_state.copy_progress DROP CONSTRAINT copy_progress_pkey`,
+				`INSERT INTO replicare_state.copy_progress
+					(sync, target, schema_name, table_name, done, watermark, completed, updated_at)
+				 SELECT cp.sync, c.target, cp.schema_name, cp.table_name,
+				        cp.done, cp.watermark, cp.completed, cp.updated_at
+				 FROM replicare_state.copy_progress cp
+				 JOIN (SELECT DISTINCT sync, target, schema_name, table_name
+				       FROM replicare_state.cursors) c
+				   ON c.sync = cp.sync
+				  AND c.schema_name = cp.schema_name
+				  AND c.table_name = cp.table_name
+				 WHERE cp.target IS NULL`,
+				`DELETE FROM replicare_state.copy_progress WHERE target IS NULL`,
+				`ALTER TABLE replicare_state.copy_progress ALTER COLUMN target SET NOT NULL`,
+				`ALTER TABLE replicare_state.copy_progress
+				   ADD CONSTRAINT copy_progress_pkey PRIMARY KEY (sync, target, schema_name, table_name)`,
+			},
+		},
 	},
 }

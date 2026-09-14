@@ -34,6 +34,7 @@ func TestCopyProgressResumeAfterRestart(t *testing.T) {
 
 	tbl := engine.TableRef{Schema: "public", Name: "orders"}
 	saved := state.CopyProgress{
+		Target:    "dst",
 		Table:     tbl,
 		Done:      false,
 		Watermark: engine.KeyValues{"c100"},
@@ -48,7 +49,7 @@ func TestCopyProgressResumeAfterRestart(t *testing.T) {
 
 	// Restart: a brand-new Store must resume from exactly the saved progress.
 	s2 := reopen(t, ctx)
-	got, err := s2.LoadCopyProgress(ctx, "s1", tbl)
+	got, err := s2.LoadCopyProgress(ctx, "s1", "dst", tbl)
 	if err != nil {
 		t.Fatalf("LoadCopyProgress: %v", err)
 	}
@@ -66,7 +67,7 @@ func TestCopyProgressFreshWhenAbsent(t *testing.T) {
 	}
 
 	tbl := engine.TableRef{Schema: "public", Name: "never_copied"}
-	got, err := s.LoadCopyProgress(ctx, "s1", tbl)
+	got, err := s.LoadCopyProgress(ctx, "s1", "dst", tbl)
 	if err != nil {
 		t.Fatalf("LoadCopyProgress: %v", err)
 	}
@@ -89,10 +90,10 @@ func TestCopyProgressIntegerKeyPrecision(t *testing.T) {
 	// A large integer key beyond float64's exact range must survive as JSON.
 	const big = int64(9007199254740993) // 2^53 + 1
 	tbl := engine.TableRef{Schema: "public", Name: "big"}
-	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Table: tbl, Watermark: engine.KeyValues{big}}); err != nil {
+	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Target: "dst", Table: tbl, Watermark: engine.KeyValues{big}}); err != nil {
 		t.Fatalf("SaveCopyProgress: %v", err)
 	}
-	got, err := reopen(t, ctx).LoadCopyProgress(ctx, "s1", tbl)
+	got, err := reopen(t, ctx).LoadCopyProgress(ctx, "s1", "dst", tbl)
 	if err != nil {
 		t.Fatalf("LoadCopyProgress: %v", err)
 	}

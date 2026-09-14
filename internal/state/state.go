@@ -15,10 +15,14 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// CopyProgress is a table's initial-copy progress: a completed-range high-water
-// mark plus a sparse set of out-of-order completed ranges, so a restart skips
-// finished chunks (CLAUDE.md §4.1).
+// CopyProgress is a table's initial-copy progress for ONE target: a
+// completed-range high-water mark plus a sparse set of out-of-order completed
+// ranges, so a restart skips finished chunks (CLAUDE.md §4.1). Progress is keyed
+// per (sync, target, table): fan-out copies each target independently, so their
+// watermarks must not collide (the mesh in multi-master is built on this — every
+// node fans out to its peers).
 type CopyProgress struct {
+	Target    engine.TargetID
 	Table     engine.TableRef
 	Done      bool
 	Watermark engine.KeyValues // everything strictly below this key is copied
@@ -94,9 +98,10 @@ type StateStore interface {
 	GetSync(ctx context.Context, name string) (SyncDef, error)
 	ListSyncs(ctx context.Context) ([]SyncDef, error)
 
-	// Initial-copy progress (per sync, per table).
+	// Initial-copy progress (per sync, per target, per table). The target is
+	// carried in p for Save and passed explicitly for Load.
 	SaveCopyProgress(ctx context.Context, sync string, p CopyProgress) error
-	LoadCopyProgress(ctx context.Context, sync string, t engine.TableRef) (CopyProgress, error)
+	LoadCopyProgress(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (CopyProgress, error)
 
 	// Streaming cursors (per sync, per target, per table).
 	SaveCursor(ctx context.Context, sync string, c Cursor) error

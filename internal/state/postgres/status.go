@@ -19,10 +19,10 @@ func (s *Store) ListCopyProgress(ctx context.Context, sync string) ([]state.Copy
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT schema_name, table_name, done, watermark, completed, updated_at
+		SELECT target, schema_name, table_name, done, watermark, completed, updated_at
 		FROM replicare_state.copy_progress
 		WHERE sync = $1
-		ORDER BY schema_name, table_name`, sync)
+		ORDER BY target, schema_name, table_name`, sync)
 	if err != nil {
 		return nil, fmt.Errorf("statepg: list copy progress for %s: %w", sync, err)
 	}
@@ -32,12 +32,14 @@ func (s *Store) ListCopyProgress(ctx context.Context, sync string) ([]state.Copy
 	for rows.Next() {
 		var (
 			p             state.CopyProgress
+			target        string
 			watermarkJSON []byte
 			completedJSON []byte
 		)
-		if err := rows.Scan(&p.Table.Schema, &p.Table.Name, &p.Done, &watermarkJSON, &completedJSON, &p.UpdatedAt); err != nil {
+		if err := rows.Scan(&target, &p.Table.Schema, &p.Table.Name, &p.Done, &watermarkJSON, &completedJSON, &p.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("statepg: scan copy progress: %w", err)
 		}
+		p.Target = engine.TargetID(target)
 		if p.Watermark, err = decodeKeyValues(watermarkJSON); err != nil {
 			return nil, fmt.Errorf("statepg: decode watermark: %w", err)
 		}

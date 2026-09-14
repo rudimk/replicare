@@ -111,7 +111,7 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
 			s.Tel.AddRowsCopied(s.Name, t, n)
 		})
-		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress); err != nil {
+		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, progress); err != nil {
 			return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
 		}
 	}
@@ -147,13 +147,13 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
 			s.Tel.AddRowsCopied(s.Name, t, n)
 		})
-		return copy.Component(ctx, s.Workers, s.Store, s.Name, comp.Order, s.ChunkOpts, progress)
+		return copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, progress)
 	}
 
 	// Coarse resume: skip if every table in the component is already copied.
 	done := 0
 	for _, t := range comp.Order {
-		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, t)
+		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t)
 		if err != nil {
 			return fmt.Errorf("syncer %s: cyclic copy: load progress %s: %w", s.Name, t, err)
 		}
@@ -170,7 +170,7 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 	}
 	// Mark every table copied so cutover proceeds and a restart resumes.
 	for _, t := range comp.Order {
-		if err := s.Store.SaveCopyProgress(ctx, s.Name, state.CopyProgress{Table: t, Done: true}); err != nil {
+		if err := s.Store.SaveCopyProgress(ctx, s.Name, state.CopyProgress{Target: s.Target, Table: t, Done: true}); err != nil {
 			return fmt.Errorf("syncer %s: cyclic copy: mark done %s: %w", s.Name, t, err)
 		}
 	}

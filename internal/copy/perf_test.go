@@ -31,7 +31,7 @@ func TestPerfCopyThroughput(t *testing.T) {
 	workers := f.newWorkers(t, ctx, 4)
 
 	start := time.Now()
-	if err := Component(ctx, workers, f.store, f.syncName, []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 5000}); err != nil {
+	if err := Component(ctx, workers, f.store, f.syncName, "dst", []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 5000}); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	elapsed := time.Since(start)
