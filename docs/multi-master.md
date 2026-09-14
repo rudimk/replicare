@@ -13,18 +13,28 @@ multi-master mode would need per engine, the config-schema changes, and a phased
 plan. It is written to sit alongside `CLAUDE.md` (multi-master is listed there as
 roadmap, §6/§14) and the per-engine pages.
 
+**Direction set by the project owner (v3):** full active-active is required on **all
+three engines, Redis included (not deferred)**; **N-node full mesh** (no fixed node
+count); conflict resolution must need **no user schema change and no user-specified
+column** (replicare manages a hidden version itself — §5.3); **no priority-fencing**;
+tombstones live in the `replicare` schema and are **GC'd**; it must work with **no
+superuser anywhere**; the config surface is **`clusters:`**. The milestone-level plan is
+[`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md).
+
 ---
 
 ## 1. Goal
 
-Keep **N database instances (typically 3, across different clouds) converged**,
-where writes may land on **any** node — i.e. **active-active / multi-master**, not
-just one writer fanned out to read replicas. A ring (`A→B→C→A`) and a full mesh
-(every node ↔ every node) are both in scope; the mesh is the harder, more useful
-target.
+Keep **N database instances (across different clouds) converged**, where writes may land
+on **any** node — i.e. **active-active / multi-master**, not just one writer fanned out to
+read replicas. The target topology is a **full mesh of any N** (every node ↔ every node —
+**no fixed node count**; 3 is only a common example). Ring / partial-mesh *forwarding* is
+a deferred efficiency variant (§5.2); the version register (§5.3) already makes such
+topologies *safe*.
 
-This is distinct from what replicare can do **today** (see §3): one authoritative
-source fanned out to one or more **read-only** targets.
+This is distinct from what replicare does **today**: one authoritative source fanned out
+to one or more **read-only** targets (§3) — which becomes the per-node building block of
+the mesh rather than the end state.
 
 ---
 
@@ -96,24 +106,21 @@ with file references, because the design has to work *with* them:
 
 ---
 
-## 3. What replicare can already do that may be "good enough"
+## 3. The fan-out building block (a prerequisite, not an alternative)
 
-If the real requirement is *"the same data in three clouds"* and you can accept a
-**single writer**, replicare already fits without any of this work: designate one
-**authoritative primary** and fan out to two **read-only** replicas (one source → N
-targets). All writes go to the primary; the replicas stay converged.
+A single-writer **fan-out** — one authoritative primary → N **read-only** replicas (one
+source → N targets) — keeps N instances converged *when all writes go to the primary*.
+The owner requires **symmetric active-active** (writes on any node), so fan-out is **not**
+the endpoint here — but it is the **building block the mesh is made of**: each cluster node
+fans its local changes out to its N−1 peers. So hardening fan-out is the first substantive
+milestone (§8 phase 2), on the critical path.
 
-Caveats to close first even for this path:
-- Fan-out is *present, not hardened* and **untested end-to-end**; initial-copy
-  progress must be re-keyed to include the target before it is trustworthy for 2+
-  targets.
-- Nothing enforces "read-only" on the replicas — application discipline (or engine
-  ACLs / `default_transaction_read_only`) must guarantee no writes land there, or
-  you are back in multi-master territory.
-
-**Recommendation:** if single-writer is acceptable, harden fan-out (a small,
-well-scoped project) instead of building multi-master. The rest of this note is for
-the case where writes genuinely must be accepted on multiple nodes.
+Caveats it must close (they matter for the mesh too):
+- Fan-out is *present, not hardened* and **untested end-to-end**; initial-copy progress
+  must be re-keyed to include the target before it is trustworthy for 2+ targets.
+- Nothing enforces "read-only" on a plain fan-out target — but in a cluster every node is
+  intentionally writable, and correctness there comes from the version register + HLC-LWW
+  (§5.3), not from read-only discipline.
 
 ---
 
@@ -190,32 +197,55 @@ Per-engine mechanism for (1):
   (`DUMP`/`RESTORE` is verbatim, §1.7 forbids wrapping it), so this metadata lives in a
   **parallel metadata keyspace** (see 5.4).
 
-For sub-problem (2) (forwarding), the delta row gains an **origin column** populated
-from the marker (NULL/local = "written here", else the upstream origin). A forwarding
-edge skips deltas whose origin is the destination node and preserves the original
-origin across hops.
+**v1 is full-mesh only, so sub-problem (2) does not arise** — every node ships directly
+to every other, so skip-suppression alone prevents loops, and the **version register
+(§5.3) is the correctness backstop**: any change that is re-delivered but not newer is a
+no-op, so a stray loop is self-limiting (this is also what makes ring/partial topologies
+*safe* to add later). The source-side **origin column** and hop-to-hop forward-suppression
+(skip deltas whose origin is the destination; preserve origin across hops) are only needed
+to make **ring/partial meshes efficient** and are **deferred post-v1** — which keeps the
+one-way delta table DDL literally unchanged in v1.
 
-### 5.3 Conflict resolution
+**Bootstrapping a new member** uses the same marker: the initial copy / reseed *into* a
+member runs with `replicare.apply` / `@replicare_apply` set (so its cold-copy writes are
+not self-captured into an echo storm) **and seeds the version register** from the source's
+register, so copied rows carry their true `(hlc, node)` rather than a fresh local stamp.
+
+### 5.3 Conflict resolution — zero-config, replicare-managed
 
 replicare deliberately has **no commit-order signal** (the entire trigger-CDC premise;
-`CLAUDE.md` §3.3). So it cannot do true causal ordering. Realistic policies, chosen
-per mesh (and defaulting conservatively):
+`CLAUDE.md` §3.3), so it cannot do true causal ordering. And a hard product requirement:
+**conflict resolution must need no user schema change and no user-specified column.**
+The **primary key cannot be the tiebreaker** — it is the *conflict key* (two colliding
+writes share it), so it says *which* rows conflict, never *which value wins*. Resolution
+needs something **ordered**, and we will not ask the user to add it.
 
-- **`source-priority`** — a static total order of nodes; on a tie the higher-priority
-  node wins. Deterministic, needs no per-row version, crude but safe. Good default.
-- **`lww` (last-write-wins)** — requires a **trusted, monotonic per-row version**
-  (a user-designated column: an app-maintained `updated_at`/version, or a sequence).
-  Apply compares it: `… ON CONFLICT (pk) DO UPDATE … WHERE excluded.<ver> >
-  target.<ver>` (Postgres) / an equivalent guarded upsert (MySQL). **Wall-clock LWW
-  across clouds is unsafe** (skew), so the version column must be app-guaranteed
-  monotonic or a hybrid-logical-clock the app maintains — replicare documents the
-  requirement and refuses `lww` for a table without a declared version column.
-- **`custom`** — a pluggable resolver hook. Deferred; the interface should not be
-  precluded.
+**So replicare maintains the version itself, invisibly:** for every replicated row/key it
+keeps a hidden record **`PK → (hlc, origin_node)`** in its **own `replicare` schema** — a
+side "version register" table (Postgres/MySQL) or the metadata keyspace (Redis), never a
+column on the user's tables. `hlc` is a **hybrid logical clock** (`max(physical_now,
+last_seen_hlc) + logical_tick`): monotonic, wall-clock-tracking, causality-respecting.
+Every change is stamped `(hlc, node_id)`; the **`node_id` breaks equal-HLC ties**, so the
+order is **total, with no ties**.
 
-Deletes complicate every policy: a delete on one node vs. an update on another needs
-**tombstones carrying origin+version** so the resolver can compare a deletion against
-an update. This is the hardest part and is called out as an open question (§9).
+- **The one policy is HLC last-write-wins, zero-config.** On apply of an incoming change
+  for `PK`, compare `(hlc_in, node_in)` against the register's stored `(hlc, node)`:
+  apply the value **and** update the register iff strictly greater, else **no-op**; then
+  advance the local HLC past `hlc_in`. This is a **LWW-register CRDT** (a join-semilattice
+  max) → it **converges for any number of nodes regardless of message order**.
+- **No priority-fencing, no user version column, no `custom` resolver in v1.** The policy
+  interface stays open for a future custom resolver, but v1 ships exactly this default and
+  there is nothing to configure beyond declaring cluster membership.
+
+**Cost, stated honestly:** the register is ~one small row per replicated row (PK + ~16
+bytes) — the size of an extra index. That is the price of touching none of the user's
+schema (the rejected alternative was a version column on user tables).
+
+Deletes are **tombstones carrying `(hlc, node_id)`** in the same register/keyspace, so a
+delete competes with a concurrent update under the same total order. Tombstones **and**
+version records for deleted keys are **GC'd** once every peer has observed a version ≥
+them (a per-cluster min-observed watermark across peers' cursors), keeping the source
+footprint bounded (§3.4).
 
 ### 5.4 Redis specifics (the hardest engine)
 
@@ -238,10 +268,12 @@ Redis needs the most new machinery because it is capture-less and value-opaque:
   hash-field-level) are out of scope — that is what Redis Enterprise Active-Active
   (CRDB) does with CRDTs, a different architecture we are not rebuilding.
 
-Honest assessment: full active-active Redis is a **near-rewrite** of the Redis CDC
-model and carries the most risk. A staged option is to support Postgres/MySQL
-multi-master first and keep Redis single-writer-fan-out until the metadata/tombstone
-model is proven.
+Honest assessment: full active-active Redis is a **near-rewrite** of the Redis CDC model
+and carries the most risk of the three engines. It is nonetheless **in scope and
+co-equal — not deferred** (a hard requirement): Redis gets the same `(hlc, node_id)`
+version register as Postgres/MySQL, here realized as the metadata keyspace, and the same
+HLC-LWW resolution. It sequences *after* the Postgres milestones only because it reuses
+their neutral version-register/tombstone abstractions, not because it can be dropped.
 
 ### 5.5 Ownership, cursors, topology expansion
 
@@ -258,11 +290,14 @@ model is proven.
 
 ## 6. Config-schema changes
 
-**Design principle: additive and opt-in.** Because parsing is strict and validation
-is per-sync, existing configs (no new keys) must be byte-for-byte valid and behave
-identically. Multi-master is expressed by **new, optional** constructs; the existing
-`sources` / `targets` / `syncs` schema is untouched, and a config with no mesh is
-exactly today's one-way daemon.
+**Design principle: additive and opt-in.** Existing configs (no new keys) must be
+byte-for-byte valid and behave identically. Multi-master is expressed by **new, optional**
+constructs; the existing `sources` / `targets` / `syncs` schema is untouched, and a config
+with no `clusters:` block is exactly today's one-way daemon.
+
+> **Naming note.** A replicare **`clusters:`** entry is a set of active-active *peer
+> nodes* — do not confuse it with a Redis endpoint's `mode: cluster` (one *sharded*
+> Redis). Different scopes; the docs disambiguate.
 
 ### 6.1 New: `node_id` on an endpoint (optional)
 
@@ -270,71 +305,71 @@ exactly today's one-way daemon.
 sources:
   us:
     engine: postgres
-    node_id: us-east          # NEW, optional; required only for mesh members
+    node_id: us-east          # NEW, optional; required only for cluster members
     postgres: { host: ..., ... }
 ```
 
-Stable origin identity. Optional and ignored on the one-way path.
+Stable origin identity — the value stamped into every change's `(hlc, node_id)`. Optional
+and ignored on the one-way path.
 
-### 6.2 New: a `meshes:` block (optional, top-level)
+### 6.2 New: a `clusters:` block (optional, top-level)
 
-A mesh names its member nodes (each of which is an endpoint that is simultaneously a
-source and a target), the topology, the conflict policy, and the selection/tuning —
-mirroring a `sync` but bidirectional. The daemon expands it into origin-aware directed
-edges internally.
+A cluster names its member nodes (each an endpoint that is simultaneously a source and a
+target), the topology, and the selection/tuning — mirroring a `sync` but multi-directional.
+**There is no conflict policy to configure:** resolution is the zero-config,
+replicare-managed HLC last-write-wins of §5.3 (no version column, no priority). The daemon
+expands the cluster into the full set of directed edges internally.
 
 ```yaml
-# Existing one-way syncs keep working, unchanged, alongside meshes.
+# Existing one-way syncs keep working, unchanged, alongside clusters.
 syncs:
   - name: analytics-fanout
     source: us
     targets: [warehouse]
     include: ["public.*"]
 
-meshes:                          # NEW, entirely optional
+clusters:                        # NEW, entirely optional
   - name: global-app
     engine: postgres             # single-engine, like a sync
-    members: [us, eu, ap]        # endpoint names; each is source AND target
-    topology: mesh               # mesh | ring | explicit
-    conflict:
-      policy: lww                # source-priority | lww | custom
-      version_column: updated_at # required for lww (per-table override allowed)
-      # priority: [us, eu, ap]   # required for source-priority
+    members: [us, eu, ap]        # endpoint names; each is source AND target; any N >= 2
+    topology: mesh               # v1: full mesh (ring/partial deferred)
     include: ["public.*"]
     exclude: ["*_audit"]
     tuning: { drain_interval: 1s }
+    # No conflict block: HLC-LWW is automatic (§5.3). Nothing to declare.
 ```
 
 Notes:
-- `members` reference endpoint definitions; for a mesh each member must carry a
-  `node_id` and be reachable as both read (capture+snapshot) and write (apply).
-- `topology: explicit` would take an `edges: [[us, eu], [eu, ap], ...]` list for
-  rings/partial meshes; `mesh` and `ring` are conveniences that expand automatically.
-- The engine registry still owns per-engine connection parsing; `meshes` adds only
-  neutral wiring + conflict policy, consistent with the `sync` model.
+- `members` reference endpoint definitions; each must carry a `node_id` and be reachable
+  as both read (capture+snapshot) and write (apply). **Any N ≥ 2** — no 3-node limit.
+- `topology: mesh` is the only v1 value (full mesh, N·(N−1) edges); `ring`/`explicit`
+  (partial) are deferred with the origin-column forwarding work (§5.2).
+- The engine registry still owns per-engine connection parsing; `clusters` adds only
+  neutral wiring, consistent with the `sync` model.
 
 ### 6.3 New validation (and a safety fix for the one-way path)
 
 `Config.Validate()` gains:
-1. **Mesh validation** — single-engine members; every member has a `node_id`;
-   `lww` requires a `version_column`; `source-priority` requires a `priority` list
-   covering all members; no member endpoint reused in a conflicting plain sync.
-2. **Cycle detection for plain `syncs`** — refuse (or loudly warn on) an *un-declared*
-   cycle among one-way syncs (`A→B` + `B→A`, or a ring) that is **not** part of a
-   `meshes` block. This closes the silent-corruption footgun in §4 and is worth doing
-   **independently** of the rest of this note. It only *adds* a rejection for a
-   configuration that is already broken today, so it does not affect any valid one-way
-   config.
+1. **Cluster validation** — single-engine members; every member has a `node_id`;
+   `topology: mesh` only (v1); no member endpoint reused in a conflicting plain sync.
+   (No conflict-policy validation — there is no policy to configure.)
+2. **Cycle detection for plain `syncs`** — refuse an *un-declared* cycle among one-way
+   syncs (`A→B` + `B→A`, or a ring) not part of a `clusters:` block. Closes the
+   silent-corruption footgun in §4, worth doing **independently**. It only *adds* a
+   rejection for a config already broken today, so no valid one-way config is affected.
 
 ### 6.4 State-store & source-schema changes
 
-- **Delta tables** gain an optional `origin` column (PG/MySQL); one-way consumption
-  ignores it (default/NULL = local). Applied via the existing **in-place, idempotent
+- **The one-way delta table is unchanged** — v1 adds **no column** to it (a full mesh
+  needs no origin column; §5.2). The **version register** (`PK → (hlc, node_id,
+  deleted?)`) and **tombstones** are **new, mesh-only tables** in the `replicare` schema,
+  created only for cluster tables. Applied via the existing **in-place, idempotent
   migration runner** with a `schema_version` bump that **preserves in-flight
-  deltas/cursors** (`CLAUDE.md` §14 "schema versioning") — never drop-recreate.
-- **Cursors** extend their key with mesh/edge + origin for mesh syncs; the existing
+  deltas/cursors** (`CLAUDE.md` §14) — never drop-recreate.
+- **Cursors** extend their key with cluster/edge for cluster members; the existing
   `(sync, target, table)` shape is unchanged for one-way.
-- **Redis** adds the metadata keyspace (5.4); nothing changes for one-way Redis.
+- **Redis** adds the metadata keyspace (the register + tombstones, §5.4); nothing changes
+  for one-way Redis.
 
 ---
 
@@ -343,7 +378,7 @@ Notes:
 Every change above is designed so the **one-way path is provably unchanged**. The
 invariants:
 
-1. **Config.** No `meshes:` and no `node_id:` ⇒ identical parse and identical
+1. **Config.** No `clusters:` and no `node_id:` ⇒ identical parse and identical
    behaviour. New keys are optional; strict parsing still rejects genuine typos. The
    only new *rejection* is an un-declared cycle among one-way syncs — a config that is
    already corrupt today, never a working one.
@@ -355,71 +390,82 @@ invariants:
      guard is irrelevant there.
    - The guard defaults to "capture" when the marker is unset, so any non-replicare
      write is still captured. Origin-aware triggers are only *installed* for tables
-     that participate in a mesh; one-way tables keep today's trigger DDL.
-3. **Apply path.** The apply marker / conflict-policy comparison is only engaged for
-   mesh edges. One-way apply remains blind source-wins overwrite + delete-to-match,
-   unchanged.
-4. **Delta schema.** The new `origin` column is nullable and ignored by one-way
-   consumption; the migration preserves in-flight state.
+     that participate in a cluster; one-way tables keep today's trigger DDL.
+3. **Apply path.** The apply marker + HLC-LWW version comparison are only engaged for
+   cluster edges. One-way apply remains blind source-wins overwrite + delete-to-match,
+   unchanged, and writes no version register.
+4. **Delta schema.** **v1 adds no column to the delta table** — the version register and
+   tombstones are separate, mesh-only tables. One-way delta DDL is literally unchanged;
+   migrations preserve in-flight state.
 5. **Redis.** The metadata keyspace, tombstones, and delete-diff redesign are gated to
-   mesh mode. One-way Redis keeps the stateless SCAN-reconcile + target-vs-source
+   cluster mode. One-way Redis keeps the stateless SCAN-reconcile + target-vs-source
    delete sweep verbatim.
 6. **Tests.** The entire existing one-way integration suite (PG/MySQL/Redis, plus the
    `test/loadgen` and `test/loadgen-redis` convergence harnesses) must pass
-   **unchanged**. Multi-master gets its own harness (a 3-node mesh convergence +
+   **unchanged**. Multi-master gets its own harness (an N-node cluster convergence +
    conflict test) rather than modifying the one-way tests.
 
-Rollout is feature-flagged by the presence of a `meshes:` block: a daemon with none
+Rollout is feature-flagged by the presence of a `clusters:` block: a daemon with none
 compiles and runs exactly as before.
 
 ---
 
 ## 8. Phased plan
 
-Ordered so each phase is independently shippable and low-risk-first:
+Ordered so each phase is independently shippable and low-risk-first. The detailed,
+milestone-by-milestone version (with acceptance criteria + a per-milestone BC proof) is
+[`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md); this is the summary:
 
 1. **Cycle-detection guardrail (small, do first).** Make `Config.Validate()` refuse an
    un-declared one-way cycle. Pure safety, no behaviour change for valid configs.
-   Closes the §4 footgun immediately.
-2. **Harden fan-out (small–medium).** Re-key initial-copy progress by target; add a
-   2+-target end-to-end test. Delivers the single-writer-across-clouds story (§3)
-   without any multi-master risk.
-3. **Origin plumbing — Postgres (medium).** `node_id`; delta `origin` column +
-   migration; `replicare.apply` GUC + trigger `WHEN` guard; apply sets the marker.
-   Prove no-loop on a 2-node PG mesh with `source-priority`.
-4. **Conflict resolution — Postgres (medium).** `lww` with a declared version column;
-   guarded upsert; tombstones for delete/update conflicts. 3-node PG mesh convergence
-   + conflict harness.
-5. **MySQL mesh (medium).** Mirror 3–4 with the `@replicare_apply` user-variable guard
-   in all three trigger bodies; reset-on-release alongside `FOREIGN_KEY_CHECKS`.
-6. **Redis mesh (large / highest-risk).** Metadata keyspace, tombstone-based delete
-   reconciliation, LWW via metadata version. Keep Redis single-writer until this is
-   proven.
-7. **HA / leader election (cross-cutting, before "production-ready").** `pg_advisory_lock`
-   leader election + cursor fencing, so a mesh can't split-brain.
+2. **Harden fan-out (small–medium; a mesh *prerequisite*).** Re-key initial-copy progress
+   by target; add a 2+-target test. Each cluster node fans out to its N−1 peers, so this
+   is on the critical path (and independently delivers single-writer fan-out).
+3. **Postgres loop suppression + version register + bootstrap (medium).** `node_id`; the
+   HLC + version register in the `replicare` schema; `replicare.apply` GUC + trigger
+   `WHEN` guard; apply *and cluster-bootstrap copy* set the marker and seed the register.
+   Prove no-loop + no-echo on a 2-node PG mesh, no superuser.
+4. **Postgres HLC-LWW + tombstones + GC (medium).** Version-guarded upsert over
+   `(hlc, node_id)`; tombstones; coordinated GC. N-node PG convergence + conflict harness.
+5. **MySQL mesh (medium).** Mirror 3–4 with the `@replicare_apply` user-variable guard in
+   all three trigger bodies; reset-on-release alongside `FOREIGN_KEY_CHECKS`.
+6. **Redis mesh (large / highest-risk, but co-equal — NOT deferred).** Metadata keyspace
+   as the version register + tombstones; tombstone/version-aware delete reconciliation;
+   HLC-LWW via the metadata `(hlc, node)`. Sequenced after 4 (reuses its abstractions).
+7. **Cluster lifecycle (retention/reseed).** Reseed runs marked, seeds the register, and
+   never resurrects a tombstoned key.
+8. **HA / leader election (before "production-ready").** Per-edge `pg_advisory_lock`
+   leader election + cursor fencing, so a cluster can't split-brain.
 
 ---
 
 ## 9. Open questions / risks
 
-- **Trusted version for LWW.** Wall-clock is unsafe across clouds; requiring an
-  app-maintained monotonic column shifts burden to the user. Is `source-priority`
-  enough as the only v1 policy, with `lww` gated behind a documented version-column
-  contract?
-- **Delete/update conflicts** need tombstones with origin+version on all engines;
-  tombstone GC (when is it safe to forget a delete?) is its own sub-design.
-- **Redis metadata atomicity & cost.** A metadata entry per key doubles key count and
+- **Version-register cost.** ~1 row per replicated row (PK + `(hlc, node_id)`) — the
+  accepted price of zero user-schema change (the rejected alternative was a version
+  column on user tables). Index-sized but non-trivial for very large tables; measured as
+  milestone acceptance.
+- **HLC clock skew.** The `node_id` tie in `(hlc, node_id)` guarantees a *total* order,
+  so nodes always converge to the *same* winner regardless of skew; skew only affects
+  which of two truly-concurrent writes is deemed "latest" (a bounded wobble, never
+  divergence). Document the assumed max skew and surface an HLC-skew metric.
+- **Tombstone/register GC coordination.** A per-cluster min-observed-version watermark
+  across peers (no global coordinator) — sub-design before the GC milestone ships. Live
+  keys keep their register row; only tombstones + deleted-key records are collected.
+- **Redis metadata atomicity & cost.** A metadata entry per key ~doubles key count and
   needs Lua/`MULTI` atomicity; big-key and cluster-slot interactions need care (the
-  metadata key must hash to the same slot as its value key — a hash-tag scheme like
-  the load-gen harness uses).
-- **Least-privilege.** The PG `replicare.apply` GUC and MySQL user-variable guards are
-  grantable (no superuser) — this must be re-verified against real managed offerings
-  (RDS/Cloud SQL) as part of phase 3/5, and the grants docs updated.
-- **Schema drift across mesh members.** One-way assumes the target schema pre-exists;
-  a mesh assumes *all* members share a compatible schema. Pre-flight must check every
+  metadata key must hash-tag to its value key's slot). The single biggest risk item.
+- **Least-privilege, everywhere.** The PG `replicare.apply` GUC and MySQL user-variable
+  guards are grantable (no superuser); re-verified against managed offerings (RDS/Cloud
+  SQL/etc.) as milestone acceptance, and the grants docs updated. **No superuser is
+  required anywhere.**
+- **Schema drift across members.** One-way assumes the target schema pre-exists; a
+  cluster assumes *all* members share a compatible schema. Pre-flight must check every
   member pair, not just source→target.
-- **Faithful transport (§1.7) is preserved** — none of this transforms values; origin/
-  version are *metadata about* a change, never a mutation of the replicated value.
+- **Full-mesh edge scaling.** N·(N−1) directed edges — fine for small-to-moderate N;
+  beyond ~tens of nodes a hub/ring (the deferred forwarding work) would be preferable.
+- **Faithful transport (§1.7) is preserved** — none of this transforms values; the HLC
+  version/origin are *metadata about* a change, never a mutation of the replicated value.
 
 ---
 
@@ -427,14 +473,17 @@ Ordered so each phase is independently shippable and low-risk-first:
 
 | Capability | PG today | MySQL today | Redis today | Needed for multi-master |
 |---|---|---|---|---|
-| Loop suppression | ✗ (no trigger guard) | ✗ (no guard, no `session_replication_role`) | ✗ (re-RESTORE loop) | `replicare.apply` GUC guard / `@replicare_apply` var guard / metadata-gated reconcile |
-| Conflict resolution | ✗ (blind overwrite) | ✗ (blind overwrite) | ✗ (blind RESTORE) | `source-priority` (default) or `lww` w/ version column; tombstones for deletes |
-| Origin identity | ✗ | ✗ | ✗ | `node_id` + delta `origin` column / Redis metadata keyspace |
-| Topology / cycle safety | ✗ (silent cycles) | ✗ | ✗ | `meshes:` block + cycle-detection validation |
-| Delete handling in mesh | delete-to-match | delete-to-match | destructive diff | tombstone-based, origin/version-aware |
+| Loop suppression | ✗ (no trigger guard) | ✗ (no guard, no `session_replication_role`) | ✗ (re-RESTORE loop) | `replicare.apply` GUC guard / `@replicare_apply` var guard + version-comparison backstop |
+| Conflict resolution | ✗ (blind overwrite) | ✗ (blind overwrite) | ✗ (blind RESTORE) | **replicare-managed HLC-LWW over `(hlc, node_id)`** — zero user schema change; tombstones for deletes |
+| Version register / origin | ✗ | ✗ | ✗ | `node_id` + a hidden `PK → (hlc, node)` register in the `replicare` schema / Redis metadata keyspace |
+| Topology / cycle safety | ✗ (silent cycles) | ✗ | ✗ | `clusters:` block (full mesh, any N) + cycle-detection validation |
+| Delete handling in a cluster | delete-to-match | delete-to-match | destructive diff | tombstone-based, `(hlc, node)`-aware, GC'd |
 | One-way path | ✓ | ✓ | ✓ | **must remain unchanged (§7)** |
 
-Multi-master is a substantial, multi-phase project, not a config toggle — heaviest on
-Redis. The one-way, source-authoritative path stays the default and is protected by
-the §7 invariants throughout. If a single writer is acceptable, hardening fan-out (§3,
-phase 2) delivers "same data in three clouds" far sooner and at a fraction of the risk.
+Multi-master is a substantial, multi-phase project across **all three engines (Redis
+included, not deferred)** — heaviest on Redis. Conflict resolution is **zero-config**
+(replicare-managed HLC-LWW; no user column, no schema change, `clusters:` just declares
+membership). The one-way, source-authoritative path stays the default and is protected by
+the §7 invariants throughout. If a single writer happens to suffice, hardening fan-out
+(§3, phase 2) delivers "same data in N clouds" even sooner — but it is a *prerequisite* of
+the mesh, not an alternative to it.
