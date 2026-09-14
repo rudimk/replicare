@@ -299,39 +299,48 @@ with no `clusters:` block is exactly today's one-way daemon.
 > nodes* — do not confuse it with a Redis endpoint's `mode: cluster` (one *sharded*
 > Redis). Different scopes; the docs disambiguate.
 
-### 6.1 New: `node_id` on an endpoint (optional)
+### 6.1 New: a `nodes:` map + `node_id` (optional)
+
+Cluster members are endpoints that are **both read from and written to**, so they live in
+their own top-level **`nodes:`** map (separate from `sources:`/`targets:`, which stay
+one-way-only). A node has the same shape as any endpoint (an `engine` + that engine's
+connection block) plus an optional `node_id` — its stable replication-origin identity,
+stamped into every change's `(hlc, node_id)` version. `node_id` **defaults to the node's
+map key**, so it is rarely written explicitly.
 
 ```yaml
-sources:
+nodes:
   us:
     engine: postgres
-    node_id: us-east          # NEW, optional; required only for cluster members
-    postgres: { host: ..., ... }
+    # node_id defaults to "us"; override only if you need a different origin id
+    postgres: { host: pg-us, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require }
+  eu:
+    engine: postgres
+    postgres: { host: pg-eu, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require }
 ```
 
-Stable origin identity — the value stamped into every change's `(hlc, node_id)`. Optional
-and ignored on the one-way path.
+`nodes:` is optional and ignored on the one-way path.
 
 ### 6.2 New: a `clusters:` block (optional, top-level)
 
-A cluster names its member nodes (each an endpoint that is simultaneously a source and a
-target), the topology, and the selection/tuning — mirroring a `sync` but multi-directional.
-**There is no conflict policy to configure:** resolution is the zero-config,
-replicare-managed HLC last-write-wins of §5.3 (no version column, no priority). The daemon
-expands the cluster into the full set of directed edges internally.
+A cluster names its member nodes (by key into `nodes:`), the topology, and the
+selection/tuning — mirroring a `sync` but multi-directional. **There is no conflict policy
+to configure:** resolution is the zero-config, replicare-managed HLC last-write-wins of
+§5.3 (no version column, no priority). The daemon expands the cluster into the full set of
+directed edges internally.
 
 ```yaml
 # Existing one-way syncs keep working, unchanged, alongside clusters.
 syncs:
   - name: analytics-fanout
-    source: us
+    source: pgprod              # a `sources:` key, as always
     targets: [warehouse]
     include: ["public.*"]
 
 clusters:                        # NEW, entirely optional
   - name: global-app
     engine: postgres             # single-engine, like a sync
-    members: [us, eu, ap]        # endpoint names; each is source AND target; any N >= 2
+    members: [us, eu, ap]        # keys into nodes:; each is source AND target; any N >= 2
     topology: mesh               # v1: full mesh (ring/partial deferred)
     include: ["public.*"]
     exclude: ["*_audit"]

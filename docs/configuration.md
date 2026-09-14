@@ -20,8 +20,14 @@ observability:  { ... }   # metrics/status/OTLP endpoints
 state_store:    { ... }   # replicare's own progress store (an endpoint)
 sources:        { ... }   # named source endpoints
 targets:        { ... }   # named target endpoints
-syncs:          [ ... ]   # what replicates where
+syncs:          [ ... ]   # what replicates where (one-way)
+nodes:          { ... }   # peer endpoints for active-active clusters (optional)
+clusters:       [ ... ]   # active-active (multi-master) groups (optional)
 ```
+
+`nodes` and `clusters` are **optional and additive** — a config with neither behaves
+exactly like a one-way daemon. See [Active-active clusters](#active-active-clusters-nodes-and-clusters)
+and the [multi-master design note](multi-master.md).
 
 ## `logging`
 
@@ -190,6 +196,68 @@ source pressure — see [operations.md](operations.md) for tuning guidance.
 For **Redis**, the neutral `retention.*` knobs are inert (there is no source-side
 delta queue to bound); Redis pacing lives in the `redis:` block instead
 (`scan_count`, `reconcile_interval`, `delete_sweep_interval`).
+
+## Active-active clusters (`nodes` and `clusters`)
+
+> **Status: in progress.** The `nodes:`/`clusters:` config surface is accepted and
+> validated today, but the multi-master runtime is being built milestone by milestone
+> (see [`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md)). These
+> keys are **optional and additive**: omit them and replicare behaves exactly as a
+> one-way daemon. Do not confuse a replicare **`clusters:`** entry (a group of
+> active-active peer databases) with a Redis endpoint's `redis.mode: cluster` (one
+> *sharded* Redis) — different scopes.
+
+An **active-active cluster** keeps N peer databases converged with writes accepted on
+**any** node. Conflict resolution is **zero-config** — replicare manages a hidden
+per-row version itself (HLC last-write-wins; no column to add, nothing to declare); see
+the [design note](multi-master.md). A cluster is **single-engine**, like a sync.
+
+### `nodes`
+
+A map of peer endpoints. A node has the **same shape as a source/target endpoint** (an
+`engine` + that engine's connection block) plus an optional `node_id`. Unlike a
+source/target, a node is both **read from and written to**.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `engine` | string | — | `postgres` \| `mysql` \| `redis`; must match the cluster's engine |
+| `node_id` | string | the map key | stable replication-origin identity, unique within a cluster; stamped into each change's version. Usually leave it to default to the key |
+| `<engine>:` | block | — | the engine connection block, exactly as for a source/target |
+
+### `clusters`
+
+A list of active-active groups.
+
+| Field | Type | Default | Notes |
+|---|---|---|---|
+| `name` | string | — | unique across all syncs **and** clusters |
+| `engine` | string | — | the one engine all members share (single-engine rule) |
+| `members` | list of strings | — | keys into `nodes:`; **≥ 2**, each a distinct node with a distinct `node_id` |
+| `topology` | string | `mesh` | v1 supports only `mesh` (full mesh, any N ≥ 2); `ring`/partial are deferred |
+| `include` / `exclude` | list of globs | — | table/key selection, interpreted per engine exactly as for a sync |
+| `tuning` | block | sync defaults | same knobs as a sync's `tuning` |
+
+```yaml
+nodes:
+  us: { engine: postgres, postgres: { host: pg-us, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require } }
+  eu: { engine: postgres, postgres: { host: pg-eu, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require } }
+  ap: { engine: postgres, postgres: { host: pg-ap, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require } }
+
+clusters:
+  - name: global-app
+    engine: postgres
+    members: [us, eu, ap]     # any N >= 2; node_id defaults to us/eu/ap
+    include: ["public.*"]
+    exclude: ["*_audit"]
+    # No conflict block: HLC last-write-wins is automatic. Nothing to declare.
+```
+
+### Cycle safety for one-way syncs
+
+Independently of clusters, `replicare` now **rejects an un-declared replication cycle**
+among plain one-way `syncs` (e.g. `A→B` *and* `B→A`, or a longer ring) at config load —
+that topology silently corrupted data before. A genuine active-active setup must be
+declared as a `clusters:` entry, which is exempt.
 
 ## Full example
 
