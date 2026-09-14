@@ -26,7 +26,10 @@ func (c *fakeConn) Validate(role, name string) error {
 	}
 	return nil
 }
-func (c *fakeConn) ConnConfig() engine.ConnConfig { return engine.ConnConfig{} }
+
+// ConnConfig carries the DSN into Host so distinct fake endpoints have distinct
+// connection identities (used by cycle detection); same DSN => same node.
+func (c *fakeConn) ConnConfig() engine.ConnConfig { return engine.ConnConfig{Host: c.DSN} }
 
 type validationError struct {
 	role, name, msg string
