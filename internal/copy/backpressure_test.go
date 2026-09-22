@@ -49,7 +49,7 @@ func TestBackpressureSlowTarget(t *testing.T) {
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
 	slow := &slowSink{Sink: f.sink, delay: 500 * time.Microsecond}
 
-	if err := Table(ctx, f.src, slow, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 200}); err != nil {
+	if err := Table(ctx, f.src, slow, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 200}); err != nil {
 		t.Fatalf("copy under throttled target: %v", err)
 	}
 	if got := f.rowCount(t, ctx, f.rawTgt); got != 1000 {

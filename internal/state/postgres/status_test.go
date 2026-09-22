@@ -22,10 +22,10 @@ func TestListReadsForStatus(t *testing.T) {
 	orders := engine.TableRef{Schema: "public", Name: "orders"}
 	items := engine.TableRef{Schema: "public", Name: "items"}
 
-	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Table: orders, Done: true}); err != nil {
+	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Target: "dst", Table: orders, Done: true}); err != nil {
 		t.Fatalf("save progress orders: %v", err)
 	}
-	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Table: items, Watermark: engine.KeyValues{"50"}}); err != nil {
+	if err := s.SaveCopyProgress(ctx, "s1", state.CopyProgress{Target: "dst", Table: items, Watermark: engine.KeyValues{"50"}}); err != nil {
 		t.Fatalf("save progress items: %v", err)
 	}
 	if err := s.SaveCursor(ctx, "s1", state.Cursor{Target: "dst", Table: orders, Phase: state.PhaseStreaming, LastDelta: 99}); err != nil {

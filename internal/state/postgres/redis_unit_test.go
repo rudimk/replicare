@@ -77,7 +77,7 @@ func TestRedisUnitCopyProgressCoarse(t *testing.T) {
 	unit := redisUnit("0")
 
 	// Absent -> fresh, not done (the unit's snapshot hasn't run yet).
-	fresh, err := s.LoadCopyProgress(ctx, "r", unit)
+	fresh, err := s.LoadCopyProgress(ctx, "r", "dst", unit)
 	if err != nil {
 		t.Fatalf("LoadCopyProgress(absent): %v", err)
 	}
@@ -87,11 +87,11 @@ func TestRedisUnitCopyProgressCoarse(t *testing.T) {
 
 	// Coarse checkpoint: the SCAN snapshot is atomic, so completion is a single
 	// Done flag with NO watermark and NO completed-range set.
-	done := state.CopyProgress{Table: unit, Done: true}
+	done := state.CopyProgress{Target: "dst", Table: unit, Done: true}
 	if err := s.SaveCopyProgress(ctx, "r", done); err != nil {
 		t.Fatalf("SaveCopyProgress: %v", err)
 	}
-	got, err := reopen(t, ctx).LoadCopyProgress(ctx, "r", unit)
+	got, err := reopen(t, ctx).LoadCopyProgress(ctx, "r", "dst", unit)
 	if err != nil {
 		t.Fatalf("LoadCopyProgress: %v", err)
 	}

@@ -146,12 +146,12 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 	//    target (a fresh watermark makes the driver plan every chunk and direct
 	//    COPY, correct because the table is empty).
 	for _, t := range tablesTopo {
-		if err := d.Store.SaveCopyProgress(ctx, syncName, state.CopyProgress{Table: t}); err != nil {
+		if err := d.Store.SaveCopyProgress(ctx, syncName, state.CopyProgress{Target: target, Table: t}); err != nil {
 			return fmt.Errorf("reseed %s: reset progress %s: %w", target, t, err)
 		}
 	}
 	// 3. Re-copy parents-first (chunks parallel across the workers).
-	if err := copy.Component(ctx, d.Workers, d.Store, syncName, tablesTopo, opts); err != nil {
+	if err := copy.Component(ctx, d.Workers, d.Store, syncName, target, tablesTopo, opts); err != nil {
 		return fmt.Errorf("reseed %s: re-copy: %w", target, err)
 	}
 	// 4. Cut back to streaming: clear needs-reseed and set phase. The resumed

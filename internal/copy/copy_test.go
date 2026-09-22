@@ -180,7 +180,7 @@ func TestCopyTableFaithful(t *testing.T) {
 	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'note '||g FROM generate_series(1,50) g")
 
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
-	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
+	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
 		t.Fatalf("copy: %v", err)
 	}
 	if f.rowCount(t, ctx, f.rawTgt) != 50 {
@@ -189,7 +189,7 @@ func TestCopyTableFaithful(t *testing.T) {
 	f.faithful(t, ctx)
 
 	// Progress marks the table done; re-running is a no-op.
-	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
+	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
 		t.Fatalf("re-copy: %v", err)
 	}
 	if f.rowCount(t, ctx, f.rawTgt) != 50 {
@@ -225,7 +225,7 @@ func TestCopyTableResumeAfterCrash(t *testing.T) {
 
 	// First attempt crashes after 3 chunks.
 	flaky := &flakySource{Source: f.src, failAfter: 3}
-	err := Table(ctx, flaky, f.sink, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 10})
+	err := Table(ctx, flaky, f.sink, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10})
 	if err == nil {
 		t.Fatal("expected the injected crash to fail the copy")
 	}
@@ -235,7 +235,7 @@ func TestCopyTableResumeAfterCrash(t *testing.T) {
 	}
 
 	// Resume with a healthy source: skips completed chunks, finishes the rest.
-	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
+	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if got := f.rowCount(t, ctx, f.rawTgt); got != 100 {
@@ -259,14 +259,14 @@ func TestCopyTableResumeClearsIncompleteTail(t *testing.T) {
 	// bogus half-applied row sits above the watermark.
 	exec(t, ctx, f.rawTgt, "INSERT INTO rc_it.orders SELECT g, 'note '||g FROM generate_series(1,19) g")
 	if err := f.store.SaveCopyProgress(ctx, f.syncName, state.CopyProgress{
-		Table: ref, Watermark: engine.KeyValues{"20"},
+		Target: "dst", Table: ref, Watermark: engine.KeyValues{"20"},
 	}); err != nil {
 		t.Fatalf("seed progress: %v", err)
 	}
 	exec(t, ctx, f.rawTgt, "INSERT INTO rc_it.orders VALUES (25, 'STALE PARTIAL')")
 
 	// Resume must DELETE the tail (>= 20), clearing the stale row, then re-copy.
-	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
+	if err := Table(ctx, f.src, f.sink, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	// The stale row is gone; the real row 25 is present and correct.

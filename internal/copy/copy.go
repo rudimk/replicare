@@ -51,25 +51,27 @@ func WithProgress(fn func(engine.TableRef, int64)) Option {
 	return func(c *config) { c.progress = fn }
 }
 
-// Table performs a resumable initial copy of one table using a single worker
-// (serial chunks). Equivalent to Component with one table and one worker.
+// Table performs a resumable initial copy of one table into one target using a
+// single worker (serial chunks). Equivalent to Component with one table and one
+// worker. Progress is checkpointed per (sync, target, table).
 func Table(ctx context.Context, src engine.Source, sink engine.Sink, store state.StateStore,
-	syncName string, ref engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
-	return copyTable(ctx, []Worker{{Src: src, Sink: sink}}, store, syncName, ref, opts, newConfig(options))
+	syncName string, target engine.TargetID, ref engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
+	return copyTable(ctx, []Worker{{Src: src, Sink: sink}}, store, syncName, target, ref, opts, newConfig(options))
 }
 
-// Component copies an FK component's tables in the given topological order
-// (parents first), each table's chunks parallelized across the workers. Distinct
-// components are independent and may be run concurrently by the caller, each with
-// its own worker pool (CLAUDE.md §8.1).
+// Component copies an FK component's tables into one target in the given
+// topological order (parents first), each table's chunks parallelized across the
+// workers. Distinct components are independent and may be run concurrently by the
+// caller, each with its own worker pool (CLAUDE.md §8.1). Progress is per
+// (sync, target, table), so fan-out to several targets never shares a watermark.
 func Component(ctx context.Context, workers []Worker, store state.StateStore,
-	syncName string, tablesTopoOrder []engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
+	syncName string, target engine.TargetID, tablesTopoOrder []engine.TableRef, opts engine.ChunkOptions, options ...Option) error {
 	if len(workers) == 0 {
 		return fmt.Errorf("copy: component needs at least one worker")
 	}
 	cfg := newConfig(options)
 	for _, ref := range tablesTopoOrder {
-		if err := copyTable(ctx, workers, store, syncName, ref, opts, cfg); err != nil {
+		if err := copyTable(ctx, workers, store, syncName, target, ref, opts, cfg); err != nil {
 			return err
 		}
 	}
@@ -81,9 +83,9 @@ func Component(ctx context.Context, workers []Worker, store state.StateStore,
 // resumes fine-grained. On resume it clears the incomplete tail (>= watermark)
 // then re-copies from there.
 func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
-	syncName string, ref engine.TableRef, opts engine.ChunkOptions, cfg config) error {
+	syncName string, target engine.TargetID, ref engine.TableRef, opts engine.ChunkOptions, cfg config) error {
 
-	prog, err := store.LoadCopyProgress(ctx, syncName, ref)
+	prog, err := store.LoadCopyProgress(ctx, syncName, target, ref)
 	if err != nil {
 		return fmt.Errorf("copy %s: load progress: %w", ref, err)
 	}
@@ -148,7 +150,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 				}
 				var snap state.CopyProgress
 				if moved && prefix < len(chunks) {
-					snap = state.CopyProgress{Table: ref, Watermark: chunks[prefix-1].Hi}
+					snap = state.CopyProgress{Target: target, Table: ref, Watermark: chunks[prefix-1].Hi}
 				}
 				if moved && prefix < len(chunks) {
 					if err := store.SaveCopyProgress(gctx, syncName, snap); err != nil {
@@ -166,7 +168,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 	}
 
 	// All chunks done: mark the table complete.
-	if err := store.SaveCopyProgress(ctx, syncName, state.CopyProgress{Table: ref, Done: true}); err != nil {
+	if err := store.SaveCopyProgress(ctx, syncName, state.CopyProgress{Target: target, Table: ref, Done: true}); err != nil {
 		return fmt.Errorf("copy %s: mark done: %w", ref, err)
 	}
 	return nil

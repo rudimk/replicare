@@ -63,7 +63,7 @@ func TestComponentParentsFirstFKHolds(t *testing.T) {
 	workers := f.newWorkers(t, ctx, 3)
 
 	// Topological order: parent then child.
-	if err := Component(ctx, workers, f.store, f.syncName, []engine.TableRef{parent, child}, engine.ChunkOptions{TargetRows: 15}); err != nil {
+	if err := Component(ctx, workers, f.store, f.syncName, "dst", []engine.TableRef{parent, child}, engine.ChunkOptions{TargetRows: 15}); err != nil {
 		t.Fatalf("Component: %v", err)
 	}
 
@@ -99,7 +99,7 @@ func TestComponentParallelChunksFaithful(t *testing.T) {
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
 	workers := f.newWorkers(t, ctx, 4) // 4-way parallel chunks
 
-	if err := Component(ctx, workers, f.store, f.syncName, []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 300}); err != nil {
+	if err := Component(ctx, workers, f.store, f.syncName, "dst", []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 300}); err != nil {
 		t.Fatalf("Component: %v", err)
 	}
 	if got := f.rowCount(t, ctx, f.rawTgt); got != 5000 {
@@ -121,13 +121,13 @@ func TestComponentResumeParallel(t *testing.T) {
 	// Crash one worker partway.
 	workers := f.newWorkers(t, ctx, 3)
 	flaky := []Worker{{Src: &flakySource{Source: workers[0].Src, failAfter: 2}, Sink: workers[0].Sink}}
-	err := Component(ctx, flaky, f.store, f.syncName, []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 200})
+	err := Component(ctx, flaky, f.store, f.syncName, "dst", []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 200})
 	if err == nil {
 		t.Fatal("expected injected crash")
 	}
 
 	// Resume with healthy parallel workers -> converges exactly.
-	if err := Component(ctx, workers, f.store, f.syncName, []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 200}); err != nil {
+	if err := Component(ctx, workers, f.store, f.syncName, "dst", []engine.TableRef{ref}, engine.ChunkOptions{TargetRows: 200}); err != nil {
 		t.Fatalf("resume: %v", err)
 	}
 	if got := f.rowCount(t, ctx, f.rawTgt); got != 2000 {
