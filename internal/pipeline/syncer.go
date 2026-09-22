@@ -36,6 +36,13 @@ type Syncer struct {
 	DrainInterval time.Duration
 	Retention     engine.RetentionPolicy
 
+	// ClusterMode marks this syncer as one edge of an active-active cluster
+	// (multi-master): its source installs loop-suppressing origin-aware capture and
+	// its sink is origin-marking, so replicare's own applies are not re-captured and
+	// echoed back around the mesh (CLAUDE.md §6, docs/multi-master.md §5.4). Off (the
+	// default) is the one-way path, byte-identical to the pre-multi-master daemon.
+	ClusterMode bool
+
 	// ApplyConcurrency is how many of a component's tables may apply at once during
 	// streaming (CLAUDE.md §8 parallel delta apply). 1 (the default) is the
 	// strictly-sequential per-table drain. Higher values fan the per-table apply
@@ -78,8 +85,11 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 		return fmt.Errorf("syncer %s: no copy workers", s.Name)
 	}
 	// Capture-first: install over every replicable table before copying, so the
-	// delta queue is already capturing when the copy window opens.
-	if err := s.Source.InstallCapture(ctx, s.Replicable); err != nil {
+	// delta queue is already capturing when the copy window opens. A cluster edge
+	// installs the loop-suppressing origin-aware variant (its sink marks its writes,
+	// so they are not re-captured); a one-way sync installs the byte-identical
+	// unguarded capture.
+	if err := s.installCapture(ctx); err != nil {
 		return fmt.Errorf("syncer %s: install capture: %w", s.Name, err)
 	}
 	s.recordEvent(ctx, state.Event{
@@ -95,6 +105,21 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 	return nil
 }
 
+// installCapture installs the appropriate capture variant for this syncer: origin-
+// aware (loop-suppressing) for a cluster edge, plain for a one-way sync. A cluster
+// edge REQUIRES the source to implement OriginAwareCapturer — the config layer only
+// admits cluster engines that do, so a missing implementation is a build-time bug.
+func (s *Syncer) installCapture(ctx context.Context) error {
+	if s.ClusterMode {
+		oc, ok := s.Source.(engine.OriginAwareCapturer)
+		if !ok {
+			return fmt.Errorf("syncer %s: cluster mode requires an origin-aware source", s.Name)
+		}
+		return oc.InstallOriginCapture(ctx, s.Replicable)
+	}
+	return s.Source.InstallCapture(ctx, s.Replicable)
+}
+
 // copyAndCutover copies one component parents-first, then flips each of its
 // tables' cursors to streaming for this target. The copy is checkpointed by the
 // StateStore, so an interrupted component resumes rather than restarting.
@@ -108,10 +133,7 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 			return err
 		}
 	} else {
-		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
-			s.Tel.AddRowsCopied(s.Name, t, n)
-		})
-		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, progress); err != nil {
+		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, s.copyOptions()...); err != nil {
 			return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
 		}
 	}
@@ -144,10 +166,7 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 	}
 	copier, ok := s.Workers[0].Sink.(engine.CyclicComponentCopier)
 	if !ok {
-		progress := copy.WithProgress(func(t engine.TableRef, n int64) {
-			s.Tel.AddRowsCopied(s.Name, t, n)
-		})
-		return copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, progress)
+		return copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, s.copyOptions()...)
 	}
 
 	// Coarse resume: skip if every table in the component is already copied.
@@ -175,6 +194,20 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 		}
 	}
 	return nil
+}
+
+// copyOptions builds the initial-copy options for this syncer: the rows-copied
+// progress callback, plus — for a cluster edge — the idempotent merge load mode, so
+// the concurrent cross-edge copy in a mesh does not collide on the target PK
+// (copy.WithLoadMode / CLAUDE.md §4.1).
+func (s *Syncer) copyOptions() []copy.Option {
+	opts := []copy.Option{copy.WithProgress(func(t engine.TableRef, n int64) {
+		s.Tel.AddRowsCopied(s.Name, t, n)
+	})}
+	if s.ClusterMode {
+		opts = append(opts, copy.WithLoadMode(engine.LoadMerge))
+	}
+	return opts
 }
 
 // recordEvent persists an operational event when a StateStore is present, logging

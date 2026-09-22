@@ -12,6 +12,13 @@ func contains(t *testing.T, s, sub string) {
 	}
 }
 
+func notContains(t *testing.T, s, sub string) {
+	t.Helper()
+	if strings.Contains(s, sub) {
+		t.Errorf("expected SQL NOT to contain %q\n---\n%s", sub, s)
+	}
+}
+
 func TestDeltaColumns(t *testing.T) {
 	got := deltaColumns(3)
 	if len(got) != 3 || got[0] != "k1" || got[2] != "k3" {
@@ -83,14 +90,35 @@ func TestTriggerFunctionDDLCompositePK(t *testing.T) {
 }
 
 func TestCreateAndDropTriggerDDL(t *testing.T) {
-	create := createTriggerDDL(7, `"public"."orders"`)
+	// One-way (origin=false): the byte-identical, pre-multi-master trigger with NO
+	// loop-suppression guard (the backward-compatibility invariant).
+	create := createTriggerDDL(7, `"public"."orders"`, false)
 	contains(t, create, `CREATE TRIGGER "replicare_trg_7"`)
 	contains(t, create, `AFTER INSERT OR UPDATE OR DELETE ON "public"."orders"`)
 	// EXECUTE PROCEDURE (not EXECUTE FUNCTION) for old-server portability.
 	contains(t, create, `EXECUTE PROCEDURE "replicare"."tf_7"()`)
+	notContains(t, create, "WHEN")
+	notContains(t, create, applyMarkerGUC)
 
 	drop := dropTriggerDDL(7, `"public"."orders"`)
 	contains(t, drop, `DROP TRIGGER IF EXISTS "replicare_trg_7" ON "public"."orders"`)
+}
+
+// TestOriginTriggerDDLGuardAndBCIdentity proves the cluster (origin=true) trigger
+// carries the loop-suppression WHEN guard, and that turning it off yields the exact
+// one-way DDL (the guard is the ONLY difference — one-way stays byte-identical).
+func TestOriginTriggerDDLGuardAndBCIdentity(t *testing.T) {
+	origin := createTriggerDDL(7, `"public"."orders"`, true)
+	// The guard fires the trigger only for non-replicare writes.
+	contains(t, origin, `WHEN (current_setting('replicare.apply', true) IS NULL)`)
+	// The guard sits between FOR EACH ROW and EXECUTE PROCEDURE.
+	contains(t, origin, `FOR EACH ROW WHEN (current_setting('replicare.apply', true) IS NULL) EXECUTE PROCEDURE`)
+
+	// Removing exactly the guard clause must recover the one-way DDL byte-for-byte.
+	oneWay := createTriggerDDL(7, `"public"."orders"`, false)
+	if strings.Replace(origin, " "+originTriggerWhen, "", 1) != oneWay {
+		t.Errorf("origin trigger differs from one-way by more than the WHEN guard:\norigin=%q\none-way=%q", origin, oneWay)
+	}
 }
 
 func TestTriggerFunctionQuotesReservedColumn(t *testing.T) {

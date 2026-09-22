@@ -1,11 +1,17 @@
 # Multi-master replication — design note
 
-> **Status: DESIGN / NOT IMPLEMENTED.** This document is a forward-looking plan.
-> replicare today is a strictly **one-directional, source-authoritative**
-> replicator for all three engines. Nothing described under "Proposed design"
-> exists in the code yet. The **hard constraint** on any of this work is that the
-> existing one-way path (source → target(s), changes never flow back) must keep
-> behaving **exactly** as it does today — see [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
+> **Status: IN PROGRESS.** This document is the design; milestones are landing against
+> it. **Shipped so far (Postgres):** the `nodes:`/`clusters:` config surface (MM0–MM1)
+> and **loop suppression** — an active-active Postgres mesh runs today: writes accepted
+> on any node converge on all, and replicare's own applies are not re-captured and echoed
+> (MM3, §5.2, §6.2, [§8 status](#8-implementation-status)). **Not yet shipped:** the
+> HLC-LWW version register + tombstones that resolve *same-key* conflicts (MM4), and the
+> MySQL/Redis meshes (MM5–MM6). Until MM4 lands, an active-active PG mesh converges only
+> for workloads that do not concurrently write the **same key** on two nodes (e.g.
+> node-partitioned key ranges); concurrent same-key writes are unresolved until LWW.
+> The **hard constraint** on all of this work is that the existing one-way path
+> (source → target(s), changes never flow back) keeps behaving **exactly** as it does
+> today — see [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
 
 This note covers **Postgres, MySQL, and Redis**. It records what exists now, why
 naively wiring a bidirectional topology breaks today, the mechanisms a real
@@ -163,6 +169,35 @@ with the `node_id` where it **originated**. This is the foundation for both loop
 suppression (5.2) and conflict attribution (5.3).
 
 ### 5.2 Loop suppression (origin filtering)
+
+> **Shipped for Postgres (MM3).** Implemented exactly as described below for the
+> apply-suppression sub-problem (1). Concretely:
+> - **Origin-aware capture.** `Source.InstallOriginCapture` installs the capture trigger
+>   with the `WHEN (current_setting('replicare.apply', true) IS NULL)` guard
+>   (`internal/engine/postgres/capture_ddl.go`). One-way `InstallCapture` installs the
+>   **byte-identical** unguarded trigger — the only difference is that one `WHEN` clause,
+>   asserted by a test — so the one-way path is untouched (§7).
+> - **Marked apply/copy.** A cluster member's `Sink` is switched to origin marking
+>   (`EnableOriginMarking`); every apply and copy transaction then runs `SET LOCAL
+>   replicare.apply = '1'` (`internal/engine/postgres/{apply,sink}.go`). `SET LOCAL` is
+>   transaction-scoped, so the marker can never leak onto an ordinary connection. (The
+>   value is `'1'` in v1 — presence is all a full mesh needs; it becomes the origin id
+>   only when ring/forwarding lands, see below.)
+> - **Wiring.** A `clusters:` block expands into one directed edge per ordered pair of
+>   members (full mesh); each edge runs as an independent single-active job in cluster
+>   mode — origin-aware capture on its source, marked sink — under its own ownership lock
+>   (`internal/daemon/cluster.go`). A config with no clusters runs exactly the one-way
+>   daemon.
+> - **Mesh initial copy.** Because every member is simultaneously copied-from and
+>   written-to by its reciprocal edges, a member's live table transiently carries rows
+>   the other edge just applied; a direct `COPY` of those bounced rows would collide on
+>   the target PK. Cluster edges therefore copy with the idempotent **merge** path
+>   (`INSERT … ON CONFLICT DO UPDATE`, `copy.WithLoadMode(LoadMerge)`) and skip the
+>   DELETE-range resume. This makes a mesh converge on **non-conflicting** data (e.g.
+>   node-partitioned keys); resolving concurrent same-key writes is MM4 (§5.3).
+>
+> **Not yet shipped:** the version register + HLC (§5.3), so cross-node writes are applied
+> last-writer-by-arrival, not by `(hlc, node)`. Same-key conflict resolution is MM4.
 
 Two sub-problems:
 
@@ -419,7 +454,76 @@ compiles and runs exactly as before.
 
 ---
 
-## 8. Phased plan
+## 8. Implementation status
+
+| Milestone | Scope | Status |
+|---|---|---|
+| MM0–MM1 | `nodes:`/`clusters:` config surface; one-way cycle guardrail; fan-out per-target progress | **Shipped** |
+| MM2 | Per-target initial-copy progress (fan-out hardening) | **Shipped** |
+| MM3 | **Postgres loop suppression** — origin-aware capture, marked apply/copy, cluster→edge wiring, idempotent mesh copy | **Shipped** |
+| MM3 (register) | Version register + HLC + bootstrap register seeding | Deferred to land with MM4 (see note) |
+| MM4 | Postgres HLC-LWW conflict resolution + tombstones + GC | Not started |
+| MM5 / MM6 | MySQL mesh / Redis mesh | Not started |
+| MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
+
+**What works today (Postgres):** define members under `nodes:`, group them in a
+`clusters:` block, and the daemon runs a full-mesh active-active cluster — writes accepted
+on any node converge on all, initial copy is bidirectional and idempotent, and replicare's
+own applies are **not** re-captured and echoed (loop suppression). Proven end-to-end by
+`internal/daemon.TestDaemonTwoNodeMeshConverges` (a 2-node PG mesh that converges both ways
+and stays stable — no echo storm) and the engine-level
+`internal/engine/postgres.TestOriginCaptureSuppressesCrossNodeApply`.
+
+**Note on the version register.** The milestone plan grouped the HLC version register into
+MM3, but the register is *inert* until MM4 consumes it for conflict resolution — writing it
+in MM3 would be untested dead weight. It is therefore deferred to land **with** MM4's
+HLC-LWW, keeping each PR independently verifiable. Consequence for today: cross-node writes
+apply last-writer-**by-arrival**, not by `(hlc, node)`, so a mesh converges correctly only
+for workloads that do not concurrently write the **same key** on two nodes (e.g.
+node-partitioned key ranges). Same-key conflict resolution arrives with MM4.
+
+### 8.1 Usage — running a Postgres active-active cluster
+
+Define each member under `nodes:` and group them in a `clusters:` block. The target schema
+must pre-exist on every member (data-only, `CLAUDE.md` §7), and the daemon needs a Postgres
+`state_store` (it may live on any member or a separate DB):
+
+```yaml
+state_store:
+  engine: postgres
+  postgres: { host: pg-us, port: 5432, database: replicare_state, user: replicare, password: ${PW}, sslmode: require }
+
+nodes:
+  us:
+    engine: postgres
+    postgres: { host: pg-us, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require }
+  eu:
+    engine: postgres
+    postgres: { host: pg-eu, port: 5432, database: app, user: replicare, password: ${PW}, sslmode: require }
+
+clusters:
+  - name: global-app
+    engine: postgres
+    members: [us, eu]        # any N >= 2 (full mesh)
+    include: ["public.*"]
+    tuning: { drain_interval: 1s }
+```
+
+- **Grants (no superuser).** Each member needs the *combined* cluster-member grant set: the
+  source-side grants (`TRIGGER` + `SELECT` on replicated tables, `CREATE`/`USAGE` on the
+  `replicare` schema — or pre-create it owned by the daemon role, `CLAUDE.md` §12) **and**
+  the target-side grants (`INSERT/UPDATE/DELETE` on the replicated tables), because every
+  member is both. No superuser, no `REPLICATION`, no `wal_level` change.
+- **What the daemon does.** It expands the cluster into one directed edge per ordered pair
+  of members and runs each edge as an independent single-active job: origin-aware capture on
+  the edge's source, a marked (loop-suppressing) sink on its target. Each edge takes its own
+  ownership lock, so several daemon replicas can share a cluster's edges.
+- **Caveat (pre-MM4).** Partition writes by key across nodes (or otherwise avoid concurrent
+  same-key writes) until HLC-LWW lands — see the note above.
+
+---
+
+## 9. Phased plan
 
 Ordered so each phase is independently shippable and low-risk-first. The detailed,
 milestone-by-milestone version (with acceptance criteria + a per-milestone BC proof) is
@@ -448,7 +552,7 @@ milestone-by-milestone version (with acceptance criteria + a per-milestone BC pr
 
 ---
 
-## 9. Open questions / risks
+## 10. Open questions / risks
 
 - **Version-register cost.** ~1 row per replicated row (PK + `(hlc, node_id)`) — the
   accepted price of zero user-schema change (the rejected alternative was a version
@@ -478,7 +582,7 @@ milestone-by-milestone version (with acceptance criteria + a per-milestone BC pr
 
 ---
 
-## 10. Summary
+## 11. Summary
 
 | Capability | PG today | MySQL today | Redis today | Needed for multi-master |
 |---|---|---|---|---|

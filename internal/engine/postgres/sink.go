@@ -20,6 +20,12 @@ type Sink struct {
 	cfg  engine.ConnConfig
 	conn *pgx.Conn
 	meta map[engine.TableRef]engine.Table
+	// origin marks this Sink as a cluster member's apply/copy target: when set,
+	// every apply/copy transaction sets the loop-suppression marker (SET LOCAL
+	// applyMarkerGUC) so the paired origin-aware source does not re-capture
+	// replicare's own writes (CLAUDE.md §6). Off by default → the one-way path
+	// sets no marker and is byte-identical.
+	origin bool
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
@@ -29,7 +35,27 @@ var _ engine.Sink = (*Sink)(nil)
 var (
 	_ engine.CyclicComponentCopier = (*Sink)(nil)
 	_ engine.NullFillCyclicSink    = (*Sink)(nil)
+	_ engine.OriginMarkingSink     = (*Sink)(nil)
 )
+
+// EnableOriginMarking implements engine.OriginMarkingSink: it switches this Sink to
+// cluster-apply mode so every subsequent apply/copy transaction carries the
+// loop-suppression marker. Called once at build time for a cluster member's sink.
+func (s *Sink) EnableOriginMarking() { s.origin = true }
+
+// setApplyMarker sets the transaction-scoped loop-suppression marker when this Sink
+// is a cluster member. It MUST be called inside an open transaction (SET LOCAL is a
+// no-op with a warning outside one); every caller wraps it in BEGIN/COMMIT. A no-op
+// on a one-way sink, so the one-way apply/copy path is unchanged.
+func (s *Sink) setApplyMarker(ctx context.Context) error {
+	if !s.origin {
+		return nil
+	}
+	if _, err := s.conn.Exec(ctx, fmt.Sprintf("SET LOCAL %s = %s", applyMarkerGUC, quoteLiteral(applyMarkerValue))); err != nil {
+		return fmt.Errorf("postgres: set apply marker: %w", err)
+	}
+	return nil
+}
 
 // Connect opens the connection and applies session-GUC canonicalization (§4.2).
 func (s *Sink) Connect(ctx context.Context) error {
@@ -119,17 +145,50 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 	}
 	switch mode {
 	case engine.LoadDirect, "":
-		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(t), quotedColumnList(cols))
-		tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
-		if err != nil {
-			return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
-		}
-		return tag.RowsAffected(), nil
+		return s.directLoad(ctx, t, cols, r)
 	case engine.LoadMerge:
 		return s.mergeLoad(ctx, t, cols, r)
 	default:
 		return 0, fmt.Errorf("postgres: bulk load mode %q not implemented", mode)
 	}
+}
+
+// directLoad implements the empty-target fast path (CLAUDE.md §4.1): a direct
+// COPY FROM STDIN. On a one-way sink it COPYs on the bare connection (COPY is its
+// own implicit transaction), exactly as before. On a cluster member's sink it wraps
+// the COPY in BEGIN/COMMIT so it can set the transaction-scoped loop-suppression
+// marker first, so the bootstrap copy is not self-captured (no echo storm). COPY
+// inside an explicit transaction block is fully supported.
+func (s *Sink) directLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader) (int64, error) {
+	sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(t), quotedColumnList(cols))
+	if !s.origin {
+		tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
+		if err != nil {
+			return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+		}
+		return tag.RowsAffected(), nil
+	}
+	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
+		return 0, fmt.Errorf("postgres: bulk load: begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+	if err := s.setApplyMarker(ctx); err != nil {
+		return 0, err
+	}
+	tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+	}
+	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
+		return 0, fmt.Errorf("postgres: bulk load: commit: %w", err)
+	}
+	committed = true
+	return tag.RowsAffected(), nil
 }
 
 // mergeLoad implements the non-empty-target path (CLAUDE.md §4.1): COPY the chunk
@@ -173,6 +232,9 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 			_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
 		}
 	}()
+	if err := s.setApplyMarker(ctx); err != nil {
+		return 0, err
+	}
 
 	if _, err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
 		quoteIdentifier(stg), strings.Join(stgCols, ", "))); err != nil {
@@ -281,6 +343,13 @@ func (s *Sink) BeginApply(ctx context.Context, cyclic bool, componentTables []en
 	}
 	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
 		return nil, fmt.Errorf("postgres: begin apply: %w", err)
+	}
+	// On a cluster member, mark this apply transaction so the origin-aware capture
+	// trigger does not re-capture the rows replicare is applying (loop suppression,
+	// CLAUDE.md §6). SET LOCAL is transaction-scoped, so COMMIT/ROLLBACK clears it.
+	if err := s.setApplyMarker(ctx); err != nil {
+		_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
+		return nil, err
 	}
 	// Harmless for standard (non-DEFERRABLE) FKs and correct-and-helpful when the
 	// target's cyclic FKs happen to be DEFERRABLE; the NULL-then-fill above is what

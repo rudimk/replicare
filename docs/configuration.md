@@ -205,10 +205,14 @@ delta queue to bound); Redis pacing lives in the `redis:` block instead
 
 ## Active-active clusters (`nodes` and `clusters`)
 
-> **Status: in progress.** The `nodes:`/`clusters:` config surface is accepted and
-> validated today, but the multi-master runtime is being built milestone by milestone
-> (see [`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md)). These
-> keys are **optional and additive**: omit them and replicare behaves exactly as a
+> **Status: in progress.** For **Postgres**, a `clusters:` block **runs today**: the
+> daemon brings up a full-mesh active-active cluster with loop suppression, so writes
+> accepted on any node converge on all without echoing back (MM3). The HLC last-write-wins
+> that resolves *same-key* conflicts is the next milestone (MM4) — until it lands, a PG
+> mesh converges only for workloads that don't concurrently write the **same key** on two
+> nodes (partition writes by key). **MySQL/Redis** clusters are still parse-and-validate
+> only. See the [design note](multi-master.md#8-implementation-status) for the full status.
+> These keys are **optional and additive**: omit them and replicare behaves exactly as a
 > one-way daemon. Do not confuse a replicare **`clusters:`** entry (a group of
 > active-active peer databases) with a Redis endpoint's `redis.mode: cluster` (one
 > *sharded* Redis) — different scopes.
