@@ -18,10 +18,20 @@ type Source struct {
 	cfg  engine.ConnConfig
 	db   *sql.DB
 	meta map[engine.TableRef]engine.Table // introspection cache (single-goroutine)
+	// cluster marks this Source as a cluster-edge source: its re-read emits the mesh
+	// version (hlc, node, deleted) alongside each row for HLC last-write-wins
+	// (CLAUDE.md §5.3). Off by default → the one-way re-read is byte-identical.
+	cluster bool
 }
 
 // Compile-time assertion that *Source satisfies the interface.
 var _ engine.Source = (*Source)(nil)
+
+// EnableClusterReads implements engine.ClusterReadSource: it switches this Source's
+// re-read to the version-aware variant for a cluster edge.
+func (s *Source) EnableClusterReads() { s.cluster = true }
+
+var _ engine.ClusterReadSource = (*Source)(nil)
 
 // Connect opens the connection. Session-variable canonicalization (§4.2 analog)
 // is added in MM1a.

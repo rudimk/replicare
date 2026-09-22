@@ -23,10 +23,31 @@ type Sink struct {
 	// (the copy/apply transport), probed at Connect. When false, load paths halt
 	// loud rather than fail cryptically mid-copy (MM9; v1 has no INSERT fallback).
 	localInfile bool
+	// origin marks this Sink as a cluster member's apply/copy target: every apply/copy
+	// sets the loop-suppression marker (@replicare_apply) so the paired origin-aware
+	// source does not re-capture replicare's own writes, and apply is version-guarded
+	// (CLAUDE.md §6, §5.3). Off by default → the one-way path is byte-identical.
+	origin bool
+	// nodeID is the TARGET member's own replication-origin identity (set with origin).
+	// The target's version register + HLC are created by the member's own capture
+	// install; a missing register at apply time (the reciprocal-edge startup race) is
+	// retried transiently rather than created inside the apply transaction (MySQL DDL
+	// implicitly commits, which would break the pass).
+	nodeID string
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
 var _ engine.Sink = (*Sink)(nil)
+
+// EnableOriginMarking implements engine.OriginMarkingSink: it switches this Sink to
+// cluster-apply mode (loop-suppression marker + version-guarded apply) and records the
+// target member's own node id for ensuring the target's mesh state.
+func (s *Sink) EnableOriginMarking(nodeID string) {
+	s.origin = true
+	s.nodeID = nodeID
+}
+
+var _ engine.OriginMarkingSink = (*Sink)(nil)
 
 // Connect opens the connection (session canonicalization via the DSN) and probes
 // whether the target permits LOAD DATA LOCAL INFILE, the copy/apply transport.

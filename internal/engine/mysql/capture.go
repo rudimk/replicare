@@ -37,11 +37,33 @@ func captureColsFor(t engine.Table) []captureCol {
 // (pre-flight warns). A pre-existing conflicting trigger blocks on the 5.7 floor
 // (the block moved here from MM1b, which lacks a connection).
 func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) error {
+	return s.installCapture(ctx, tables, false, "")
+}
+
+// InstallOriginCapture implements engine.OriginAwareCapturer: it installs cluster
+// (multi-master) capture — the trigger bodies are wrapped in `IF @replicare_apply IS
+// NULL` (loop suppression) and stamp the HLC version register (CLAUDE.md §6, §5.3).
+// One-way InstallCapture installs the byte-identical unguarded triggers and no
+// register, so the one-way path is unchanged.
+func (s *Source) InstallOriginCapture(ctx context.Context, tables []engine.TableRef, nodeID string) error {
+	return s.installCapture(ctx, tables, true, nodeID)
+}
+
+var _ engine.OriginAwareCapturer = (*Source)(nil)
+
+func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, origin bool, nodeID string) error {
 	if s.db == nil {
 		return errNotConnected
 	}
 	if err := s.ensureCaptureSchema(ctx); err != nil {
 		return err
+	}
+	// Cluster members additionally get the mesh HLC state (CLAUDE.md §6); a one-way
+	// source gets none of it, so its schema is unchanged.
+	if origin {
+		if err := ensureMeshState(ctx, s.db, nodeID); err != nil {
+			return err
+		}
 	}
 	ver, err := serverVersion(ctx, s.db)
 	if err != nil {
@@ -63,7 +85,7 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 		if err := s.blockConflictingTrigger(ctx, ref, ver); err != nil {
 			return err
 		}
-		if err := s.installOne(ctx, ref, cols); err != nil {
+		if err := s.installOne(ctx, ref, cols, origin); err != nil {
 			return fmt.Errorf("mysql: install capture on %s: %w", ref, err)
 		}
 	}
@@ -71,8 +93,10 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 }
 
 // installOne installs capture for one table. Each statement is individually
-// idempotent (MySQL auto-commits DDL, so there is no wrapping transaction).
-func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []captureCol) error {
+// idempotent (MySQL auto-commits DDL, so there is no wrapping transaction). origin
+// selects the loop-suppressing register-stamping trigger variant (cluster member) and
+// creates the per-table version register.
+func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []captureCol, origin bool) error {
 	relID, err := s.upsertRegistry(ctx, ref, cols)
 	if err != nil {
 		return err
@@ -81,8 +105,15 @@ func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []cap
 		deltaTableDDL(relID, cols),
 		trackTableDDL(relID),
 	}
+	if origin {
+		stmts = append(stmts, registerTableDDL(ref, cols))
+	}
 	for _, op := range []byte{'I', 'U', 'D'} {
-		stmts = append(stmts, dropTriggerDDL(relID, ref.Schema, op), triggerDDL(relID, ref.Schema, ref.Name, op, cols))
+		trig := triggerDDL(relID, ref.Schema, ref.Name, op, cols)
+		if origin {
+			trig = meshTriggerDDL(relID, ref.Schema, ref.Name, op, cols)
+		}
+		stmts = append(stmts, dropTriggerDDL(relID, ref.Schema, op), trig)
 	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {

@@ -37,10 +37,44 @@ func (s *Sink) BulkLoad(ctx context.Context, t engine.TableRef, cols []string, r
 	if err != nil {
 		return 0, err
 	}
+	if s.origin {
+		return s.markedBulkLoad(ctx, t, cols, r, mode, charset)
+	}
 	if mode == engine.LoadMerge {
-		return s.mergeLoad(ctx, t, cols, r, charset)
+		return s.mergeLoad(ctx, s.db, t, cols, r, charset)
 	}
 	return runLoad(ctx, s.db, qualify(t.Schema, t.Name), cols, r, charset, s.localInfile)
+}
+
+// markedBulkLoad runs a cluster member's bootstrap copy with the loop-suppression
+// marker set, so the cold-copy writes into the target are not self-captured into an
+// echo storm (CLAUDE.md §6). It pins a connection (the marker is connection-scoped),
+// sets @replicare_apply, runs the load on that connection, then clears the marker and
+// releases the connection — clearing on EVERY path (the pool is MaxOpenConns=1, so the
+// same physical connection returns to the next user).
+func (s *Sink) markedBulkLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode, charset string) (int64, error) {
+	// Warm the introspection cache BEFORE pinning: the merge path calls tableMeta,
+	// which uses the pool (MaxOpenConns=1), and would block on the pinned connection.
+	if mode == engine.LoadMerge {
+		if _, err := s.tableMeta(ctx, t); err != nil {
+			return 0, err
+		}
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("mysql: marked bulk load: pin connection: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), "SET @replicare_apply = NULL")
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "SET @replicare_apply = '1'"); err != nil {
+		return 0, fmt.Errorf("mysql: marked bulk load: set marker: %w", err)
+	}
+	if mode == engine.LoadMerge {
+		return s.mergeLoad(ctx, conn, t, cols, r, charset)
+	}
+	return runLoad(ctx, conn, qualify(t.Schema, t.Name), cols, r, charset, s.localInfile)
 }
 
 // execQuerier is the subset of database/sql satisfied by *sql.DB, *sql.Tx, and
