@@ -66,6 +66,12 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 			_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
 		}
 	}()
+	// On a cluster member, mark this apply so the origin-aware trigger does not
+	// re-capture replicare's own writes (loop suppression, CLAUDE.md §6). No-op on
+	// a one-way sink.
+	if err := s.setApplyMarker(ctx); err != nil {
+		return err
+	}
 
 	if _, err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
 		quoteIdentifier(stg), strings.Join(stgCols, ", "))); err != nil {

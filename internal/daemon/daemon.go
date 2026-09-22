@@ -115,7 +115,29 @@ func (d *Daemon) Run(ctx context.Context) error {
 			return d.runSync(gctx, sync)
 		})
 	}
-	d.log.Info("daemon started", slog.Int("syncs_owned", owned))
+
+	// Active-active clusters expand into one directed edge per ordered pair of
+	// members (full mesh, any N>=2): each edge is an independent single-active job,
+	// like a one-way sync, but in cluster mode (loop-suppressing capture + marked
+	// apply). A config with no clusters runs exactly as the one-way daemon.
+	edges := 0
+	for _, edge := range clusterEdges(d.cfg.Clusters) {
+		held, release, err := d.store.Acquire(gctx, edge.name())
+		if err != nil {
+			return fmt.Errorf("daemon: acquire ownership for %q: %w", edge.name(), err)
+		}
+		if !held {
+			d.log.Warn("cluster edge owned by another daemon; skipping", slog.String("edge", edge.name()))
+			continue
+		}
+		edges++
+		edge := edge
+		g.Go(func() error {
+			defer func() { _ = release() }()
+			return d.runClusterEdge(gctx, edge)
+		})
+	}
+	d.log.Info("daemon started", slog.Int("syncs_owned", owned), slog.Int("cluster_edges_owned", edges))
 
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err

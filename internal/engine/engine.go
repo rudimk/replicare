@@ -213,6 +213,34 @@ type KeyExister interface { // implemented by the Redis Source
 	MissingAtSource(ctx context.Context, t TableRef, keys []KeyValues) (missing []KeyValues, err error)
 }
 
+// OriginAwareCapturer is an OPTIONAL Source capability for cluster (multi-master)
+// members: it installs trigger-based capture whose trigger additionally SUPPRESSES
+// re-capturing writes that replicare itself applied (loop suppression, CLAUDE.md
+// §6 / docs/multi-master.md §5.4). The suppression keys on a session marker the
+// paired OriginMarkingSink sets on its apply/copy connections: the trigger fires
+// for an ordinary application write (no marker → captured, so a local write still
+// replicates outward) but not for a replicare-applied write (marker set → skipped,
+// so an inbound change is not echoed back around the mesh).
+//
+// It is used only for cluster members. One-way capture (InstallCapture) installs
+// NO such guard, so the one-way trigger DDL and delta DDL stay byte-identical — the
+// backward-compatibility invariant (a config with no clusters is exactly today's
+// one-way daemon). An engine that does not implement it cannot be a cluster member.
+type OriginAwareCapturer interface {
+	InstallOriginCapture(ctx context.Context, tables []TableRef) error
+}
+
+// OriginMarkingSink is an OPTIONAL Sink capability paired with OriginAwareCapturer:
+// once EnableOriginMarking is called, every apply/copy write through the Sink carries
+// the loop-suppression marker, so an origin-aware source on the same database does not
+// re-capture it (docs/multi-master.md §5.4). It is enabled ONLY for a cluster member's
+// sink; a one-way Sink is never enabled, so its writes set no marker and behave exactly
+// as before. The marker is transaction-scoped (Postgres SET LOCAL), so it cannot leak
+// past an apply/copy transaction onto an ordinary connection.
+type OriginMarkingSink interface {
+	EnableOriginMarking()
+}
+
 // DBSizer is an OPTIONAL Source/Sink capability: report on-disk sizes the
 // pipeline emits as size metrics. Relational engines implement it (Postgres
 // pg_database_size / pg_total_relation_size, MySQL information_schema); an engine

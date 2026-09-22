@@ -19,6 +19,22 @@ import (
 // replaced). Tables without a usable key are skipped (they cannot be captured;
 // pre-flight already warns).
 func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) error {
+	return s.installCapture(ctx, tables, false)
+}
+
+// InstallOriginCapture implements engine.OriginAwareCapturer: it installs capture
+// with the loop-suppression WHEN guard on the trigger, so replicare's own applies
+// (which set the applyMarkerGUC) are not re-captured on a cluster member (CLAUDE.md
+// §6, docs/multi-master.md §5.4). Everything else is identical to InstallCapture;
+// the only difference is the guarded trigger, so a table's delta/track/function DDL
+// is unchanged and the one-way path (InstallCapture) is byte-identical.
+func (s *Source) InstallOriginCapture(ctx context.Context, tables []engine.TableRef) error {
+	return s.installCapture(ctx, tables, true)
+}
+
+var _ engine.OriginAwareCapturer = (*Source)(nil)
+
+func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, origin bool) error {
 	if err := s.requireConn(); err != nil {
 		return err
 	}
@@ -39,7 +55,7 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 			// No usable key — cannot capture; skip (pre-flight warns).
 			continue
 		}
-		if err := s.installOne(ctx, ref, cols); err != nil {
+		if err := s.installOne(ctx, ref, cols, origin); err != nil {
 			return fmt.Errorf("postgres: install capture on %s: %w", ref, err)
 		}
 	}
@@ -47,8 +63,10 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 }
 
 // installOne installs capture for a single table within one transaction, so a
-// partial failure leaves no half-built capture objects.
-func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []captureCol) error {
+// partial failure leaves no half-built capture objects. origin selects the
+// loop-suppression trigger variant (cluster member) vs the byte-identical one-way
+// trigger.
+func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []captureCol, origin bool) error {
 	tx, err := s.conn.Begin(ctx)
 	if err != nil {
 		return err
@@ -66,7 +84,7 @@ func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []cap
 		deltaAutovacuumDDL(relID),
 		triggerFunctionDDL(relID, cols),
 		dropTriggerDDL(relID, qualifyTable(ref)),
-		createTriggerDDL(relID, qualifyTable(ref)),
+		createTriggerDDL(relID, qualifyTable(ref), origin),
 	}
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(ctx, stmt); err != nil {

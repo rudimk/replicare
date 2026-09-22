@@ -35,6 +35,21 @@ type config struct {
 	// of rows loaded, for the rows-copied progress metric. It may be called
 	// concurrently from multiple copy workers, so it must be safe for that.
 	progress func(engine.TableRef, int64)
+	// loadMode selects the per-chunk target write strategy. The default ("") is the
+	// empty-target direct COPY with DELETE-range resume (CLAUDE.md §4.1). Cluster
+	// (active-active) edges pass LoadMerge: every member is simultaneously a source
+	// being copied FROM and a target being written TO by its reciprocal edges, so a
+	// member's live table transiently carries rows the other edge just applied; a
+	// direct COPY of those bounced rows would collide on the target PK. The merge
+	// path (INSERT ... ON CONFLICT DO UPDATE) is idempotent against them and needs no
+	// DELETE-range resume.
+	loadMode engine.LoadMode
+}
+
+// WithLoadMode overrides the per-chunk target write strategy (default: direct COPY).
+// Cluster edges pass engine.LoadMerge so the concurrent cross-edge copy is idempotent.
+func WithLoadMode(m engine.LoadMode) Option {
+	return func(c *config) { c.loadMode = m }
 }
 
 func newConfig(options []Option) config {
@@ -92,7 +107,11 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 	if prog.Done {
 		return nil
 	}
-	if prog.Watermark != nil {
+	// The DELETE-range resume clears a partial direct-COPY tail before re-copying. The
+	// merge path (cluster edges) is idempotent via ON CONFLICT, so it neither needs
+	// nor wants the delete: in a mesh the tail rows may be legitimately present from
+	// the reciprocal edge, and deleting them would churn the peer's data.
+	if prog.Watermark != nil && cfg.loadMode != engine.LoadMerge {
 		if err := workers[0].Sink.DeleteRange(ctx, ref, prog.Watermark, nil); err != nil {
 			return fmt.Errorf("copy %s: clear resume tail: %w", ref, err)
 		}
@@ -132,7 +151,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 		wk := workers[w]
 		g.Go(func() error {
 			for i := range idxCh {
-				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i])
+				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i], cfg.loadMode)
 				if err != nil {
 					return fmt.Errorf("copy %s: chunk %d: %w", ref, i, err)
 				}
@@ -177,7 +196,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 // copyChunk pipes one chunk source→target via io.Pipe so it never fully buffers.
 // It returns the number of rows loaded into the target.
 func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
-	ref engine.TableRef, cols []string, c engine.Chunk) (int64, error) {
+	ref engine.TableRef, cols []string, c engine.Chunk, mode engine.LoadMode) (int64, error) {
 
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
@@ -186,7 +205,7 @@ func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	n, loadErr := sink.BulkLoad(ctx, ref, cols, pr, engine.LoadDirect)
+	n, loadErr := sink.BulkLoad(ctx, ref, cols, pr, mode)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {

@@ -22,6 +22,32 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if srcEp == nil || tgtEp == nil {
 		return nil, nil, fmt.Errorf("unknown source %q or target %q", sync.Source, targetName)
 	}
+	sel := engine.Selection{Include: sync.Include, Exclude: sync.Exclude}
+	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false)
+}
+
+// buildClusterEdge constructs a connected Syncer for one directed edge of an
+// active-active cluster (source node → target node): the same lifecycle as a one-way
+// sync, but in cluster mode — the source installs loop-suppressing origin-aware
+// capture and every sink is origin-marking, so replicare's own applies are not
+// re-captured and echoed back around the mesh (CLAUDE.md §6). Both endpoints are
+// cluster Nodes (each is simultaneously a source and a target).
+func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline.Syncer, func(), error) {
+	srcEp := d.cfg.Nodes[e.srcNode]
+	tgtEp := d.cfg.Nodes[e.dstNode]
+	if srcEp == nil || tgtEp == nil {
+		return nil, nil, fmt.Errorf("unknown cluster node %q or %q", e.srcNode, e.dstNode)
+	}
+	sel := engine.Selection{Include: e.cluster.Include, Exclude: e.cluster.Exclude}
+	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true)
+}
+
+// buildSyncerCore is the shared build path for a one-way sync target and a cluster
+// edge. clusterMode selects loop suppression: the returned Syncer installs origin-
+// aware capture and every sink it opened (main + copy pool) is switched to origin
+// marking. clusterMode=false is exactly the pre-multi-master path.
+func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp *config.Endpoint,
+	sel engine.Selection, tuning config.Tuning, targetName string, clusterMode bool) (*pipeline.Syncer, func(), error) {
 	eng, err := engine.Get(srcEp.Engine)
 	if err != nil {
 		return nil, nil, err
@@ -47,11 +73,16 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if err != nil {
 		return fail(fmt.Errorf("connect target: %w", err))
 	}
+	if clusterMode {
+		if err := enableOriginMarking(sink); err != nil {
+			return fail(err)
+		}
+	}
 
 	// Copy worker pool: parallel chunks come from having several Source/Sink
 	// pairs (a Source/Sink is not concurrency-safe). Sized by the source cap,
 	// bounded to at least one and to the target cap.
-	poolN := workerCount(sync.Tuning.Pool)
+	poolN := workerCount(tuning.Pool)
 	workers := make([]copy.Worker, 0, poolN)
 	for i := 0; i < poolN; i++ {
 		ws, err := d.openSource(ctx, eng, srcEp, &closers)
@@ -62,11 +93,15 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		if err != nil {
 			return fail(fmt.Errorf("connect copy target: %w", err))
 		}
+		if clusterMode {
+			if err := enableOriginMarking(wk); err != nil {
+				return fail(err)
+			}
+		}
 		workers = append(workers, copy.Worker{Src: ws, Sink: wk})
 	}
 
 	// Pre-flight for the topo-ordered components; refuse to start if blocked.
-	sel := engine.Selection{Include: sync.Include, Exclude: sync.Exclude}
 	srcSchema, err := source.Introspect(ctx, sel)
 	if err != nil {
 		return fail(fmt.Errorf("introspect source: %w", err))
@@ -94,13 +129,13 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if err != nil {
 		return fail(fmt.Errorf("target version: %w", err))
 	}
-	report := eng.Preflight(sync.Name, srcVer, tgtVer, srcSchema, tgtSchema)
+	report := eng.Preflight(name, srcVer, tgtVer, srcSchema, tgtSchema)
 	if report.Blocked() {
 		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix the target schema before starting", blockingCount(report)))
 	}
 
 	syncer := &pipeline.Syncer{
-		Name:             sync.Name,
+		Name:             name,
 		Source:           source,
 		Sink:             sink,
 		Target:           engine.TargetID(targetName),
@@ -109,17 +144,31 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		Tel:              d.tel,
 		Components:       report.Components,
 		Replicable:       report.Replicable,
-		ChunkOpts:        engine.ChunkOptions{TargetRows: chunkRows(sync.Tuning)},
-		DrainBatch:       drainBatch(sync.Tuning),
-		DrainInterval:    sync.Tuning.DrainInterval.Duration(),
-		ApplyConcurrency: sync.Tuning.ApplyConcurrency,
-		Retention:        retentionPolicy(sync.Tuning.Retention),
+		ChunkOpts:        engine.ChunkOptions{TargetRows: chunkRows(tuning)},
+		DrainBatch:       drainBatch(tuning),
+		DrainInterval:    tuning.DrainInterval.Duration(),
+		ApplyConcurrency: tuning.ApplyConcurrency,
+		Retention:        retentionPolicy(tuning.Retention),
+		ClusterMode:      clusterMode,
 	}
 	// Mark the streaming-liveness heartbeat once per pass (runSync registers the
 	// key after bring-up); lets /healthz restart a wedged pod.
-	key := healthKey(sync.Name, targetName)
+	key := healthKey(name, targetName)
 	syncer.Heartbeat = func() { d.beat.Mark(key) }
 	return syncer, cleanup, nil
+}
+
+// enableOriginMarking switches a cluster member's sink to origin-marking so its
+// apply/copy writes carry the loop-suppression marker. The engine must implement
+// OriginMarkingSink to be a cluster member (config validation admits only such
+// engines), so a missing implementation is a build-time error, not a silent no-op.
+func enableOriginMarking(sink engine.Sink) error {
+	m, ok := sink.(engine.OriginMarkingSink)
+	if !ok {
+		return fmt.Errorf("engine sink does not support origin marking (cannot be a cluster member)")
+	}
+	m.EnableOriginMarking()
+	return nil
 }
 
 func (d *Daemon) openSource(ctx context.Context, eng engine.Engine, ep *config.Endpoint, closers *[]func()) (engine.Source, error) {

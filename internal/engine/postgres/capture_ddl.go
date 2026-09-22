@@ -138,12 +138,40 @@ func triggerFunctionDDL(relID int, pk []captureCol) string {
 	return b.String()
 }
 
+// applyMarkerGUC is the session marker a cluster member's apply/copy connection
+// sets (SET LOCAL applyMarkerGUC = applyMarkerValue) so an origin-aware trigger
+// suppresses re-capturing replicare's own writes (loop suppression, CLAUDE.md §6).
+// It is a namespaced (dotted) placeholder GUC, so it needs no server-side
+// definition and no privilege to set — current_setting(name, true) returns NULL
+// when it was never set. The 2-argument current_setting requires PG >= 9.6, which
+// matches the existing capture floor.
+const (
+	applyMarkerGUC   = "replicare.apply"
+	applyMarkerValue = "1"
+)
+
+// originTriggerWhen is the WHEN clause that makes a capture trigger fire ONLY for
+// writes that are NOT replicare applies — the loop-suppression guard for cluster
+// members. It references only current_setting (no NEW/OLD), so it is a valid WHEN
+// on an AFTER ... FOR EACH ROW trigger.
+var originTriggerWhen = fmt.Sprintf(
+	"WHEN (current_setting('%s', true) IS NULL)", applyMarkerGUC)
+
 // createTriggerDDL attaches the capture trigger to a source table. It uses
 // EXECUTE PROCEDURE (not the PG11+ EXECUTE FUNCTION) for old-server portability.
-func createTriggerDDL(relID int, table string) string {
+//
+// When origin is true (a cluster member), the trigger carries the loop-suppression
+// WHEN guard so a replicare-applied write (which sets the applyMarkerGUC) is not
+// re-captured. When origin is false (the one-way path), NO guard is added, so the
+// generated DDL is byte-identical to the pre-multi-master trigger.
+func createTriggerDDL(relID int, table string, origin bool) string {
+	guard := ""
+	if origin {
+		guard = " " + originTriggerWhen
+	}
 	return fmt.Sprintf(
-		"CREATE TRIGGER %s AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE PROCEDURE %s()",
-		quoteIdentifier(triggerName(relID)), table, qualifiedCapture(triggerFnName(relID)))
+		"CREATE TRIGGER %s AFTER INSERT OR UPDATE OR DELETE ON %s FOR EACH ROW%s EXECUTE PROCEDURE %s()",
+		quoteIdentifier(triggerName(relID)), table, guard, qualifiedCapture(triggerFnName(relID)))
 }
 
 // dropTriggerDDL detaches the capture trigger from a source table.
