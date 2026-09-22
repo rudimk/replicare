@@ -23,7 +23,7 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		return nil, nil, fmt.Errorf("unknown source %q or target %q", sync.Source, targetName)
 	}
 	sel := engine.Selection{Include: sync.Include, Exclude: sync.Exclude}
-	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false)
+	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false, "", "")
 }
 
 // buildClusterEdge constructs a connected Syncer for one directed edge of an
@@ -39,7 +39,7 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 		return nil, nil, fmt.Errorf("unknown cluster node %q or %q", e.srcNode, e.dstNode)
 	}
 	sel := engine.Selection{Include: e.cluster.Include, Exclude: e.cluster.Exclude}
-	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true)
+	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID)
 }
 
 // buildSyncerCore is the shared build path for a one-way sync target and a cluster
@@ -47,7 +47,7 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 // aware capture and every sink it opened (main + copy pool) is switched to origin
 // marking. clusterMode=false is exactly the pre-multi-master path.
 func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp *config.Endpoint,
-	sel engine.Selection, tuning config.Tuning, targetName string, clusterMode bool) (*pipeline.Syncer, func(), error) {
+	sel engine.Selection, tuning config.Tuning, targetName string, clusterMode bool, srcNodeID, tgtNodeID string) (*pipeline.Syncer, func(), error) {
 	eng, err := engine.Get(srcEp.Engine)
 	if err != nil {
 		return nil, nil, err
@@ -74,7 +74,10 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return fail(fmt.Errorf("connect target: %w", err))
 	}
 	if clusterMode {
-		if err := enableOriginMarking(sink); err != nil {
+		if err := enableClusterReads(source); err != nil {
+			return fail(err)
+		}
+		if err := enableOriginMarking(sink, tgtNodeID); err != nil {
 			return fail(err)
 		}
 	}
@@ -94,7 +97,10 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 			return fail(fmt.Errorf("connect copy target: %w", err))
 		}
 		if clusterMode {
-			if err := enableOriginMarking(wk); err != nil {
+			if err := enableClusterReads(ws); err != nil {
+				return fail(err)
+			}
+			if err := enableOriginMarking(wk, tgtNodeID); err != nil {
 				return fail(err)
 			}
 		}
@@ -150,6 +156,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		ApplyConcurrency: tuning.ApplyConcurrency,
 		Retention:        retentionPolicy(tuning.Retention),
 		ClusterMode:      clusterMode,
+		NodeID:           srcNodeID,
 	}
 	// Mark the streaming-liveness heartbeat once per pass (runSync registers the
 	// key after bring-up); lets /healthz restart a wedged pod.
@@ -162,12 +169,24 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 // apply/copy writes carry the loop-suppression marker. The engine must implement
 // OriginMarkingSink to be a cluster member (config validation admits only such
 // engines), so a missing implementation is a build-time error, not a silent no-op.
-func enableOriginMarking(sink engine.Sink) error {
+func enableOriginMarking(sink engine.Sink, nodeID string) error {
 	m, ok := sink.(engine.OriginMarkingSink)
 	if !ok {
 		return fmt.Errorf("engine sink does not support origin marking (cannot be a cluster member)")
 	}
-	m.EnableOriginMarking()
+	m.EnableOriginMarking(nodeID)
+	return nil
+}
+
+// enableClusterReads switches a cluster member's source to version-aware re-read so
+// each re-read row carries its mesh version for HLC-LWW. The engine must implement
+// ClusterReadSource to be a cluster member.
+func enableClusterReads(src engine.Source) error {
+	c, ok := src.(engine.ClusterReadSource)
+	if !ok {
+		return fmt.Errorf("engine source does not support cluster reads (cannot be a cluster member)")
+	}
+	c.EnableClusterReads()
 	return nil
 }
 

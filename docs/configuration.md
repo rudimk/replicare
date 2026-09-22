@@ -205,17 +205,16 @@ delta queue to bound); Redis pacing lives in the `redis:` block instead
 
 ## Active-active clusters (`nodes` and `clusters`)
 
-> **Status: in progress.** For **Postgres**, a `clusters:` block **runs today**: the
-> daemon brings up a full-mesh active-active cluster with loop suppression, so writes
-> accepted on any node converge on all without echoing back (MM3). The HLC last-write-wins
-> that resolves *same-key* conflicts is the next milestone (MM4) — until it lands, a PG
-> mesh converges only for workloads that don't concurrently write the **same key** on two
-> nodes (partition writes by key). **MySQL/Redis** clusters are still parse-and-validate
-> only. See the [design note](multi-master.md#8-implementation-status) for the full status.
-> These keys are **optional and additive**: omit them and replicare behaves exactly as a
-> one-way daemon. Do not confuse a replicare **`clusters:`** entry (a group of
-> active-active peer databases) with a Redis endpoint's `redis.mode: cluster` (one
-> *sharded* Redis) — different scopes.
+> **Status: in progress.** For **Postgres**, a `clusters:` block **runs today** with full
+> conflict resolution: the daemon brings up a full-mesh active-active cluster with loop
+> suppression (MM3) and HLC last-write-wins (MM4), so writes accepted on any node — including
+> concurrent writes to the **same key** — converge to the same value on every node, with no
+> config and no user schema change; deletes resolve via GC'd tombstones. **MySQL/Redis**
+> clusters are still parse-and-validate only. See the
+> [design note](multi-master.md#8-implementation-status) for the full status. These keys are
+> **optional and additive**: omit them and replicare behaves exactly as a one-way daemon. Do
+> not confuse a replicare **`clusters:`** entry (a group of active-active peer databases) with
+> a Redis endpoint's `redis.mode: cluster` (one *sharded* Redis) — different scopes.
 
 An **active-active cluster** keeps N peer databases converged with writes accepted on
 **any** node. Conflict resolution is **zero-config** — replicare manages a hidden

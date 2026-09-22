@@ -37,7 +37,7 @@ func clusterMember(t *testing.T, ctx context.Context, role string, markSink bool
 		t.Fatalf("connect member sink (%s): %v", role, err)
 	}
 	if markSink {
-		sink.EnableOriginMarking()
+		sink.EnableOriginMarking("nodeB")
 	}
 	t.Cleanup(func() {
 		bg := context.Background()
@@ -67,7 +67,7 @@ func TestOriginCaptureSuppressesCrossNodeApply(t *testing.T) {
 	srcB, sinkB := clusterMember(t, ctx, "target", true)
 	mustExec(t, ctx, srcB.conn, "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)")
 	refB := engine.TableRef{Schema: "rc_it", Name: "orders"}
-	if err := srcB.InstallOriginCapture(ctx, []engine.TableRef{refB}); err != nil {
+	if err := srcB.InstallOriginCapture(ctx, []engine.TableRef{refB}, "nodeB"); err != nil {
 		t.Fatalf("InstallOriginCapture on B: %v", err)
 	}
 	relID, ok, err := lookupRegistry(ctx, srcB.conn, refB)
@@ -113,7 +113,7 @@ func TestOriginCopyMarkerSuppressesBootstrap(t *testing.T) {
 	src, markedSink := clusterMember(t, ctx, "target", true)
 	mustExec(t, ctx, src.conn, "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)")
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
-	if err := src.InstallOriginCapture(ctx, []engine.TableRef{ref}); err != nil {
+	if err := src.InstallOriginCapture(ctx, []engine.TableRef{ref}, "nodeB"); err != nil {
 		t.Fatalf("InstallOriginCapture: %v", err)
 	}
 	relID, _, _ := lookupRegistry(ctx, src.conn, ref)

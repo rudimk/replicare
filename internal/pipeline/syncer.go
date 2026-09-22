@@ -43,6 +43,12 @@ type Syncer struct {
 	// default) is the one-way path, byte-identical to the pre-multi-master daemon.
 	ClusterMode bool
 
+	// NodeID is this edge's SOURCE node's replication-origin identity (cluster mode
+	// only). The source's capture trigger stamps local changes into the version
+	// register as (hlc, NodeID) for HLC last-write-wins (CLAUDE.md §6). Empty on the
+	// one-way path.
+	NodeID string
+
 	// ApplyConcurrency is how many of a component's tables may apply at once during
 	// streaming (CLAUDE.md §8 parallel delta apply). 1 (the default) is the
 	// strictly-sequential per-table drain. Higher values fan the per-table apply
@@ -115,7 +121,7 @@ func (s *Syncer) installCapture(ctx context.Context) error {
 		if !ok {
 			return fmt.Errorf("syncer %s: cluster mode requires an origin-aware source", s.Name)
 		}
-		return oc.InstallOriginCapture(ctx, s.Replicable)
+		return oc.InstallOriginCapture(ctx, s.Replicable, s.NodeID)
 	}
 	return s.Source.InstallCapture(ctx, s.Replicable)
 }

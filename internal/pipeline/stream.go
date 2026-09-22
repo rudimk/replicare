@@ -99,6 +99,11 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		s.Tel.AddPurged(s.Name, tbl, n)
 	}
 
+	// Cluster (multi-master) tombstone GC: reclaim version-register tombstones whose
+	// delete every peer has consumed (CLAUDE.md §5.3). Source-side, so it runs every
+	// pass alongside retention; a no-op for the one-way path (no register).
+	s.gcTombstones(ctx)
+
 	if drainErr != nil {
 		// Target unhealthy: the source is now protected (Enforce ran); surface the
 		// failure and retry next pass. The needs_reseed flag, if set, persists and
@@ -170,6 +175,24 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// gcTombstones reclaims consumed version-register tombstones on a cluster edge
+// (CLAUDE.md §5.3). Best-effort: a GC error is logged and retried next pass, never
+// aborting streaming. A no-op unless the source implements TombstoneGC (cluster mode).
+func (s *Syncer) gcTombstones(ctx context.Context) {
+	if !s.ClusterMode {
+		return
+	}
+	gc, ok := s.Source.(engine.TombstoneGC)
+	if !ok {
+		return
+	}
+	for _, t := range s.Replicable {
+		if _, err := gc.GCTombstones(ctx, t); err != nil {
+			s.log(ctx, "tombstone GC error", err)
+		}
+	}
 }
 
 // touchCursors refreshes each replicable table's cursor timestamp on a healthy

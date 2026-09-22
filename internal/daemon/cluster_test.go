@@ -146,6 +146,145 @@ clusters:
 	}
 }
 
+// TestDaemonMeshSameKeyConflictConverges is the MM4 acceptance: concurrent writes to
+// the SAME key on two nodes of an active-active mesh converge to the SAME value on
+// both, resolved by HLC last-write-wins — and a delete-vs-update on the same key
+// resolves under the same total order. This is what MM3 could not do (MM3 converged
+// only for non-conflicting keys); MM4's version register + HLC-LWW closes it.
+func TestDaemonMeshSameKeyConflictConverges(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	defer cancel()
+
+	a := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	defer a.Close(context.Background())
+	b := dial(t, ctx, envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"))
+	defer b.Close(context.Background())
+
+	ddl := "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)"
+	for _, c := range []*pgx.Conn{a, b} {
+		mustExec(t, ctx, c, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		mustExec(t, ctx, c, "CREATE SCHEMA rc_it")
+		mustExec(t, ctx, c, ddl)
+		mustExec(t, ctx, c, "DROP SCHEMA IF EXISTS replicare CASCADE")
+	}
+	mustExec(t, ctx, b, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	t.Cleanup(func() {
+		bg := context.Background()
+		for _, c := range []*pgx.Conn{a, b} {
+			_, _ = c.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+			_, _ = c.Exec(bg, "DROP SCHEMA IF EXISTS replicare CASCADE")
+		}
+		_, _ = b.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	})
+
+	cfgYAML := fmt.Sprintf(`
+logging: { level: warn, format: text }
+state_store:
+  engine: postgres
+  postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+nodes:
+  a:
+    engine: postgres
+    postgres: { host: %[6]s, port: %[7]s, database: %[8]s, user: %[4]s, password: %[5]s, sslmode: disable }
+  b:
+    engine: postgres
+    postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+clusters:
+  - name: c1
+    engine: postgres
+    members: [a, b]
+    include: ["rc_it.*"]
+    tuning: { drain_interval: 100ms }
+`,
+		envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"),
+		envd("RC_USER", "postgres"), envd("RC_PASSWORD", "postgres"),
+		envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+
+	cfg, err := config.Load(writeConfig(t, cfgYAML))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+	defer func() { stop(); <-done }()
+
+	// Give both edges a moment to install capture + reach streaming (tables empty, so
+	// there is nothing to copy).
+	if !pollUntil(t, 30*time.Second, func() bool {
+		var n int
+		_ = b.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&n)
+		var m int
+		_ = a.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&m)
+		return n == 1 && m == 1
+	}) {
+		t.Fatalf("cluster did not bring up mesh state on both nodes")
+	}
+
+	// Concurrent conflict on the SAME key: different values written on each node.
+	mustExec(t, ctx, a, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-a')")
+	mustExec(t, ctx, b, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-b')")
+
+	// Convergence oracle: both nodes settle on the SAME value for key 1 (whichever
+	// (hlc, node) is greater — the test asserts agreement, not which one).
+	note := func(c *pgx.Conn) string {
+		var s string
+		if err := c.QueryRow(ctx, "SELECT note FROM rc_it.orders WHERE id=1").Scan(&s); err != nil {
+			return ""
+		}
+		return s
+	}
+	if !pollUntil(t, 40*time.Second, func() bool {
+		na, nb := note(a), note(b)
+		return na != "" && na == nb
+	}) {
+		t.Fatalf("same-key conflict did not converge: a=%q b=%q", note(a), note(b))
+	}
+	winner := note(a)
+	if winner != "from-a" && winner != "from-b" {
+		t.Fatalf("converged to an unexpected value %q (want one of the two writes)", winner)
+	}
+
+	// Stability: the converged value holds (no flip-flop / echo).
+	time.Sleep(2 * time.Second)
+	if note(a) != winner || note(b) != winner {
+		t.Fatalf("converged value not stable: a=%q b=%q, want %q", note(a), note(b), winner)
+	}
+
+	// Delete-vs-update conflict on the same key: delete on A, update on B. Under the
+	// total order one wins; both nodes must agree (either the row is gone on both, or
+	// present-and-identical on both).
+	mustExec(t, ctx, a, "DELETE FROM rc_it.orders WHERE id=1")
+	mustExec(t, ctx, b, "UPDATE rc_it.orders SET note='b-updated' WHERE id=1")
+	if !pollUntil(t, 40*time.Second, func() bool {
+		_, aok := existsRow(ctx, a)
+		_, bok := existsRow(ctx, b)
+		if aok != bok {
+			return false // still diverged on presence
+		}
+		return note(a) == note(b) // agree on value (both "" when absent)
+	}) {
+		t.Fatalf("delete-vs-update did not converge: a=%q b=%q", note(a), note(b))
+	}
+}
+
+// existsRow reports whether id=1 is present.
+func existsRow(ctx context.Context, c *pgx.Conn) (string, bool) {
+	var s string
+	err := c.QueryRow(ctx, "SELECT COALESCE(note,'') FROM rc_it.orders WHERE id=1").Scan(&s)
+	if err != nil {
+		return "", false
+	}
+	return s, true
+}
+
 // unconsumedDeltas sums the rows across every replicare delta table on a member.
 // After quiescence in a correctly loop-suppressed mesh this is 0: local writes were
 // consumed by the outbound edge, and replicare's own inbound applies were never
