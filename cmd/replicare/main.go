@@ -31,6 +31,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runValidate(args[1:], stdout, stderr)
 	case "status":
 		return runStatus(args[1:], stdout, stderr)
+	case "verify":
+		return runVerify(args[1:], stdout, stderr)
 	case "run":
 		return runDaemon(args[1:], stdout, stderr)
 	case "capture":
@@ -57,7 +59,8 @@ Commands:
   version               Print version information
   validate <config>     Introspect and pre-flight a config without starting sync
   run <config>          Run the daemon: all syncs until SIGINT/SIGTERM
-  status <config>       Report sync phase, lag, progress, and recent events
+  status <config>       Report phase, lag, live counts, delta backlog, events
+  verify <config>       Read-only source<->target convergence spot-check
   capture ... <config>  Install or remove source-side CDC capture
   reseed <config>       Flag a target for re-copy (--sync, --target)
   help                  Show this help

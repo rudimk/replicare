@@ -21,31 +21,50 @@ type Reader interface {
 	RecentEvents(ctx context.Context, sync string, limit int) ([]state.Event, error)
 }
 
-// Report is a sync's operator-facing status snapshot.
+// Report is a sync's operator-facing status snapshot. LiveError is set (only in
+// the CLI's live mode) when live signals could not be fully collected — e.g. the
+// source or a target was unreachable — so the state-store view still renders and
+// the degradation is explicit rather than silent.
 type Report struct {
 	Sync        string        `json:"sync"`
 	Tables      []TableStatus `json:"tables"`
 	Events      []EventView   `json:"recent_events"`
 	GeneratedAt time.Time     `json:"generated_at"`
+	LiveError   string        `json:"live_error,omitempty"`
 }
 
 // TableStatus is one table's initial-copy state plus its per-target streaming
-// state within the sync.
+// state within the sync. SourceRows is a live signal (populated only by the CLI's
+// live mode, nil in the state-store-only HTTP path).
 type TableStatus struct {
 	Table         string         `json:"table"`
 	CopyDone      bool           `json:"copy_done"`
 	CopyUpdatedAt *time.Time     `json:"copy_updated_at,omitempty"`
+	SourceRows    *int64         `json:"source_rows,omitempty"`
 	Targets       []TargetStatus `json:"targets"`
 }
 
 // TargetStatus is one (target, table) streaming cursor's status. CursorAgeSeconds
-// (now - last cursor write) is the lag proxy surfaced to operators.
+// (now - last cursor write) is the lag proxy surfaced to operators. TargetRows and
+// Backlog are live signals populated only by the CLI's live mode (nil otherwise).
 type TargetStatus struct {
-	Target           string  `json:"target"`
-	Phase            string  `json:"phase"`
-	LastDelta        int64   `json:"last_delta"`
-	NeedsReseed      bool    `json:"needs_reseed"`
-	CursorAgeSeconds float64 `json:"cursor_age_seconds"`
+	Target           string   `json:"target"`
+	Phase            string   `json:"phase"`
+	LastDelta        int64    `json:"last_delta"`
+	NeedsReseed      bool     `json:"needs_reseed"`
+	CursorAgeSeconds float64  `json:"cursor_age_seconds"`
+	TargetRows       *int64   `json:"target_rows,omitempty"`
+	Backlog          *Backlog `json:"delta_backlog,omitempty"`
+}
+
+// Backlog is a target's unconsumed-delta footprint for a table (CLAUDE.md §3.4):
+// the headline "is the source healthy / how far behind is streaming?" signal. It is
+// a live signal (populated only by the CLI's live mode). Engines with no durable
+// source-side queue (Redis) report an empty backlog.
+type Backlog struct {
+	Rows             int64   `json:"rows"`
+	Bytes            int64   `json:"bytes"`
+	OldestAgeSeconds float64 `json:"oldest_age_seconds"`
 }
 
 // EventView is a recent operational event for the "last error" / audit view.

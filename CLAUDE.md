@@ -604,6 +604,26 @@ must never be visible in only one channel.
 Treat lag, queue depth, per-table progress, **target reachability, and delta backlog** as the
 headline signals.
 
+**The CLI live surface — visibility without Grafana (decision).** Where the daemon must run somewhere a
+metrics stack can't reach it (e.g. *inside the source cluster*, the only path to the source
+datastores), the shipped binary is the dashboard. Two **read-only** commands read signals that live in
+the databases, not just the state store:
+- **`replicare status` is LIVE BY DEFAULT** — on top of the state-store phase/lag/reseed view it
+  connects to the source and targets and adds live source/target row (Redis: key) counts and the
+  per-target delta **backlog** (rows + oldest-unconsumed age). `--no-live` drops back to state-store
+  only; `--watch <dur>` refreshes in place. Best-effort: an unreachable endpoint degrades to a
+  `live: partial` note, never a failure.
+- **`replicare verify`** is a source↔target convergence spot-check: it counts and content-fingerprints
+  every replicated unit on both ends and reports `ok`/`drift-count`/`drift-checksum` per table, exit
+  non-zero on drift (the load-harness convergence check, folded into the binary).
+Both go through the optional **`engine.Verifier`** capability (`CountRows` + an order-independent,
+column-name-matched `Fingerprint`), implemented per engine (Postgres/MySQL: content hash; Redis:
+key-set membership hash — value-faithful `DUMP`/`RESTORE` makes per-value drift unexpected, deep
+content-verify is a follow-up). This is an **additive** operator surface: it installs nothing and is
+safe against a source we may not own. The runtime image is **Chainguard `wolfi-base`** (not `scratch`)
+so `kubectl exec … -- replicare status <config>` works — and a shell exists for interactive debugging —
+without changing the single-static-binary distribution.
+
 ---
 
 ## 11. Configuration & deployment
@@ -677,6 +697,7 @@ internal/engine/        # engine-agnostic Source/Sink interfaces + registry
 internal/pipeline/      # sync orchestration: initial copy, delta drain, worker pools
 internal/state/         # pluggable StateStore interface; v1 backend = Postgres (advisory-lock ownership)
 internal/observability/ # slog, Prometheus, OTel, status HTTP API
+  live/                 # operator LIVE CLI surface: `status --live` + `verify` (engine.Verifier + DeltaBacklog); read-only, no-Grafana path
 internal/copy/          # chunked bulk copy: keyset/ctid chunking, text COPY pipe, delete-range resume
 internal/delta/         # per-table delta+track lifecycle: consume, delete-by-id, batched purge, retention/reseed, autovacuum tuning
 internal/apply/         # idempotent batched apply; FK dependency-ordered + retry fallback; text-faithful (staging+upsert)
@@ -731,6 +752,7 @@ invasive.
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
+| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis key-set membership). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
 | Compatibility | **Must read from very old source Postgres**; keep source SQL conservative; target may use modern features. |

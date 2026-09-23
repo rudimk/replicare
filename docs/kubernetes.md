@@ -108,6 +108,26 @@ The Service exposes the **status** and **metrics** ports. Set
 > addresses your `config` binds (`observability.status_addr`, `metrics_addr`). The
 > defaults line up at `:8080` / `:9090`; if you change one, change both.
 
+### Checking progress without Prometheus/Grafana
+
+When you can't run a metrics stack next to the pod — e.g. the daemon runs **inside the source
+cluster** for network reasons — `exec` the CLI directly against the mounted config. The image is
+minimal, so target the binary rather than a shell (`kubectl exec` runs a command without needing
+`/bin/sh`):
+
+```sh
+kubectl exec deploy/replicare -- /usr/local/bin/replicare status /etc/replicare/config.yml   # live counts + delta backlog
+kubectl exec deploy/replicare -- /usr/local/bin/replicare verify /etc/replicare/config.yml   # source<->target convergence (exit 0 = converged)
+```
+
+`status` is live by default (source/target row counts + per-target delta backlog); `verify` is a
+read-only convergence spot-check. Both accept `--json`, `--sync <name>`, and `--watch <dur>`. See the
+[CLI reference](cli.md) and [Checking progress from the CLI](operations.md#checking-progress-from-the-cli-no-grafana-required).
+
+The runtime image is Chainguard `wolfi-base`, which also ships `/bin/sh` if you want an interactive
+session for ad-hoc debugging (`kubectl exec -it deploy/replicare -- /bin/sh`) — but the direct-exec
+form above needs no shell.
+
 ## Single-active, rollouts & state
 
 - **Keep `replicaCount: 1`.** replicare is single-active per sync — a second daemon
