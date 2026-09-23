@@ -2,12 +2,20 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"io"
 	"strings"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
+
+// txBeginner is the BeginTx surface shared by *sql.DB and a pinned *sql.Conn, so the
+// merge load runs on the pool (one-way) or on a marker-carrying pinned connection
+// (a cluster member's copy).
+type txBeginner interface {
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
 
 // mergeLoad implements the non-empty-target initial-copy path (§4.1): LOAD DATA
 // into a TEMPORARY staging table, then INSERT … SELECT … ON DUPLICATE KEY UPDATE
@@ -16,7 +24,7 @@ import (
 // session-scoped). Upsert is keyed on the replication key; secondary-unique
 // target tables are already blocked at pre-flight (Momus B1), so ON DUPLICATE
 // KEY cannot silently hit the wrong row here.
-func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, r io.Reader, charset string) (int64, error) {
+func (s *Sink) mergeLoad(ctx context.Context, beginner txBeginner, t engine.TableRef, cols []string, r io.Reader, charset string) (int64, error) {
 	tbl, err := s.tableMeta(ctx, t)
 	if err != nil {
 		return 0, err
@@ -34,7 +42,7 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 		return 0, err
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := beginner.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("mysql: merge load: begin: %w", err)
 	}

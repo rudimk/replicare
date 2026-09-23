@@ -1,17 +1,18 @@
 # Multi-master replication — design note
 
 > **Status: IN PROGRESS.** This document is the design; milestones are landing against
-> it. **Shipped so far (Postgres):** the `nodes:`/`clusters:` config surface (MM0–MM1),
-> **loop suppression** (MM3), and **HLC last-write-wins conflict resolution + tombstones
-> + GC** (MM4) — a full active-active Postgres mesh runs today: writes accepted on any
-> node converge on all, replicare's own applies are not re-captured and echoed, and
-> **concurrent writes to the same key converge to the same value on every node**,
-> resolved by a hidden `(hlc, node_id)` version (no user schema change), with deletes
-> handled by GC'd tombstones (§5.2, §5.3, §6.2, [§8 status](#8-implementation-status)).
-> **Not yet shipped:** the MySQL/Redis meshes (MM5–MM6) and HA leader election (MM8).
-> The **hard constraint** on all of this work is that the existing one-way path
-> (source → target(s), changes never flow back) keeps behaving **exactly** as it does
-> today — see [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
+> it. **Shipped for Postgres AND MySQL:** the `nodes:`/`clusters:` config surface
+> (MM0–MM1), **loop suppression** (MM3), and **HLC last-write-wins conflict resolution +
+> tombstones + GC** (MM4 for Postgres, MM5 mirrors it for MySQL) — a full active-active
+> mesh runs on both engines today: writes accepted on any node converge on all,
+> replicare's own applies are not re-captured and echoed, and **concurrent writes to the
+> same key converge to the same value on every node**, resolved by a hidden
+> `(hlc, node_id)` version (no user schema change), with deletes handled by GC'd
+> tombstones (§5.2, §5.3, §6.2, [§8 status](#8-implementation-status)). **Not yet
+> shipped:** the Redis mesh (MM6) and HA leader election (MM8). The **hard constraint**
+> on all of this work is that the existing one-way path (source → target(s), changes
+> never flow back) keeps behaving **exactly** as it does today — see
+> [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
 
 This note covers **Postgres, MySQL, and Redis**. It records what exists now, why
 naively wiring a bidirectional topology breaks today, the mechanisms a real
@@ -486,20 +487,37 @@ compiles and runs exactly as before.
 | MM2 | Per-target initial-copy progress (fan-out hardening) | **Shipped** |
 | MM3 | **Postgres loop suppression** — origin-aware capture, marked apply/copy, cluster→edge wiring, idempotent mesh copy | **Shipped** |
 | MM4 | **Postgres HLC-LWW** — version register + HLC, version-guarded apply, tombstones, GC | **Shipped** |
-| MM5 / MM6 | MySQL mesh / Redis mesh | Not started |
+| MM5 | **MySQL mesh** — mirror of MM3+MM4 for MySQL (`@replicare_apply` guard, inline HLC, version-guarded apply, GC) | **Shipped** |
+| MM6 | Redis mesh | Not started |
 | MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
 
-**What works today (Postgres):** define members under `nodes:`, group them in a
+**What works today (Postgres AND MySQL):** define members under `nodes:`, group them in a
 `clusters:` block, and the daemon runs a full-mesh active-active cluster — writes accepted
 on any node converge on all, initial copy is bidirectional and idempotent, replicare's own
 applies are **not** re-captured and echoed (loop suppression), and **concurrent writes to
 the same key converge to the same value on every node** under HLC last-write-wins, with
-deletes resolved by GC'd tombstones. Proven end-to-end by
-`internal/daemon.TestDaemonTwoNodeMeshConverges` (bidirectional convergence, no echo storm),
-`internal/daemon.TestDaemonMeshSameKeyConflictConverges` (concurrent same-key + delete-vs-update
-convergence), and engine-level tests for the version-guarded apply
-(`TestClusterApplyLWWResolvesByVersion` — out-of-order safety, node-id tiebreak,
-tombstone-vs-update) and GC (`TestGCTombstonesReclaimsConsumed`).
+deletes resolved by GC'd tombstones. Proven end-to-end for Postgres by
+`internal/daemon.TestDaemonTwoNodeMeshConverges` + `TestDaemonMeshSameKeyConflictConverges`,
+and for MySQL by `internal/daemon.TestDaemonMySQLMeshSameKeyConflictConverges` (concurrent
+same-key + delete-vs-update convergence on a 2-node MySQL mesh), plus engine-level tests for
+each engine's version-guarded apply (`TestClusterApplyLWWResolvesByVersion` — out-of-order
+safety, node-id tiebreak, tombstone-vs-update) and GC (`TestGCTombstonesReclaimsConsumed`).
+
+**MySQL specifics (MM5).** The design mirrors Postgres; three things differ because the
+engine forces them:
+- **Loop suppression** uses a `@replicare_apply` session **user variable** (MySQL has no
+  trigger `WHEN` clause): each of the three trigger bodies is wrapped in `IF
+  @replicare_apply IS NULL THEN … END IF`. The variable is CONNECTION-scoped (not
+  transaction-scoped like Postgres `SET LOCAL`), so it is reset on connection release
+  alongside `FOREIGN_KEY_CHECKS` (the apply pins one connection, `MaxOpenConns=1`), and set +
+  reset around the pinned bootstrap-copy connection.
+- **HLC** is a table (`replicare.hlc_state`) + **inline SQL** (a tick in the trigger body, an
+  observe in the apply), NOT a stored function — a data-modifying MySQL function needs
+  SUPER/`CREATE ROUTINE` under the managed-provider default, which would break the
+  no-superuser mandate.
+- **Version-guarded apply** cannot read the register inside an `INSERT … SELECT` that also
+  targets it (MySQL error 1093), so the winner set is computed once into a staging column and
+  every value/register statement reads that flag.
 
 **How MM4 resolves conflicts.** For every replicated row the source's capture trigger
 stamps a hidden version register `PK → (hlc, node_id[, tombstone])` in the `replicare`
