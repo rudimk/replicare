@@ -278,13 +278,23 @@ syncs:
 
 	// Per-target copy progress is independent: two rows (dst1, dst2) for the one
 	// table, keyed by target (the MM2 fix). State store lives on dst1's DB.
-	var progRows int
-	if err := tgt1.QueryRow(ctx,
-		"SELECT count(*) FROM replicare_state.copy_progress WHERE sync='fan' AND table_name='orders'").Scan(&progRows); err != nil {
-		t.Fatalf("count copy_progress: %v", err)
+	//
+	// Poll rather than instant-check: the convergence poll above waits on the target
+	// ROW COUNTS, but each target's copy_progress "done" row commits in a separate
+	// transaction from its data, so the second target's progress row can land a beat
+	// after both targets show 30 rows. Instant-checking here raced that write and
+	// intermittently saw 1. Polling for 2 proves both rows do land (a genuinely lost
+	// row never reaches 2, so this still fails loud on a real regression).
+	progRows := func() int {
+		var n int
+		if err := tgt1.QueryRow(ctx,
+			"SELECT count(*) FROM replicare_state.copy_progress WHERE sync='fan' AND table_name='orders'").Scan(&n); err != nil {
+			return -1
+		}
+		return n
 	}
-	if progRows != 2 {
-		t.Errorf("copy_progress rows for orders = %d, want 2 (one per target)", progRows)
+	if !pollUntil(t, 10*time.Second, func() bool { return progRows() == 2 }) {
+		t.Errorf("copy_progress rows for orders = %d, want 2 (one per target)", progRows())
 	}
 
 	// A live mutation streams to BOTH targets.
