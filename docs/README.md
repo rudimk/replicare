@@ -31,6 +31,13 @@ relational baseline using Postgres; each engine page covers that engine's specif
 Deployment artifacts live in [`../deploy/`](../deploy/): a sample systemd unit and
 the least-privilege grant SQL / Redis ACL presets. Runnable end-to-end demos are in
 [`../examples/`](../examples/) ([Postgres](../examples/demo/),
-[MySQL](../examples/demo-mysql/), [Redis](../examples/demo-redis/)).
+[MySQL](../examples/demo-mysql/), [Redis](../examples/demo-redis/)); one config that
+runs a Postgres and a Redis pipeline together is
+[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
+
+Load-and-verify harnesses that drive high-volume churn and assert the target
+converges live in [`../test/loadgen`](../test/loadgen/README.md) (Postgres) and
+[`../test/loadgen-redis`](../test/loadgen-redis/README.md) (Redis); see
+[Operations → Load & convergence testing](operations.md#load--convergence-testing).
 
 The design rationale and full decision log are in [`../CLAUDE.md`](../CLAUDE.md).
