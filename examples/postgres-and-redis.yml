@@ -1,0 +1,87 @@
+# replicare — one daemon, two pipelines: a Postgres sync AND a Redis sync.
+#
+# The single-engine rule is PER SYNC, not per config: each sync's source and
+# targets must share an engine, but one config (and one running daemon) can hold
+# a Postgres pipeline and a Redis pipeline side by side and stream both
+# concurrently, each under its own ownership lock.
+#
+# Any string may reference the environment as ${VAR} or ${VAR:-default}
+# (env wins; a required ${VAR} left unset is a hard error at load).
+
+logging:
+  level: info          # debug | info | warn | error
+  format: json         # json | text
+
+observability:
+  metrics_addr: ":9090"   # Prometheus /metrics
+  status_addr:  ":8080"   # health/status HTTP API (/status, /healthz)
+
+# The daemon's OWN operational state (copy progress, cursors, ownership locks).
+# ALWAYS Postgres in v1 — required even though one pipeline is Redis. It can be a
+# small dedicated Postgres; it never holds your replicated data.
+state_store:
+  engine: postgres
+  postgres:
+    host: "${STATE_DB_HOST:-pg-state}"
+    port: 5432
+    database: replicare_state
+    user: replicare
+    password: "${STATE_DB_PASSWORD}"
+    sslmode: require
+
+sources:
+  pg-src:
+    engine: postgres
+    postgres:
+      host: "${PG_SRC_HOST}"
+      port: 5432
+      database: app
+      user: replicare
+      password: "${PG_SRC_PASSWORD}"
+      sslmode: require
+  redis-src:
+    engine: redis
+    redis:
+      mode: standalone        # standalone | cluster | sentinel
+      host: "${REDIS_SRC_HOST}"
+      port: 6379
+      db: 0                    # logical DB (must be 0 in cluster mode)
+      password: "${REDIS_SRC_PASSWORD}"
+      tls: require             # disable | allow | prefer | require | verify-ca | verify-full
+
+targets:
+  pg-dst:
+    engine: postgres
+    postgres:
+      host: "${PG_DST_HOST}"
+      port: 5432
+      database: app
+      user: replicare
+      password: "${PG_DST_PASSWORD}"
+      sslmode: require
+  redis-dst:
+    engine: redis
+    redis:
+      mode: standalone
+      host: "${REDIS_DST_HOST}"
+      port: 6379
+      db: 0
+      password: "${REDIS_DST_PASSWORD}"
+      tls: require
+
+syncs:
+  # Pipeline 1 — Postgres -> Postgres. `include`/`exclude` are schema.table globs.
+  - name: pg-pipeline
+    source: pg-src
+    targets: [pg-dst]
+    include: ["public.*"]
+    exclude: ["*_audit"]
+    tuning:
+      drain_interval: 1s
+      drain_batch: 1000
+
+  # Pipeline 2 — Redis -> Redis. Here `include`/`exclude` are KEY-pattern globs.
+  - name: redis-pipeline
+    source: redis-src
+    targets: [redis-dst]
+    include: ["*"]            # e.g. "session:*" to scope to a key prefix
