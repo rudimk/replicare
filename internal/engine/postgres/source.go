@@ -23,7 +23,18 @@ type Source struct {
 	// does not re-introspect. Safe without a lock because a Source is
 	// single-connection / single-goroutine.
 	meta map[engine.TableRef]engine.Table
+	// cluster marks this Source as a cluster-edge source: its re-read emits the mesh
+	// version (hlc, node, deleted) alongside each row for HLC last-write-wins
+	// (CLAUDE.md §5.3). Off by default → the one-way re-read is byte-identical.
+	cluster bool
 }
+
+// EnableClusterReads implements engine.ClusterReadSource: it switches this Source's
+// re-read to the version-aware variant for a cluster edge. Called at build time for
+// the primary source and every copy-pool source.
+func (s *Source) EnableClusterReads() { s.cluster = true }
+
+var _ engine.ClusterReadSource = (*Source)(nil)
 
 // Compile-time assertion that *Source satisfies the interface.
 var _ engine.Source = (*Source)(nil)

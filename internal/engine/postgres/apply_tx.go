@@ -35,6 +35,11 @@ type pgApplyTx struct {
 	// the cyclic initial copy's NULL-then-fill (§4.1).
 	cyclicCols map[engine.TableRef][]string
 	committed  bool
+	// ensured records the tables whose target-side mesh objects (hlc_state, version
+	// register) this transaction created, so on commit they can be promoted to the
+	// sink's durable meshReady cache — but only after commit, so a rolled-back
+	// creation is re-ensured next pass (cluster mode only).
+	ensured map[engine.TableRef]bool
 }
 
 type stagingInfo struct {
@@ -50,6 +55,9 @@ var (
 // StageUpsert stages a table's re-read present rows into a per-table TEMP table
 // and upserts them, keeping the staging for a later DeleteAbsent in the same tx.
 func (tx *pgApplyTx) StageUpsert(ctx context.Context, t engine.TableRef, cols []string, reread io.Reader) error {
+	if tx.sink.origin {
+		return tx.stageUpsertCluster(ctx, t, cols, reread)
+	}
 	conn := tx.sink.conn
 	table, err := tx.sink.tableMeta(ctx, t)
 	if err != nil {
@@ -104,6 +112,9 @@ func (tx *pgApplyTx) StageUpsert(ctx context.Context, t engine.TableRef, cols []
 
 // DeleteAbsent deletes the dirty keys absent from the table's staging.
 func (tx *pgApplyTx) DeleteAbsent(ctx context.Context, t engine.TableRef, dirtyKeys []engine.KeyValues) error {
+	if tx.sink.origin {
+		return tx.deleteTombstonesCluster(ctx, t)
+	}
 	info, ok := tx.staging[t]
 	if !ok {
 		return fmt.Errorf("postgres: apply: DeleteAbsent before StageUpsert for %s", t)
@@ -152,6 +163,17 @@ func (tx *pgApplyTx) Commit(ctx context.Context) error {
 		return fmt.Errorf("postgres: apply: commit: %w", classifyFKViolation(err))
 	}
 	tx.committed = true
+	// Mesh objects created in this (now-committed) transaction are durable, so cache
+	// them on the sink to skip the IF-NOT-EXISTS ensure on later passes. Done only
+	// after commit, so a rolled-back creation is re-ensured next pass.
+	if len(tx.ensured) > 0 {
+		if tx.sink.meshReady == nil {
+			tx.sink.meshReady = make(map[engine.TableRef]bool)
+		}
+		for ref := range tx.ensured {
+			tx.sink.meshReady[ref] = true
+		}
+	}
 	return nil
 }
 

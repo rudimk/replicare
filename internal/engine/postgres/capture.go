@@ -19,7 +19,7 @@ import (
 // replaced). Tables without a usable key are skipped (they cannot be captured;
 // pre-flight already warns).
 func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) error {
-	return s.installCapture(ctx, tables, false)
+	return s.installCapture(ctx, tables, false, "")
 }
 
 // InstallOriginCapture implements engine.OriginAwareCapturer: it installs capture
@@ -28,18 +28,25 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 // §6, docs/multi-master.md §5.4). Everything else is identical to InstallCapture;
 // the only difference is the guarded trigger, so a table's delta/track/function DDL
 // is unchanged and the one-way path (InstallCapture) is byte-identical.
-func (s *Source) InstallOriginCapture(ctx context.Context, tables []engine.TableRef) error {
-	return s.installCapture(ctx, tables, true)
+func (s *Source) InstallOriginCapture(ctx context.Context, tables []engine.TableRef, nodeID string) error {
+	return s.installCapture(ctx, tables, true, nodeID)
 }
 
 var _ engine.OriginAwareCapturer = (*Source)(nil)
 
-func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, origin bool) error {
+func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, origin bool, nodeID string) error {
 	if err := s.requireConn(); err != nil {
 		return err
 	}
 	if err := s.ensureCaptureSchema(ctx); err != nil {
 		return err
+	}
+	// Cluster members additionally get the mesh version register + HLC (CLAUDE.md §6);
+	// a one-way source gets none of it, so its schema is unchanged.
+	if origin {
+		if err := ensureMeshState(ctx, s.conn, nodeID); err != nil {
+			return err
+		}
 	}
 	introspected, err := s.introspectTables(ctx, tables)
 	if err != nil {
@@ -78,14 +85,24 @@ func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []cap
 		return err
 	}
 
+	// The trigger function differs by mode: a cluster member additionally stamps the
+	// version register (and needs a per-table register table), while a one-way source
+	// keeps the byte-identical PK-only function. Everything else is shared.
+	triggerFn := triggerFunctionDDL(relID, cols)
 	stmts := []string{
 		deltaTableDDL(relID, cols),
 		trackTableDDL(relID),
 		deltaAutovacuumDDL(relID),
-		triggerFunctionDDL(relID, cols),
+	}
+	if origin {
+		triggerFn = meshTriggerFunctionDDL(relID, ref, cols)
+		stmts = append(stmts, registerTableDDL(ref, cols))
+	}
+	stmts = append(stmts,
+		triggerFn,
 		dropTriggerDDL(relID, qualifyTable(ref)),
 		createTriggerDDL(relID, qualifyTable(ref), origin),
-	}
+	)
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(ctx, stmt); err != nil {
 			return fmt.Errorf("exec: %w\n---\n%s", err, stmt)

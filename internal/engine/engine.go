@@ -226,8 +226,13 @@ type KeyExister interface { // implemented by the Redis Source
 // NO such guard, so the one-way trigger DDL and delta DDL stay byte-identical — the
 // backward-compatibility invariant (a config with no clusters is exactly today's
 // one-way daemon). An engine that does not implement it cannot be a cluster member.
+//
+// nodeID is this member's stable replication-origin identity (CLAUDE.md §6): the
+// capture trigger stamps every local change into the mesh version register as
+// (hlc, nodeID) so HLC last-write-wins can resolve conflicts (docs/multi-master.md
+// §5.3). It must be unique within the cluster.
 type OriginAwareCapturer interface {
-	InstallOriginCapture(ctx context.Context, tables []TableRef) error
+	InstallOriginCapture(ctx context.Context, tables []TableRef, nodeID string) error
 }
 
 // OriginMarkingSink is an OPTIONAL Sink capability paired with OriginAwareCapturer:
@@ -237,8 +242,33 @@ type OriginAwareCapturer interface {
 // sink; a one-way Sink is never enabled, so its writes set no marker and behave exactly
 // as before. The marker is transaction-scoped (Postgres SET LOCAL), so it cannot leak
 // past an apply/copy transaction onto an ordinary connection.
+//
+// nodeID is the TARGET member's own replication-origin identity, so the sink can ensure
+// the target's mesh state (its HLC clock, keyed to this node's id) exists for
+// version-guarded apply regardless of the order cluster edges start in. It equals the id
+// that node's own capture trigger stamps, so the two paths agree on one clock per DB.
 type OriginMarkingSink interface {
-	EnableOriginMarking()
+	EnableOriginMarking(nodeID string)
+}
+
+// ClusterReadSource is an OPTIONAL Source capability paired with OriginMarkingSink:
+// once EnableClusterReads is called, the Source's re-read emits each row's mesh
+// version — (hlc, node) and a tombstone flag from the version register — alongside the
+// row's values, so the paired sink can resolve conflicts with HLC last-write-wins
+// (CLAUDE.md §5.3). It is enabled for every cluster-edge source (the primary and the
+// copy pool, since concurrent apply re-reads through the pool). A one-way Source is
+// never enabled, so its re-read carries only values and behaves exactly as before.
+type ClusterReadSource interface {
+	EnableClusterReads()
+}
+
+// TombstoneGC is an OPTIONAL Source capability for cluster (multi-master) members: it
+// reclaims version-register tombstones whose delete has been consumed by every peer,
+// bounding the register's footprint (CLAUDE.md §5.3, docs/multi-master.md §5.3). The
+// pipeline calls it each streaming pass for a cluster edge; a one-way source does not
+// implement it (or is a no-op), so nothing runs on the one-way path.
+type TombstoneGC interface {
+	GCTombstones(ctx context.Context, t TableRef) (int64, error)
 }
 
 // DBSizer is an OPTIONAL Source/Sink capability: report on-disk sizes the

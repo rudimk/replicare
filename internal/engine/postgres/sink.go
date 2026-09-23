@@ -26,6 +26,12 @@ type Sink struct {
 	// replicare's own writes (CLAUDE.md §6). Off by default → the one-way path
 	// sets no marker and is byte-identical.
 	origin bool
+	// nodeID is the TARGET member's own replication-origin identity, used to ensure
+	// the target's mesh HLC state exists for version-guarded apply (set with origin).
+	nodeID string
+	// meshReady records tables whose target-side version register has been ensured,
+	// so the per-pass apply ensures it at most once per table.
+	meshReady map[engine.TableRef]bool
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
@@ -40,8 +46,12 @@ var (
 
 // EnableOriginMarking implements engine.OriginMarkingSink: it switches this Sink to
 // cluster-apply mode so every subsequent apply/copy transaction carries the
-// loop-suppression marker. Called once at build time for a cluster member's sink.
-func (s *Sink) EnableOriginMarking() { s.origin = true }
+// loop-suppression marker, and records the target member's own node id for ensuring
+// the target's mesh state. Called once at build time for a cluster member's sink.
+func (s *Sink) EnableOriginMarking(nodeID string) {
+	s.origin = true
+	s.nodeID = nodeID
+}
 
 // setApplyMarker sets the transaction-scoped loop-suppression marker when this Sink
 // is a cluster member. It MUST be called inside an open transaction (SET LOCAL is a

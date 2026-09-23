@@ -1,14 +1,14 @@
 # Multi-master replication — design note
 
 > **Status: IN PROGRESS.** This document is the design; milestones are landing against
-> it. **Shipped so far (Postgres):** the `nodes:`/`clusters:` config surface (MM0–MM1)
-> and **loop suppression** — an active-active Postgres mesh runs today: writes accepted
-> on any node converge on all, and replicare's own applies are not re-captured and echoed
-> (MM3, §5.2, §6.2, [§8 status](#8-implementation-status)). **Not yet shipped:** the
-> HLC-LWW version register + tombstones that resolve *same-key* conflicts (MM4), and the
-> MySQL/Redis meshes (MM5–MM6). Until MM4 lands, an active-active PG mesh converges only
-> for workloads that do not concurrently write the **same key** on two nodes (e.g.
-> node-partitioned key ranges); concurrent same-key writes are unresolved until LWW.
+> it. **Shipped so far (Postgres):** the `nodes:`/`clusters:` config surface (MM0–MM1),
+> **loop suppression** (MM3), and **HLC last-write-wins conflict resolution + tombstones
+> + GC** (MM4) — a full active-active Postgres mesh runs today: writes accepted on any
+> node converge on all, replicare's own applies are not re-captured and echoed, and
+> **concurrent writes to the same key converge to the same value on every node**,
+> resolved by a hidden `(hlc, node_id)` version (no user schema change), with deletes
+> handled by GC'd tombstones (§5.2, §5.3, §6.2, [§8 status](#8-implementation-status)).
+> **Not yet shipped:** the MySQL/Redis meshes (MM5–MM6) and HA leader election (MM8).
 > The **hard constraint** on all of this work is that the existing one-way path
 > (source → target(s), changes never flow back) keeps behaving **exactly** as it does
 > today — see [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
@@ -248,6 +248,30 @@ register, so copied rows carry their true `(hlc, node)` rather than a fresh loca
 
 ### 5.3 Conflict resolution — zero-config, replicare-managed
 
+> **Shipped for Postgres (MM4)**, exactly as described below. Implementation:
+> - **Version register** — a per-table `reg_<hash>` table in the source `replicare`
+>   schema keyed by the primary key, holding `(rc_hlc_phys, rc_hlc_log, rc_node,
+>   rc_deleted)`; named by a stable hash of `schema.table` so every member computes the
+>   same name (`internal/engine/postgres/mesh.go`). Mesh-only — a one-way source has no
+>   register.
+> - **HLC** — a single-row `replicare.hlc_state` (physical, logical, node_id) with
+>   `replicare.hlc_tick()` (advance for a local write) and `replicare.hlc_observe()`
+>   (advance past an incoming version on apply). The cluster capture trigger stamps the
+>   register with a fresh tick on every local change; a delete (and the old key of a
+>   PK-change) writes a tombstone (`rc_deleted=true`).
+> - **Version-guarded apply** — the re-read carries each row's version
+>   (`rereadVersioned`), and apply upserts the value + register, or deletes + tombstones,
+>   **only when the incoming `(hlc, node)` strictly beats the target register**
+>   (`internal/engine/postgres/apply_mesh.go`); otherwise a no-op. The target HLC is then
+>   advanced past the max applied version.
+> - **GC** — a tombstone is reclaimed once its delete's delta has been consumed by every
+>   peer (the delta is purged), reusing the consume+purge machinery as the distributed
+>   watermark (`GCTombstones`, run each streaming pass).
+>
+> **Not yet:** seeding the target register from the source's during the initial COPY
+> (the bootstrap-vs-concurrent caveat in [§8](#8-implementation-status)); MySQL/Redis
+> (MM5–MM6).
+
 replicare deliberately has **no commit-order signal** (the entire trigger-CDC premise;
 `CLAUDE.md` §3.3), so it cannot do true causal ordering. And a hard product requirement:
 **conflict resolution must need no user schema change and no user-specified column.**
@@ -461,26 +485,41 @@ compiles and runs exactly as before.
 | MM0–MM1 | `nodes:`/`clusters:` config surface; one-way cycle guardrail; fan-out per-target progress | **Shipped** |
 | MM2 | Per-target initial-copy progress (fan-out hardening) | **Shipped** |
 | MM3 | **Postgres loop suppression** — origin-aware capture, marked apply/copy, cluster→edge wiring, idempotent mesh copy | **Shipped** |
-| MM3 (register) | Version register + HLC + bootstrap register seeding | Deferred to land with MM4 (see note) |
-| MM4 | Postgres HLC-LWW conflict resolution + tombstones + GC | Not started |
+| MM4 | **Postgres HLC-LWW** — version register + HLC, version-guarded apply, tombstones, GC | **Shipped** |
 | MM5 / MM6 | MySQL mesh / Redis mesh | Not started |
 | MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
 
 **What works today (Postgres):** define members under `nodes:`, group them in a
 `clusters:` block, and the daemon runs a full-mesh active-active cluster — writes accepted
-on any node converge on all, initial copy is bidirectional and idempotent, and replicare's
-own applies are **not** re-captured and echoed (loop suppression). Proven end-to-end by
-`internal/daemon.TestDaemonTwoNodeMeshConverges` (a 2-node PG mesh that converges both ways
-and stays stable — no echo storm) and the engine-level
-`internal/engine/postgres.TestOriginCaptureSuppressesCrossNodeApply`.
+on any node converge on all, initial copy is bidirectional and idempotent, replicare's own
+applies are **not** re-captured and echoed (loop suppression), and **concurrent writes to
+the same key converge to the same value on every node** under HLC last-write-wins, with
+deletes resolved by GC'd tombstones. Proven end-to-end by
+`internal/daemon.TestDaemonTwoNodeMeshConverges` (bidirectional convergence, no echo storm),
+`internal/daemon.TestDaemonMeshSameKeyConflictConverges` (concurrent same-key + delete-vs-update
+convergence), and engine-level tests for the version-guarded apply
+(`TestClusterApplyLWWResolvesByVersion` — out-of-order safety, node-id tiebreak,
+tombstone-vs-update) and GC (`TestGCTombstonesReclaimsConsumed`).
 
-**Note on the version register.** The milestone plan grouped the HLC version register into
-MM3, but the register is *inert* until MM4 consumes it for conflict resolution — writing it
-in MM3 would be untested dead weight. It is therefore deferred to land **with** MM4's
-HLC-LWW, keeping each PR independently verifiable. Consequence for today: cross-node writes
-apply last-writer-**by-arrival**, not by `(hlc, node)`, so a mesh converges correctly only
-for workloads that do not concurrently write the **same key** on two nodes (e.g.
-node-partitioned key ranges). Same-key conflict resolution arrives with MM4.
+**How MM4 resolves conflicts.** For every replicated row the source's capture trigger
+stamps a hidden version register `PK → (hlc, node_id[, tombstone])` in the `replicare`
+schema — no user column. `hlc` is a hybrid logical clock (`replicare.hlc_tick()`), advanced
+past every incoming version on apply (`replicare.hlc_observe()`), so it tracks wall-clock
+and tolerates skew. The re-read carries each row's version; apply upserts (or, for a
+tombstone, deletes) **only when the incoming `(hlc, node)` strictly beats the target
+register**, so a stale write arriving out of order loses and a delete competes with a
+concurrent update under one total order (`node_id` breaks equal-HLC ties → no ties). This is
+a last-write-wins register CRDT: it converges for any N regardless of message order.
+Tombstones are reclaimed once their delete has been consumed by every peer (the delete's
+delta is purged), so the register stays bounded.
+
+**Bootstrap-vs-conflict caveat.** The register is stamped on local writes and updated on
+apply, but the initial COPY does **not** yet seed the target register from the source's (a
+small follow-up). So a value placed purely by initial copy, never re-written and never
+applied-over, has no local register entry until it is next written or received — a remote
+write for such a key always wins even if the copied value was newer. This only affects a key
+written concurrently *during* a member's initial copy; steady-state and post-bootstrap
+same-key conflicts resolve correctly (each side stamps its own write).
 
 ### 8.1 Usage — running a Postgres active-active cluster
 
@@ -516,10 +555,13 @@ clusters:
   member is both. No superuser, no `REPLICATION`, no `wal_level` change.
 - **What the daemon does.** It expands the cluster into one directed edge per ordered pair
   of members and runs each edge as an independent single-active job: origin-aware capture on
-  the edge's source, a marked (loop-suppressing) sink on its target. Each edge takes its own
-  ownership lock, so several daemon replicas can share a cluster's edges.
-- **Caveat (pre-MM4).** Partition writes by key across nodes (or otherwise avoid concurrent
-  same-key writes) until HLC-LWW lands — see the note above.
+  the edge's source, a marked (loop-suppressing) sink on its target, and HLC-LWW
+  version-guarded apply. Each edge takes its own ownership lock, so several daemon replicas
+  can share a cluster's edges.
+- **Conflict resolution is automatic.** Writes may land on any node, including the same key
+  concurrently — HLC last-write-wins converges every node to the same value, with no config
+  and no user schema change (see §5.3). The only remaining caveat is the bootstrap-vs-concurrent
+  edge documented above (initial-copy register seeding is a follow-up).
 
 ---
 
