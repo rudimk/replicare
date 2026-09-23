@@ -289,6 +289,42 @@ type DBSizer interface {
 	ReplicatedSize(ctx context.Context, tables []TableRef) (int64, error)
 }
 
+// Fingerprint is one replication unit's convergence signature: its live row/key
+// count plus a canonical content hash. The hash is comparable ONLY between the
+// source and target of the SAME engine (a sync is single-engine, §6) — both ends
+// are hashed by the identical algorithm — so `verify` compares two Fingerprints of
+// one unit, never across engines. Checksum is empty ("") when the engine cannot
+// cheaply content-hash the unit, in which case the caller compares Rows alone.
+type Fingerprint struct {
+	Rows     int64
+	Checksum string
+}
+
+// Verifier is an OPTIONAL Source/Sink capability powering the operator-facing
+// read-only surfaces: live row counts (`replicare status`, live mode) and
+// source↔target convergence spot-checks (`replicare verify`). It performs only
+// reads and installs nothing, so it is safe to run against a source we may not own
+// and against a live target. BOTH a Source and a Sink may implement it: the CLI
+// counts/fingerprints the source through its Source and each target through its
+// Sink, then compares. An engine that does not implement it simply omits these
+// live signals (the CLI falls back to state-store-only status, and reports verify
+// as unsupported for that engine).
+type Verifier interface {
+	// CountRows returns the current row (relational) or key (Redis) count for one
+	// replication unit, honoring the sync selection the endpoint was introspected
+	// with. It is a live query against the endpoint, so it can be relatively
+	// expensive on a very large unit; callers gate it behind an explicit flag.
+	CountRows(ctx context.Context, t TableRef) (int64, error)
+	// Fingerprint returns the unit's count plus a canonical, order-independent
+	// content hash over the given name-matched column projection (cols) so it is
+	// robust to physical column-order differences between source and target. cols
+	// is the sorted, insert-eligible column list the caller derives from the source
+	// schema and passes for BOTH ends; engines whose unit has no columns (Redis)
+	// ignore it. The returned Checksum is comparable between source and target of
+	// the same engine (see Fingerprint doc).
+	Fingerprint(ctx context.Context, t TableRef, cols []string) (Fingerprint, error)
+}
+
 // CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an
 // engine-specific strategy to INITIALLY COPY an FK component containing a cycle or
 // self-reference (Postgres/MySQL trigger CDC — the plain parents-first chunked copy

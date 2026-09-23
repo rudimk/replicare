@@ -221,11 +221,88 @@ A degrading target surfaces in **metrics, traces, AND logs at once** — never j
 The daemon serves an operator HTTP surface (bound to `observability.status_addr`, e.g. `:8080`):
 
 - **`GET /status`** — JSON snapshot per sync/target/table: phase (initial_copy/streaming), rows
-  copied vs total, replication lag, and last error. This is what the CLI `replicare status` renders;
-  add `--json` to the CLI for the raw body.
+  copied vs total, replication lag, and last error, read from the state store.
 - **`GET /healthz`** — a liveness probe (200 when the daemon is up), for Kubernetes/load balancers.
 - **`GET /metrics`** — the Prometheus scrape. It is served here too, and additionally on
   `observability.metrics_addr` when that is set to a different address (the conventional split).
+
+The CLI `replicare status` reads the same state-store snapshot **and adds live signals** on top —
+see the next section.
+
+## Checking progress from the CLI (no Grafana required)
+
+When you can't deploy Grafana next to replicare — e.g. the daemon runs **inside the source cluster**
+because that's the only network path to the source databases — the CLI is your dashboard. Two
+read-only commands answer "what is it doing, and has it caught up?" directly against the config, with
+no metrics stack:
+
+```sh
+replicare status config.yml            # phase, lag, LIVE row counts + delta backlog
+replicare status config.yml --watch 5s # refresh in place until Ctrl-C
+replicare verify config.yml            # source<->target convergence spot-check (exit 0 = converged)
+```
+
+- **`status`** is [live by default](cli.md#status-config---json---sync-name---no-live---watch-dur): on
+  top of the state-store view it connects to the source and targets and shows live `SRC_ROWS` /
+  `TGT_ROWS` and the per-target delta `BACKLOG` (`rows (oldest-age)`), so initial-copy progress and
+  streaming catch-up are concrete numbers. `--no-live` drops back to state-store-only.
+- **`verify`** is a [read-only convergence check](cli.md#verify-config---json---sync-name---watch-dur):
+  it counts and content-fingerprints every replicated unit on both ends and reports `ok` /
+  `drift-count` / `drift-checksum` per table, exiting non-zero on drift — the same count+checksum
+  convergence logic the load-test harnesses use, folded into the shipped binary.
+
+Both take `--json` (for scripting) and `--watch <dur>` (repeat on an interval). Both are read-only and
+install nothing, so they're safe to run against a source you may not own.
+
+**Running the CLI in the pod (no shell needed).** The container image is minimal, so don't rely on a
+shell being present — invoke the binary directly, which `kubectl exec` does without any shell:
+
+```sh
+kubectl exec <pod> -- /usr/local/bin/replicare status /etc/replicare/config.yml
+kubectl exec <pod> -- /usr/local/bin/replicare verify /etc/replicare/config.yml
+```
+
+The runtime image is [Chainguard `wolfi-base`](../Dockerfile), which *does* include `/bin/sh` if you
+want an interactive session (`kubectl exec -it <pod> -- /bin/sh`), but the direct-exec form above is
+all you need for a progress check.
+
+## Running multiple pipelines in one instance
+
+One replicare config — and one daemon process — can run **several syncs across different engines at
+once**. The single-engine rule is **per sync**, not per config: each sync's source and targets must
+share an engine, but a config may hold a Postgres sync and a Redis sync side by side, and the daemon
+runs them concurrently (each under its own single-active ownership lock).
+
+```yaml
+state_store:                     # ALWAYS Postgres — even for a Redis-only deployment
+  engine: postgres
+  postgres: { host: pg-state, port: 5432, database: replicare_state, user: replicare, password: ${STATE_PW} }
+sources:
+  pg-src:    { engine: postgres, postgres: { host: pg-source,  port: 5432, database: app, user: replicare, password: ${PG_PW} } }
+  redis-src: { engine: redis,    redis:    { mode: standalone, nodes: [redis-source:6379] } }
+targets:
+  pg-dst:    { engine: postgres, postgres: { host: pg-target,  port: 5432, database: app, user: replicare, password: ${PG_TGT_PW} } }
+  redis-dst: { engine: redis,    redis:    { mode: standalone, nodes: [redis-target:6379] } }
+syncs:
+  - name: pg-pipeline
+    source: pg-src
+    targets: [pg-dst]
+    include: ["public.*"]
+  - name: redis-pipeline
+    source: redis-src
+    targets: [redis-dst]
+    include: ["*"]
+```
+
+`replicare run config.yml` streams both. `replicare status config.yml` shows both (the Postgres
+sync with row counts + delta backlog, the Redis sync with key counts and `-` backlog, since Redis has
+no source-side queue). `replicare verify config.yml` checks both. Scope any command to one with
+`--sync pg-pipeline`.
+
+> **State store is always Postgres** (v1's only backend), even for a Redis→Redis pipeline where no
+> data touches Postgres — a documented requirement, not a bug. See
+> [redis-statestore.md](redis-statestore.md). If you have no Postgres to spare, that is the one piece
+> of infrastructure a Redis-only deployment still needs.
 
 ## Forcing a reseed
 

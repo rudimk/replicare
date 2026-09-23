@@ -1,8 +1,12 @@
-# replicare — multi-stage build producing a tiny static image.
+# replicare — multi-stage build producing a small, static image.
 #
-# The binary is pure-Go (pgx has no cgo), so it links statically and runs from
-# `scratch` with nothing but CA certificates (needed for TLS to source/target
-# databases). Build with version metadata:
+# The binary is pure-Go (pgx has no cgo), so it links statically. The runtime
+# stage is Chainguard's wolfi-base: a minimal, low-CVE image that — unlike
+# `scratch` — ships a shell (/bin/sh), busybox tooling, and apk, so an operator
+# can `kubectl exec -it <pod> -- /bin/sh` for interactive debugging AND run the
+# binary directly (`kubectl exec <pod> -- replicare status /config.yml`). It
+# already carries a CA bundle for TLS to source/target databases. Build with
+# version metadata:
 #
 #   docker build \
 #     --build-arg VERSION=$(git describe --tags --always) \
@@ -32,11 +36,14 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -o /out/replicare ./cmd/replicare
 
 # ---- runtime stage ----
-FROM scratch
+FROM cgr.dev/chainguard/wolfi-base:latest
+# wolfi-base ships a CA bundle, but copy the build stage's too so TLS works even
+# if the base's bundle path ever moves — belt and suspenders, cheap and offline.
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /out/replicare /usr/local/bin/replicare
 
-# Run unprivileged (nobody). scratch has no /etc/passwd, so use a numeric UID.
+# Run unprivileged. Use a numeric UID (nobody) so it holds regardless of the
+# base image's /etc/passwd contents.
 USER 65534:65534
 
 # The status/metrics HTTP surface (configurable; these are the sample defaults).
