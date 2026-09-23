@@ -598,7 +598,12 @@ func perTableApplyCyclic(ctx context.Context, src engine.Source, sink engine.Sin
 // transaction (no deletes). An FK violation here is transient (a child whose
 // parent has not landed yet) and is classified as such by StageUpsert.
 func perTableUpsert(ctx context.Context, src engine.Source, sink engine.Sink, w tableWork) error {
-	tx, err := sink.BeginApply(ctx, false, nil)
+	// Pass the table as the component set so an engine that pre-populates its
+	// introspection cache in BeginApply (MySQL, whose apply pins a single connection)
+	// warms this table's metadata BEFORE pinning — otherwise a cache-miss introspect
+	// during StageUpsert would block on the pinned connection. Postgres ignores it for
+	// an acyclic (cyclic=false) apply.
+	tx, err := sink.BeginApply(ctx, false, []engine.TableRef{w.ref})
 	if err != nil {
 		return err
 	}
@@ -623,7 +628,8 @@ func perTableUpsert(ctx context.Context, src engine.Source, sink engine.Sink, w 
 // re-read + upsert) so DeleteAbsent can tell present from absent; the re-upsert is
 // bounded (batch) and harmless.
 func perTableDelete(ctx context.Context, src engine.Source, sink engine.Sink, w tableWork) error {
-	tx, err := sink.BeginApply(ctx, false, nil)
+	// See perTableUpsert: pass the table so MySQL pre-warms its metadata before pinning.
+	tx, err := sink.BeginApply(ctx, false, []engine.TableRef{w.ref})
 	if err != nil {
 		return err
 	}

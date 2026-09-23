@@ -73,6 +73,17 @@ func (s *Sink) BeginApply(ctx context.Context, cyclic bool, componentTables []en
 		_ = conn.Close()
 		return nil, fmt.Errorf("mysql: begin apply: begin: %w", err)
 	}
+	// On a cluster member, mark this apply connection so the origin-aware capture
+	// triggers do not re-capture replicare's own writes (loop suppression, CLAUDE.md
+	// §6). A MySQL user variable is CONNECTION-scoped (not transaction-scoped like
+	// Postgres SET LOCAL), so it is reset in closeConn on the pinned connection.
+	if s.origin {
+		if _, err := tx.ExecContext(ctx, "SET @replicare_apply = '1'"); err != nil {
+			_ = tx.Rollback()
+			_ = conn.Close()
+			return nil, fmt.Errorf("mysql: begin apply: set apply marker: %w", err)
+		}
+	}
 	if cyclic {
 		if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
 			_ = tx.Rollback()
@@ -92,6 +103,9 @@ func (s *Sink) BeginApply(ctx context.Context, cyclic bool, componentTables []en
 // VALUES(col)) so it lands the verbatim source value, not the target's apply-time
 // now() (§0.4/Momus M2). The staging is kept for a later DeleteAbsent in the same tx.
 func (t *mysqlApplyTx) StageUpsert(ctx context.Context, ref engine.TableRef, cols []string, reread io.Reader) error {
+	if t.sink.origin {
+		return t.stageUpsertCluster(ctx, ref, cols, reread)
+	}
 	tbl, err := t.sink.tableMeta(ctx, ref) // cache hit (pre-populated in BeginApply)
 	if err != nil {
 		return err
@@ -151,6 +165,9 @@ func (t *mysqlApplyTx) StageUpsert(ctx context.Context, ref engine.TableRef, col
 // DeleteAbsent deletes the dirty keys absent from the table's staging (deleted at
 // the source). Requires a prior StageUpsert for ref.
 func (t *mysqlApplyTx) DeleteAbsent(ctx context.Context, ref engine.TableRef, dirtyKeys []engine.KeyValues) error {
+	if t.sink.origin {
+		return t.deleteTombstonesCluster(ctx, ref)
+	}
 	info, ok := t.staging[ref]
 	if !ok {
 		return fmt.Errorf("mysql: apply: DeleteAbsent before StageUpsert for %s", ref)
@@ -225,6 +242,12 @@ func (t *mysqlApplyTx) closeConn(ctx context.Context) error {
 	}
 	if t.cyclic {
 		_, _ = t.conn.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1")
+	}
+	// The loop-suppression marker is connection-scoped and outlives commit/rollback,
+	// so it MUST be cleared here (the pool is MaxOpenConns=1, so Close hands the same
+	// physical connection to the next pass). Unconditional: harmless when unset.
+	if t.sink.origin {
+		_, _ = t.conn.ExecContext(ctx, "SET @replicare_apply = NULL")
 	}
 	return t.conn.Close()
 }
