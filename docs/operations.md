@@ -273,6 +273,9 @@ once**. The single-engine rule is **per sync**, not per config: each sync's sour
 share an engine, but a config may hold a Postgres sync and a Redis sync side by side, and the daemon
 runs them concurrently (each under its own single-active ownership lock).
 
+A complete, annotated version of the example below is at
+[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
+
 ```yaml
 state_store:                     # ALWAYS Postgres — even for a Redis-only deployment
   engine: postgres

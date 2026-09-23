@@ -271,4 +271,6 @@ declared as a `clusters:` entry, which is exempt.
 ## Full example
 
 See [`../examples/replicare.yml`](../examples/replicare.yml) for a fully annotated
-config.
+config. For one config that runs a Postgres pipeline and a Redis pipeline
+side by side (the per-sync single-engine model), see
+[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
