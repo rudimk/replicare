@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -55,9 +56,20 @@ func introspect(ctx context.Context, db doer, cfg engine.ConnConfig, _ engine.Se
 // moduleList returns the names of loaded server modules (MODULE LIST). Empty when
 // no modules are loaded (the common case). Parses both the RESP2 (array-of-arrays)
 // and RESP3 (array-of-maps) shapes defensively.
+//
+// Managed Redis providers commonly DISABLE the MODULE command (ElastiCache returns
+// "ERR unknown command 'MODULE'"; an ACL may deny it with NOPERM). Such a server
+// cannot host loadable modules through MODULE anyway, so a blocked MODULE LIST is
+// treated as "no modules" rather than a fatal error — otherwise introspection (and
+// thus the whole sync) can't start against ElastiCache. This only softens the
+// pre-flight module gate; a module-typed value, if somehow present, still fails
+// LOUDLY at RESTORE (CLAUDE.md §1.7), never silently.
 func moduleList(ctx context.Context, db doer) ([]string, error) {
 	res, err := db.Do(ctx, "MODULE", "LIST").Result()
 	if err != nil {
+		if moduleCommandUnavailable(err) {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("redis: MODULE LIST: %w", err)
 	}
 	entries, ok := res.([]any)
@@ -71,6 +83,25 @@ func moduleList(ctx context.Context, db doer) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// moduleCommandUnavailable reports whether a MODULE LIST error means the server
+// does not expose the command (managed Redis disables it, or an ACL denies it),
+// as opposed to a genuine failure that should propagate. Matched case-insensitively
+// against the RESP error text: "unknown command"/"unknown subcommand" (command
+// removed, e.g. ElastiCache), "NOPERM" (ACL-denied), and the "disabled"/"not
+// allowed"/"unsupported" phrasings other managed providers use.
+func moduleCommandUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := strings.ToUpper(err.Error())
+	for _, s := range []string{"UNKNOWN COMMAND", "UNKNOWN SUBCOMMAND", "NOPERM", "DISABLED", "NOT ALLOWED", "UNSUPPORTED"} {
+		if strings.Contains(m, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // moduleName extracts the "name" field from one MODULE LIST entry (a map in RESP3,

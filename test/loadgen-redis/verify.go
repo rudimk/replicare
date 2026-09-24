@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	goredis "github.com/redis/go-redis/v9"
 )
@@ -19,7 +20,15 @@ import (
 // key's content (plus TTL PRESENCE, since the exact remaining TTL legitimately
 // differs by the replication delay), and compares the resulting key->hash maps.
 
-const fpBatch = 256
+// fpBatch is how many keys are hashed per pair of pipelines. Larger = far fewer
+// round-trips, which is what dominates over a high-latency link (e.g. a bastion
+// tunnel to a managed Redis) — the whole verify is O(keys/fpBatch) serial
+// round-trips. fpProgressEvery gates the "fingerprinted N/total" heartbeat so a
+// large keyspace visibly ticks instead of looking hung.
+const (
+	fpBatch         = 1000
+	fpProgressEvery = 50000
+)
 
 type verifyResult struct {
 	srcKeys  int
@@ -33,14 +42,24 @@ func (v verifyResult) converged() bool {
 	return len(v.missing) == 0 && len(v.extra) == 0 && len(v.mismatch) == 0 && v.skipLeak == 0
 }
 
-func verifyOnce(ctx context.Context, srcR, dstR *rdb) (verifyResult, error) {
-	src, err := fingerprintAll(ctx, srcR)
-	if err != nil {
-		return verifyResult{}, fmt.Errorf("source: %w", err)
+func verifyOnce(ctx context.Context, srcR, dstR *rdb, log logf) (verifyResult, error) {
+	// Fingerprint both ends CONCURRENTLY — they're independent read-only scans on
+	// separate connections, so over a slow link the pass takes max(src,dst) instead
+	// of src+dst.
+	var (
+		src, dst       map[string]string
+		srcErr, dstErr error
+		wg             sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); src, srcErr = fingerprintAll(ctx, srcR, "source", log) }()
+	go func() { defer wg.Done(); dst, dstErr = fingerprintAll(ctx, dstR, "target", log) }()
+	wg.Wait()
+	if srcErr != nil {
+		return verifyResult{}, fmt.Errorf("source: %w", srcErr)
 	}
-	dst, err := fingerprintAll(ctx, dstR)
-	if err != nil {
-		return verifyResult{}, fmt.Errorf("target: %w", err)
+	if dstErr != nil {
+		return verifyResult{}, fmt.Errorf("target: %w", dstErr)
 	}
 
 	res := verifyResult{srcKeys: len(src)}
@@ -68,10 +87,19 @@ func verifyOnce(ctx context.Context, srcR, dstR *rdb) (verifyResult, error) {
 }
 
 // fingerprintAll scans every lg:* key and returns key -> canonical content hash.
-func fingerprintAll(ctx context.Context, r *rdb) (map[string]string, error) {
+// label ("source"/"target") + log make the sweep emit a start line and a periodic
+// progress heartbeat, so a large keyspace over a slow link doesn't look hung. log
+// may be nil (no output).
+func fingerprintAll(ctx context.Context, r *rdb, label string, log logf) (map[string]string, error) {
+	if log != nil {
+		log("%s: scanning keyspace...", label)
+	}
 	keys, err := scanKeys(ctx, r, keyPrefix+"*")
 	if err != nil {
 		return nil, err
+	}
+	if log != nil {
+		log("%s: %d keys, fingerprinting...", label, len(keys))
 	}
 	out := make(map[string]string, len(keys))
 	for lo := 0; lo < len(keys); lo += fpBatch {
@@ -81,6 +109,9 @@ func fingerprintAll(ctx context.Context, r *rdb) (map[string]string, error) {
 		}
 		if err := fingerprintBatch(ctx, r, keys[lo:hi], out); err != nil {
 			return nil, err
+		}
+		if log != nil && lo/fpProgressEvery != hi/fpProgressEvery {
+			log("%s: fingerprinted %d/%d keys", label, hi, len(keys))
 		}
 	}
 	return out, nil

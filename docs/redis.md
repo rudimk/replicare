@@ -83,6 +83,15 @@ value-transport gates that pre-flight (`validate` and daemon startup) **blocks**
    compares `MODULE LIST` on both ends and blocks when a source module type is
    absent on the target — there is no faithful native reconstruction.
 
+   **Managed Redis that disables `MODULE`** (ElastiCache returns `ERR unknown
+   command 'MODULE'`; an ACL may deny it with `NOPERM`) is handled gracefully:
+   replicare treats a blocked `MODULE LIST` as "no modules" and proceeds, rather
+   than failing to start. Such servers can't load modules through `MODULE` anyway,
+   so this only softens the pre-flight gate — a module-typed value, if somehow
+   present, still fails **loudly** at `RESTORE` (§1.7), never silently. `+module|list`
+   in the target ACL preset is therefore best-effort: grant it where the provider
+   supports it; where it's blocked, replicare degrades on its own.
+
 ## The operational wrinkles
 
 Both follow from the v1 architecture and are worth knowing up front.

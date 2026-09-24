@@ -238,8 +238,10 @@ func cmdVerify(ctx context.Context, args []string, log logf) error {
 	defer dstR.close()
 
 	deadline := time.Now().Add(*wait)
+	pass := 0
 	for {
-		res, err := verifyOnce(ctx, srcR, dstR)
+		pass++
+		res, err := verifyOnce(ctx, srcR, dstR, log)
 		if err != nil {
 			return err
 		}
@@ -253,6 +255,10 @@ func cmdVerify(ctx context.Context, args []string, log logf) error {
 			return fmt.Errorf("NOT CONVERGED: %d missing, %d extra, %d content-drift, %d skip-leak (target may still be catching up)",
 				len(res.missing), len(res.extra), len(res.mismatch), res.skipLeak)
 		}
+		// Not converged yet and still within --wait: log this pass so the loop
+		// visibly ticks instead of looking hung, then back off.
+		log("pass %d: %d src keys, %d missing, %d extra, %d drift, %d skip-leak — retrying in %s",
+			pass, res.srcKeys, len(res.missing), len(res.extra), len(res.mismatch), res.skipLeak, *interval)
 		time.Sleep(*interval)
 	}
 }
