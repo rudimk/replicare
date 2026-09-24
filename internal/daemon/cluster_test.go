@@ -11,6 +11,21 @@ import (
 	"github.com/rudimk/replicare/internal/config"
 )
 
+// Mesh convergence is eventually-consistent and driven by the daemon's continuous
+// drain (both edges at drain_interval), so these are POLL CEILINGS, not expected
+// durations — a converged mesh satisfies them in well under a second. They are
+// generous because the whole integration suite runs serially (-p 1) against one
+// shared 2-node harness on a CPU-shared CI runner, where a late-running mesh test
+// occasionally needs far longer than a local isolated run. Correctness is unchanged:
+// a poll that never sees convergence still fails (it just waits longer first), so a
+// real non-convergence regression is still caught — only slow-but-eventual
+// convergence is tolerated. (The 40s ceilings here previously flaked in CI.)
+const (
+	meshBringupTimeout  = 60 * time.Second  // capture install + mesh state up on both nodes
+	meshConvergeTimeout = 90 * time.Second  // both nodes settle on the same value/keyset
+	meshTestBudget      = 300 * time.Second // per-test ctx; must exceed the sum of the ceilings above
+)
+
 // TestDaemonTwoNodeMeshConverges is the MM3 acceptance: a 2-node Postgres mesh
 // (active-active) where writes accepted on EITHER node converge on both, and — the
 // heart of loop suppression — an inbound change applied to a node is NOT re-captured
@@ -23,7 +38,7 @@ func TestDaemonTwoNodeMeshConverges(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), meshTestBudget)
 	defer cancel()
 
 	// Node A = harness source (9.6), Node B = harness target (17). Both are mesh
@@ -90,7 +105,7 @@ clusters:
 	go func() { done <- d.Run(runCtx) }()
 
 	// Bidirectional initial copy: each member ends with the union (30 rows).
-	if !pollUntil(t, 60*time.Second, func() bool {
+	if !pollUntil(t, meshConvergeTimeout, func() bool {
 		return count(t, ctx, a, "rc_it.orders") == 30 && count(t, ctx, b, "rc_it.orders") == 30
 	}) {
 		select {
@@ -106,7 +121,7 @@ clusters:
 	// A live write accepted on EITHER node reaches the other (active-active).
 	mustExec(t, ctx, a, "INSERT INTO rc_it.orders VALUES (16, 'a16')")
 	mustExec(t, ctx, b, "INSERT INTO rc_it.orders VALUES (116, 'b116')")
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, meshConvergeTimeout, func() bool {
 		return count(t, ctx, a, "rc_it.orders") == 32 && count(t, ctx, b, "rc_it.orders") == 32 &&
 			count(t, ctx, a, "rc_it.orders WHERE id = 116") == 1 && // B's write reached A
 			count(t, ctx, b, "rc_it.orders WHERE id = 16") == 1 // A's write reached B
@@ -155,7 +170,7 @@ func TestDaemonMeshSameKeyConflictConverges(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), meshTestBudget)
 	defer cancel()
 
 	a := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
@@ -218,7 +233,7 @@ clusters:
 
 	// Give both edges a moment to install capture + reach streaming (tables empty, so
 	// there is nothing to copy).
-	if !pollUntil(t, 30*time.Second, func() bool {
+	if !pollUntil(t, meshBringupTimeout, func() bool {
 		var n int
 		_ = b.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&n)
 		var m int
@@ -241,7 +256,7 @@ clusters:
 		}
 		return s
 	}
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, meshConvergeTimeout, func() bool {
 		na, nb := note(a), note(b)
 		return na != "" && na == nb
 	}) {
@@ -263,7 +278,7 @@ clusters:
 	// present-and-identical on both).
 	mustExec(t, ctx, a, "DELETE FROM rc_it.orders WHERE id=1")
 	mustExec(t, ctx, b, "UPDATE rc_it.orders SET note='b-updated' WHERE id=1")
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, meshConvergeTimeout, func() bool {
 		_, aok := existsRow(ctx, a)
 		_, bok := existsRow(ctx, b)
 		if aok != bok {
