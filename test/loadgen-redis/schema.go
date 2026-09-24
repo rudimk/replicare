@@ -145,7 +145,7 @@ func scanKeys(ctx context.Context, r *rdb, pattern string) ([]string, error) {
 	err := r.forEachMaster(ctx, func(ctx context.Context, c goredis.Cmdable) error {
 		var cursor uint64
 		for {
-			batch, next, err := c.Scan(ctx, cursor, pattern, 512).Result()
+			batch, next, err := c.Scan(ctx, cursor, pattern, 2000).Result()
 			if err != nil {
 				return err
 			}
