@@ -107,15 +107,17 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 	if prog.Done {
 		return nil
 	}
-	// The DELETE-range resume clears a partial direct-COPY tail before re-copying. The
-	// merge path (cluster edges) is idempotent via ON CONFLICT, so it neither needs
-	// nor wants the delete: in a mesh the tail rows may be legitimately present from
-	// the reciprocal edge, and deleting them would churn the peer's data.
-	if prog.Watermark != nil && cfg.loadMode != engine.LoadMerge {
-		if err := workers[0].Sink.DeleteRange(ctx, ref, prog.Watermark, nil); err != nil {
-			return fmt.Errorf("copy %s: clear resume tail: %w", ref, err)
-		}
-	}
+	// Idempotent direct copy: each chunk is DELETE-range-then-COPY (see copyChunk),
+	// so a fresh copy into a target that ALREADY holds previously-replicated rows —
+	// a restart / pod reschedule / node refresh after the state store was reset or
+	// lost, or simply re-running against a populated target — re-copies cleanly
+	// instead of colliding on the PK. This subsumes the old watermark-gated
+	// tail-delete: the resume watermark below still fast-forwards past completed
+	// chunks, and the per-chunk delete clears whatever those re-planned chunks cover
+	// (CLAUDE.md §4.1: during initial copy the copier is the table's sole writer, so
+	// range-delete + re-copy is exclusive). The merge path (cluster edges) is
+	// idempotent via ON CONFLICT and must NOT delete — a mesh tail row may be
+	// legitimately present from the reciprocal edge.
 
 	planOpts := opts
 	planOpts.Lo = prog.Watermark
@@ -197,6 +199,20 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 // It returns the number of rows loaded into the target.
 func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 	ref engine.TableRef, cols []string, c engine.Chunk, mode engine.LoadMode) (int64, error) {
+
+	// Direct COPY errors on a row that already exists (duplicate PK). Clear the
+	// chunk's key range first so the load is idempotent — safe on restart / node
+	// refresh when the target already holds previously-replicated rows, and a
+	// no-op on a genuinely empty target. Keyset only: chunks then carry real key
+	// bounds and are disjoint, so parallel per-chunk deletes never overlap. The
+	// ctid fallback has no key bounds to delete by (a nil-nil range would wipe the
+	// whole table per chunk), and the merge path (cluster) is already idempotent
+	// via ON CONFLICT — both skip the delete.
+	if mode != engine.LoadMerge && c.Method != engine.ChunkCTID {
+		if err := sink.DeleteRange(ctx, ref, c.Lo, c.Hi); err != nil {
+			return 0, fmt.Errorf("clear range: %w", err)
+		}
+	}
 
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
