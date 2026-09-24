@@ -35,9 +35,11 @@ type config struct {
 	// of rows loaded, for the rows-copied progress metric. It may be called
 	// concurrently from multiple copy workers, so it must be safe for that.
 	progress func(engine.TableRef, int64)
-	// loadMode selects the per-chunk target write strategy. The default ("") is the
-	// empty-target direct COPY with DELETE-range resume (CLAUDE.md §4.1). Cluster
-	// (active-active) edges pass LoadMerge: every member is simultaneously a source
+	// loadMode selects the per-chunk target write strategy. The default ("") is
+	// resolved per table in copyTable (resolveLoadMode): an empty target gets direct
+	// COPY, a non-empty target gets the idempotent, FK-safe merge (CLAUDE.md §4.1).
+	// Cluster (active-active) edges pass LoadMerge explicitly: every member is
+	// simultaneously a source
 	// being copied FROM and a target being written TO by its reciprocal edges, so a
 	// member's live table transiently carries rows the other edge just applied; a
 	// direct COPY of those bounced rows would collide on the target PK. The merge
@@ -107,17 +109,23 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 	if prog.Done {
 		return nil
 	}
-	// Idempotent direct copy: each chunk is DELETE-range-then-COPY (see copyChunk),
-	// so a fresh copy into a target that ALREADY holds previously-replicated rows —
-	// a restart / pod reschedule / node refresh after the state store was reset or
-	// lost, or simply re-running against a populated target — re-copies cleanly
-	// instead of colliding on the PK. This subsumes the old watermark-gated
-	// tail-delete: the resume watermark below still fast-forwards past completed
-	// chunks, and the per-chunk delete clears whatever those re-planned chunks cover
-	// (CLAUDE.md §4.1: during initial copy the copier is the table's sole writer, so
-	// range-delete + re-copy is exclusive). The merge path (cluster edges) is
-	// idempotent via ON CONFLICT and must NOT delete — a mesh tail row may be
-	// legitimately present from the reciprocal edge.
+
+	// Resolve the per-table load strategy (CLAUDE.md §4.1). A cluster edge fixes it
+	// to merge up front (cfg.loadMode). On the one-way path we probe the TARGET:
+	//   - empty target        → LoadDirect: plain COPY into an empty table. Chunks
+	//     carry disjoint key ranges, so parallel loads never collide, and no DELETE
+	//     is needed. This is the fast path with no write amplification.
+	//   - non-empty target    → LoadMerge: COPY to a TEMP staging table then
+	//     INSERT ... ON CONFLICT DO UPDATE. Idempotent AND foreign-key-safe — it only
+	//     inserts/updates, never deletes, so copying a parent table into a populated
+	//     FK target can neither violate a child FK nor block on the delete's locks.
+	//     This covers the pre-populated target, the restart/reschedule after a lost
+	//     state store, and resuming a partially-copied table (which is now non-empty).
+	// A missing Verifier or a probe error degrades to LoadMerge — the safe choice
+	// (idempotent), never a direct COPY that could collide on an existing PK. This
+	// REPLACES the old per-chunk DELETE-range, which deadlocked/erred on a populated
+	// FK target because copy is parents-first (deleting a still-referenced parent).
+	mode := resolveLoadMode(ctx, workers[0].Sink, ref, cfg.loadMode)
 
 	planOpts := opts
 	planOpts.Lo = prog.Watermark
@@ -153,7 +161,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 		wk := workers[w]
 		g.Go(func() error {
 			for i := range idxCh {
-				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i], cfg.loadMode)
+				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i], mode)
 				if err != nil {
 					return fmt.Errorf("copy %s: chunk %d: %w", ref, i, err)
 				}
@@ -200,19 +208,12 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 	ref engine.TableRef, cols []string, c engine.Chunk, mode engine.LoadMode) (int64, error) {
 
-	// Direct COPY errors on a row that already exists (duplicate PK). Clear the
-	// chunk's key range first so the load is idempotent — safe on restart / node
-	// refresh when the target already holds previously-replicated rows, and a
-	// no-op on a genuinely empty target. Keyset only: chunks then carry real key
-	// bounds and are disjoint, so parallel per-chunk deletes never overlap. The
-	// ctid fallback has no key bounds to delete by (a nil-nil range would wipe the
-	// whole table per chunk), and the merge path (cluster) is already idempotent
-	// via ON CONFLICT — both skip the delete.
-	if mode != engine.LoadMerge && c.Method != engine.ChunkCTID {
-		if err := sink.DeleteRange(ctx, ref, c.Lo, c.Hi); err != nil {
-			return 0, fmt.Errorf("clear range: %w", err)
-		}
-	}
+	// The load is made idempotent-vs-populated-target at the table level by choosing
+	// LoadMerge (INSERT ... ON CONFLICT) in copyTable, not by deleting here: a
+	// per-chunk DELETE is a foreign-key hazard on a populated FK target (copy is
+	// parents-first, so deleting a still-referenced parent row errors or blocks).
+	// A confirmed-empty target uses LoadDirect and needs no delete (disjoint chunks
+	// into an empty table never collide).
 
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
@@ -231,6 +232,30 @@ func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 		return 0, fmt.Errorf("write side: %w", loadErr)
 	}
 	return n, nil
+}
+
+// resolveLoadMode picks the per-table target-write strategy (CLAUDE.md §4.1).
+// A caller-forced mode (cluster edges pass LoadMerge) is honored as-is. Otherwise
+// it probes the target's current row/key count via the optional engine.Verifier:
+// an empty target uses the fast LoadDirect (plain COPY, no delete), a non-empty one
+// uses the idempotent, FK-safe LoadMerge. A sink without Verifier, or a probe error,
+// degrades to LoadMerge — never a direct COPY that could collide on an existing PK.
+func resolveLoadMode(ctx context.Context, sink engine.Sink, ref engine.TableRef, forced engine.LoadMode) engine.LoadMode {
+	if forced != "" {
+		return forced
+	}
+	v, ok := sink.(engine.Verifier)
+	if !ok {
+		return engine.LoadMerge
+	}
+	n, err := v.CountRows(ctx, ref)
+	if err != nil {
+		return engine.LoadMerge
+	}
+	if n > 0 {
+		return engine.LoadMerge
+	}
+	return engine.LoadDirect
 }
 
 // transportColumns returns the name-matched column list to copy, in SOURCE
