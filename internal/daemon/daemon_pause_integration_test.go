@@ -96,3 +96,58 @@ syncs:
 		t.Errorf("paused sync installed capture: %d replicare tables match rc_off", n)
 	}
 }
+
+// TestDaemonAllSyncsPausedStaysUp is the regression for the CrashLoop bug: when every
+// sync is paused, Run must NOT return (which would exit the process and, under a
+// Kubernetes Deployment, restart the container in a crash loop). It must idle until
+// ctx is cancelled so the pod stays up serving observability, then exit cleanly.
+func TestDaemonAllSyncsPausedStaysUp(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clearPGState(t, ctx)
+
+	cfg, err := config.Load(writeConfig(t, harnessConfigYAML(`
+syncs:
+  - name: a
+    source: src
+    targets: [dst]
+    include: ["rc_it.*"]
+    enabled: false
+  - name: b
+    source: src
+    targets: [dst]
+    include: ["rc_it.*"]
+    enabled: false
+`)))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+
+	// It must still be running after a beat — an idle daemon, not an exited one.
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited with all syncs paused (want it to idle, not crash-loop): %v", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	// Cancelling ctx (the SIGTERM analogue) must return cleanly.
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Run returned error on shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not shut down within 10s of ctx cancel")
+	}
+}

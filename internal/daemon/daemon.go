@@ -147,6 +147,19 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 	d.log.Info("daemon started", slog.Int("syncs_owned", owned), slog.Int("cluster_edges_owned", edges))
 
+	// Nothing active (every sync/cluster paused, none configured, or all owned by
+	// another daemon): do NOT return. Returning exits the process, and under a
+	// Kubernetes Deployment an exited container is restarted — so a fully-paused
+	// config would CrashLoop. Instead stay up as an idle daemon: the observability
+	// servers keep serving, `replicare status` still reports each sync (paused ones as
+	// PAUSED), and unpausing is a normal config-change restart. Block until ctx is
+	// cancelled (SIGTERM), then exit cleanly.
+	if owned == 0 && edges == 0 {
+		d.log.Info("no active syncs; idling until shutdown (all paused, none configured, or all owned by another daemon)")
+		<-ctx.Done()
+		return nil
+	}
+
 	if err := g.Wait(); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}

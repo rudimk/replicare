@@ -27,6 +27,7 @@ type Reader interface {
 // the degradation is explicit rather than silent.
 type Report struct {
 	Sync        string        `json:"sync"`
+	Paused      bool          `json:"paused,omitempty"`
 	Tables      []TableStatus `json:"tables"`
 	Events      []EventView   `json:"recent_events"`
 	GeneratedAt time.Time     `json:"generated_at"`
