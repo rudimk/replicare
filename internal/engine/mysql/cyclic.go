@@ -42,12 +42,32 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 	if err != nil {
 		return err
 	}
+	tgt, err := sink.tableMeta(ctx, ref)
+	if err != nil {
+		return err
+	}
 
-	// Pass 1: load every row with the FK column(s) omitted (NULL on target).
+	// Pass 1: load every row with the FK column(s) omitted (NULL on target), via an
+	// idempotent staging+upsert (in its own tx so the TEMP table is connection-local)
+	// so a re-copy into a populated target converges instead of colliding on the PK.
 	pass1 := subtractCols(transportCols(table), fkCols)
-	if err := pipeLoad(ctx, src, ref, pass1, sink.db, qualify(ref.Schema, ref.Name), charset, sink.localInfile); err != nil {
+	tx1, err := sink.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("mysql: null-fill pass 1: begin: %w", err)
+	}
+	committed1 := false
+	defer func() {
+		if !committed1 {
+			_ = tx1.Rollback()
+		}
+	}()
+	if err := idempotentStageLoad(ctx, src, tx1, ref, pass1, tgt, charset, sink.localInfile, "rc_nf1_stg"); err != nil {
 		return fmt.Errorf("mysql: null-fill pass 1 (%s): %w", ref, err)
 	}
+	if err := tx1.Commit(); err != nil {
+		return fmt.Errorf("mysql: null-fill pass 1: commit: %w", err)
+	}
+	committed1 = true
 
 	// Pass 2: stage (pk + fk) into a TEMP table and UPDATE the FK columns.
 	pkNames := make([]string, len(pk))
@@ -55,10 +75,6 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 		pkNames[i] = c.Name
 	}
 	fillCols := append(append([]string{}, pkNames...), fkCols...)
-	tgt, err := sink.tableMeta(ctx, ref)
-	if err != nil {
-		return err
-	}
 	typeDDL, err := tempColumnDDL(tgt, fillCols)
 	if err != nil {
 		return err
@@ -125,6 +141,7 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		ref     engine.TableRef
 		cols    []string
 		charset string
+		tgt     engine.Table
 	}
 	infos := make([]tinfo, 0, len(tables))
 	for _, ref := range tables {
@@ -136,7 +153,14 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		if err != nil {
 			return err
 		}
-		infos = append(infos, tinfo{ref: ref, cols: transportCols(tbl), charset: charset})
+		// Pre-fetch the TARGET meta too (for the staged-upsert key + column types),
+		// BEFORE pinning the sink connection — introspecting the sink while its single
+		// pool connection is pinned to the load transaction would deadlock.
+		tgt, err := sink.tableMeta(ctx, ref)
+		if err != nil {
+			return err
+		}
+		infos = append(infos, tinfo{ref: ref, cols: transportCols(tbl), charset: charset, tgt: tgt})
 	}
 
 	conn, err := sink.db.Conn(ctx)
@@ -159,8 +183,13 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
 		return fmt.Errorf("mysql: cyclic load: disable fk checks: %w", err)
 	}
-	for _, info := range infos {
-		if err := pipeLoad(ctx, src, info.ref, info.cols, tx, qualify(info.ref.Schema, info.ref.Name), info.charset, sink.localInfile); err != nil {
+	for i, info := range infos {
+		// Idempotent staged upsert (not a direct LOAD DATA) so a re-copy into a populated
+		// target converges instead of colliding on the PK — FK_CHECKS=0 disables FK
+		// checks, not the unique/PK check. Distinct staging name per table (all share the
+		// one deferred tx). The pre-commit orphan verify below is unchanged.
+		stg := fmt.Sprintf("rc_fk_stg_%d", i)
+		if err := idempotentStageLoad(ctx, src, tx, info.ref, info.cols, info.tgt, info.charset, sink.localInfile, stg); err != nil {
 			return fmt.Errorf("mysql: cyclic load %s: %w", info.ref, err)
 		}
 	}
@@ -208,6 +237,64 @@ func verifyNoOrphans(ctx context.Context, ex execQuerier, src *Source, tables []
 				return fmt.Errorf("mysql: cyclic load: verify FK %s: %w", fk.Name, err)
 			}
 		}
+	}
+	return nil
+}
+
+// idempotentStageLoad loads `cols` of source table `ref` into the target table via a
+// TEMP staging table + INSERT ... SELECT ... ON DUPLICATE KEY UPDATE, so a re-copy into
+// a target that already holds these rows converges instead of failing with a duplicate
+// key (errno 1062) — the cyclic-path analogue of Sink.mergeLoad the chunked copy uses.
+// It runs entirely on `ex` (a transaction pinning one connection, so the session-scoped
+// TEMP table is visible to the INSERT) and makes NO sink introspection call: the caller
+// passes pre-fetched target meta `tgt`, which matters under the pinned single-connection
+// pool in LoadCyclicFKChecks. `stg` is a per-call staging name, dropped before and after
+// so several tables can reuse it within one transaction.
+func idempotentStageLoad(ctx context.Context, src *Source, ex execQuerier, ref engine.TableRef, cols []string, tgt engine.Table, charset string, localInfile bool, stg string) error {
+	key := replicationKey(tgt)
+	if key == nil {
+		return fmt.Errorf("mysql: staged load: target %s has no usable key for ON DUPLICATE KEY", ref)
+	}
+	keySet := make(map[string]bool, len(key.Columns))
+	for _, c := range key.Columns {
+		keySet[c] = true
+	}
+	typeDDL, err := tempColumnDDL(tgt, cols)
+	if err != nil {
+		return err
+	}
+	if _, err := ex.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
+		return fmt.Errorf("mysql: staged load: drop stale staging: %w", err)
+	}
+	if _, err := ex.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
+		return fmt.Errorf("mysql: staged load: create staging: %w", err)
+	}
+	if err := pipeLoad(ctx, src, ref, cols, ex, bq(stg), charset, localInfile); err != nil {
+		return fmt.Errorf("mysql: staged load: stage %s: %w", ref, err)
+	}
+	quoted := make([]string, len(cols))
+	for i, c := range cols {
+		quoted[i] = bq(c)
+	}
+	var setParts []string
+	for _, c := range cols {
+		if keySet[c] {
+			continue
+		}
+		setParts = append(setParts, fmt.Sprintf("%s = VALUES(%s)", bq(c), bq(c)))
+	}
+	if len(setParts) == 0 {
+		// Key-only column set: no non-key column to update, so make the upsert a no-op
+		// (avoids the `id = id` ambiguity of INSERT ... SELECT ... ODKU).
+		setParts = []string{fmt.Sprintf("%s = VALUES(%s)", bq(key.Columns[0]), bq(key.Columns[0]))}
+	}
+	ins := fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s ON DUPLICATE KEY UPDATE %s",
+		qualify(ref.Schema, ref.Name), strings.Join(quoted, ", "), strings.Join(quoted, ", "), bq(stg), strings.Join(setParts, ", "))
+	if _, err := ex.ExecContext(ctx, ins); err != nil {
+		return fmt.Errorf("mysql: staged load: upsert %s: %w", ref, err)
+	}
+	if _, err := ex.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
+		return fmt.Errorf("mysql: staged load: drop staging: %w", err)
 	}
 	return nil
 }
