@@ -122,9 +122,10 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	dsn := fs.String("dsn", "", "source DSN (empty = PG* env)")
 	scaleF := fs.Float64("scale", 1.0, "multiply default row counts (e.g. 0.1 for a quick run, 2 for ~2M events)")
-	ops := fs.Int("ops", 200, "number of churn statements when the DB is already seeded")
+	ops := fs.Int("ops", 200, "number of churn statements when the DB is already seeded (per burst under --duration)")
 	seedVal := fs.Int64("seed", 1, "RNG seed (server setseed + client op selection) for reproducibility")
 	cyclic := fs.Bool("cyclic", false, "also add the optional FK cycles (exercises the cyclic-copy null-then-fill path; streaming under churn is limited for non-DEFERRABLE FKs)")
+	duration := fs.Duration("duration", 0, "run churn CONTINUOUSLY for this long (repeated --ops bursts). Run this WHILE replicare does its initial copy to exercise the live-source skew path — new parent rows (tenants/users) inserted mid-copy are referenced by children copied from a later snapshot (transient FK, §3.3/§4).")
 	_ = fs.Parse(args)
 
 	conn, err := connect(ctx, *dsn)
@@ -156,8 +157,12 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 		return nil
 	}
 
-	log("populated source detected (%d tenants) -> churning %d ops (seed %d)", seeded, *ops, *seedVal)
 	rng := rand.New(rand.NewSource(*seedVal))
+	if *duration > 0 {
+		return churnFor(ctx, conn, *ops, *duration, rng, log)
+	}
+
+	log("populated source detected (%d tenants) -> churning %d ops (seed %d)", seeded, *ops, *seedVal)
 	start := time.Now()
 	stats, err := churn(ctx, conn, *ops, rng, log)
 	if err != nil {
@@ -165,6 +170,39 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	}
 	log("churn complete in %s:", time.Since(start).Round(time.Millisecond))
 	for _, line := range summaryLines(stats) {
+		log("%s", line)
+	}
+	return nil
+}
+
+// churnFor runs repeated churn bursts until the duration elapses (or the context is
+// cancelled), so the source keeps changing while replicare copies. This is the manual
+// reproduction of the live-source cyclic-copy skew: parent rows (tenants/users) inserted
+// mid-copy are referenced by children copied from a later snapshot, which the cyclic copy
+// must recover from instead of crash-looping. Run it in parallel with the daemon's
+// initial copy, e.g. `task loadgen:churn OPS=200 -- --duration 60s`.
+func churnFor(ctx context.Context, conn *pgx.Conn, ops int, d time.Duration, rng *rand.Rand, log logf) error {
+	log("continuous churn for %s (%d ops/burst) -> run this WHILE replicare does its initial copy", d, ops)
+	deadline := time.Now().Add(d)
+	bursts, total := 0, map[string]churnStat{}
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			break
+		}
+		stats, err := churn(ctx, conn, ops, rng, log)
+		if err != nil {
+			return err
+		}
+		bursts++
+		for k, v := range stats {
+			cur := total[k]
+			cur.calls += v.calls
+			cur.rows += v.rows
+			total[k] = cur
+		}
+	}
+	log("continuous churn done: %d bursts", bursts)
+	for _, line := range summaryLines(total) {
 		log("%s", line)
 	}
 	return nil
