@@ -244,6 +244,96 @@ func TestCopyTableResumeAfterCrash(t *testing.T) {
 	f.faithful(t, ctx)
 }
 
+// droppySink simulates a target that drops the connection on its first `drops`
+// BulkLoad calls: each returns a connection-style error and marks the endpoint down
+// until a reconnect (Connect) heals it. HealthCheck reports down while dropped, so the
+// copier's reconnect-and-retry path engages.
+type droppySink struct {
+	engine.Sink
+	drops int
+	down  bool
+	loads int
+}
+
+func (d *droppySink) BulkLoad(ctx context.Context, ref engine.TableRef, cols []string, r io.Reader, mode engine.LoadMode) (int64, error) {
+	d.loads++
+	if d.drops > 0 {
+		d.drops--
+		d.down = true
+		return 0, errors.New("unexpected EOF")
+	}
+	return d.Sink.BulkLoad(ctx, ref, cols, r, mode)
+}
+
+func (d *droppySink) HealthCheck(ctx context.Context) error {
+	if d.down {
+		return errors.New("connection down")
+	}
+	return d.Sink.HealthCheck(ctx)
+}
+
+func (d *droppySink) Close(context.Context) error   { return nil } // don't close the shared real conn
+func (d *droppySink) Connect(context.Context) error { d.down = false; return nil }
+
+// TestCopyChunkReconnectsOnDroppedConnection is the regression for the production
+// crash: a live target dropped a connection mid-COPY ("unexpected EOF") and the copier
+// had no retry, so the whole bring-up crashed. The copier now health-checks, reconnects,
+// and retries the chunk, so a transient drop heals instead of crashing.
+func TestCopyChunkReconnectsOnDroppedConnection(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f := newFixture(t, ctx)
+	exec(t, ctx, f.rawSrc, ordersDDL)
+	exec(t, ctx, f.rawTgt, ordersDDL)
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'note '||g FROM generate_series(1,100) g")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+
+	ds := &droppySink{Sink: f.sink, drops: 2}
+	if err := Table(ctx, f.src, ds, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10}); err != nil {
+		t.Fatalf("copy should recover from dropped connections, got: %v", err)
+	}
+	if got := f.rowCount(t, ctx, f.rawTgt); got != 100 {
+		t.Fatalf("target has %d rows, want 100 after reconnect-and-retry", got)
+	}
+	f.faithful(t, ctx)
+}
+
+// dataErrorSink fails every BulkLoad with a data error while staying healthy — the copier
+// must halt immediately (a healthy-connection error is not a transient drop), never spin
+// through the reconnect retries.
+type dataErrorSink struct {
+	engine.Sink
+	loads int
+}
+
+func (d *dataErrorSink) BulkLoad(_ context.Context, _ engine.TableRef, _ []string, r io.Reader, _ engine.LoadMode) (int64, error) {
+	d.loads++
+	// A real target data error reads the COPY stream, then rejects a value — the
+	// connection stays alive. Draining r keeps the source side healthy too, so this
+	// models a genuine data error (healthy connections), which must NOT be retried.
+	_, _ = io.Copy(io.Discard, r)
+	return 0, errors.New("type mismatch: invalid input value")
+}
+
+func TestCopyChunkHaltsOnDataErrorNoRetry(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f := newFixture(t, ctx)
+	exec(t, ctx, f.rawSrc, ordersDDL)
+	exec(t, ctx, f.rawTgt, ordersDDL)
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'note '||g FROM generate_series(1,30) g")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+
+	de := &dataErrorSink{Sink: f.sink}
+	err := Table(ctx, f.src, de, f.store, f.syncName, "dst", ref, engine.ChunkOptions{TargetRows: 10})
+	if err == nil {
+		t.Fatal("expected a data error to halt the copy")
+	}
+	if de.loads != 1 {
+		t.Fatalf("data error was attempted %d times, want exactly 1 (healthy connection must not retry)", de.loads)
+	}
+}
+
 func TestCopyTableResumeClearsIncompleteTail(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()

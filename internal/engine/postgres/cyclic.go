@@ -601,12 +601,74 @@ func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.Table
 	return nil
 }
 
-// copyRange copies one keyset key-range [lo, hi) of a column subset from source to target
-// as a single committed per-chunk staged UPSERT: COPY the range into a TEMP staging table,
-// then INSERT ... ON CONFLICT DO UPDATE from it (staging holds only this range's rows, so
-// the upsert is chunk-bounded). It performs NO DELETE — so it never violates or stalls on a
-// child FK by removing a parent row — and is idempotent, so a re-run converges.
+// copyRange copies one keyset key-range as a per-chunk staged upsert (see copyRangeOnce),
+// retrying on a DROPPED CONNECTION: a live source/target can drop a socket mid-COPY
+// ("unexpected EOF"), and — mirroring the streaming loop and the acyclic copier — the copy
+// reconnects and retries instead of crashing the daemon. A chunk error with both endpoints
+// still healthy (a real data error, incl. an FK-skew 23503 that copyRangeWithParentRetry
+// handles) is returned immediately, never retried here.
 func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues) error {
+	var lastErr error
+	for attempt := 0; attempt < cyclicCopyConnAttempts; attempt++ {
+		err := copyRangeOnce(ctx, src, sink, ref, cols, meta, lo, hi)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return err
+		}
+		if !pgEndpointDown(ctx, src.HealthCheck) && !pgEndpointDown(ctx, sink.HealthCheck) {
+			return err // healthy connections → real data error (or FK skew), halt/handle upstream
+		}
+		pgReconnectConn(ctx, src.HealthCheck, src.Close, src.Connect)
+		pgReconnectConn(ctx, sink.HealthCheck, sink.Close, sink.Connect)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cyclicConnBackoff):
+		}
+	}
+	return lastErr
+}
+
+// cyclicCopyConnAttempts / cyclicConnBackoff / cyclicConnHealthTimeout bound the
+// dropped-connection retry for a cyclic copy chunk.
+const (
+	cyclicCopyConnAttempts  = 6
+	cyclicConnBackoff       = 2 * time.Second
+	cyclicConnHealthTimeout = 10 * time.Second
+)
+
+// pgEndpointDown reports whether a health-check fails within the bounded timeout.
+func pgEndpointDown(ctx context.Context, healthCheck func(context.Context) error) bool {
+	hctx, cancel := context.WithTimeout(ctx, cyclicConnHealthTimeout)
+	defer cancel()
+	return healthCheck(hctx) != nil
+}
+
+// pgReconnectConn re-establishes one endpoint if its health-check fails (Close +
+// Connect; pgx has no auto-redial). Best-effort — a still-failing Connect surfaces as the
+// next attempt's error.
+func pgReconnectConn(ctx context.Context, healthCheck, closeConn, connect func(context.Context) error) {
+	hctx, cancel := context.WithTimeout(ctx, cyclicConnHealthTimeout)
+	healthErr := healthCheck(hctx)
+	cancel()
+	if healthErr == nil {
+		return
+	}
+	_ = closeConn(context.Background())
+	cctx, ccancel := context.WithTimeout(ctx, cyclicConnHealthTimeout)
+	defer ccancel()
+	_ = connect(cctx)
+}
+
+// copyRangeOnce copies one keyset key-range [lo, hi) of a column subset from source to
+// target as a single committed per-chunk staged UPSERT: COPY the range into a TEMP staging
+// table, then INSERT ... ON CONFLICT DO UPDATE from it (staging holds only this range's
+// rows, so the upsert is chunk-bounded). It performs NO DELETE — so it never violates or
+// stalls on a child FK by removing a parent row — and is idempotent, so a re-run converges.
+func copyRangeOnce(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues) error {
 	pred, err := keysetPredicate(meta.pk, lo, hi)
 	if err != nil {
 		return err
