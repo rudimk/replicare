@@ -27,7 +27,7 @@ nodes:
     engine: mysql
     mysql: { host: %[8]s, port: %[9]s, database: rc_it, user: root, password: replicare, tls: disable, local_infile: true }
 clusters:
-  - name: c1
+  - name: mysql-mesh
     engine: mysql
     members: [a, b]
     include: ["rc_it.*"]
