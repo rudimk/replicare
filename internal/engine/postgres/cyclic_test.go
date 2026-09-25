@@ -358,6 +358,56 @@ func TestCyclicCopyRecoversFromParentSkew(t *testing.T) {
 	}
 }
 
+// TestCyclicCopyChunkedLargeTable is the regression for the production crash-loop's real
+// cause: the cyclic copy used to move each table in ONE whole-table COPY, which dies with
+// "unexpected EOF" on a multi-million-row table (public.user_answer). The copy is now
+// chunked into bounded keyset ranges, each its own committed COPY. This forces MANY
+// chunks on a small fixture (copyChunkRows lowered) and asserts the component still copies
+// faithfully — proving the chunked path is correct end to end, including pass-2 fill.
+func TestCyclicCopyChunkedLargeTable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	// Force many small chunks so the whole-table path can't sneak by.
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	// Cyclic component: hub with a nullable self-ref (routes through null-then-fill) and a
+	// child with a NOT NULL FK to hub. Both bigger than one chunk.
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	// 300 rows each -> ~12 chunks per table at copyChunkRows=25. hub buddy_id closes a
+	// self-cycle (chain), filled in pass 2.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%300), 'c'||g FROM generate_series(1,300) g")
+
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+		t.Fatalf("chunked cyclic copy: %v", err)
+	}
+	for _, tc := range []struct{ tbl, sel string }{
+		{"hub", "SELECT id::text, coalesce(buddy_id::text,'<n>'), name FROM rc_it.hub ORDER BY id"},
+		{"child", "SELECT id::text, hub_id::text, note FROM rc_it.child ORDER BY id"},
+	} {
+		if !eqLines(dumpText(t, ctx, src.conn, tc.sel), dumpText(t, ctx, sink.conn, tc.sel)) {
+			t.Errorf("table %s did not copy faithfully via the chunked path", tc.tbl)
+		}
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.child"); n != 300 {
+		t.Errorf("child has %d rows, want 300 (chunk coverage gap?)", n)
+	}
+	if orphans := tgtCount(t, ctx, sink,
+		"SELECT count(*) FROM rc_it.hub h WHERE h.buddy_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM rc_it.hub m WHERE m.id=h.buddy_id)"); orphans != 0 {
+		t.Errorf("%d hub rows have a dangling buddy_id after chunked fill", orphans)
+	}
+}
+
 // TestCyclicCopyParentSkewGivesUpTransient verifies the retry does not spin forever
 // when the parent genuinely cannot supply the row (a true source orphan): it exhausts
 // the bound and returns a TRANSIENT-classified error, so the syncer's coarse retry /
