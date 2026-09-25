@@ -47,27 +47,38 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 		return err
 	}
 
-	// Pass 1: load every row with the FK column(s) omitted (NULL on target), via an
-	// idempotent staging+upsert (in its own tx so the TEMP table is connection-local)
-	// so a re-copy into a populated target converges instead of colliding on the PK.
+	// Pass 1: load every row with the FK column(s) omitted (NULL on target). An EMPTY
+	// target gets a plain LOAD DATA (light — no staging, no whole-table upsert, so it
+	// scales to very large tables); a NON-EMPTY target gets the idempotent staged
+	// upsert so a re-copy over existing rows converges instead of leaving stale rows.
 	pass1 := subtractCols(transportCols(table), fkCols)
-	tx1, err := sink.db.BeginTx(ctx, nil)
+	empty, err := targetEmptyMy(ctx, sink, ref)
 	if err != nil {
-		return fmt.Errorf("mysql: null-fill pass 1: begin: %w", err)
+		return err
 	}
-	committed1 := false
-	defer func() {
-		if !committed1 {
-			_ = tx1.Rollback()
+	if empty {
+		if err := pipeLoad(ctx, src, ref, pass1, sink.db, qualify(ref.Schema, ref.Name), charset, sink.localInfile); err != nil {
+			return fmt.Errorf("mysql: null-fill pass 1 (%s): %w", ref, err)
 		}
-	}()
-	if err := idempotentStageLoad(ctx, src, tx1, ref, pass1, tgt, charset, sink.localInfile, "rc_nf1_stg"); err != nil {
-		return fmt.Errorf("mysql: null-fill pass 1 (%s): %w", ref, err)
+	} else {
+		tx1, err := sink.db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("mysql: null-fill pass 1: begin: %w", err)
+		}
+		committed1 := false
+		defer func() {
+			if !committed1 {
+				_ = tx1.Rollback()
+			}
+		}()
+		if err := idempotentStageLoad(ctx, src, tx1, ref, pass1, tgt, charset, sink.localInfile, "rc_nf1_stg"); err != nil {
+			return fmt.Errorf("mysql: null-fill pass 1 (%s): %w", ref, err)
+		}
+		if err := tx1.Commit(); err != nil {
+			return fmt.Errorf("mysql: null-fill pass 1: commit: %w", err)
+		}
+		committed1 = true
 	}
-	if err := tx1.Commit(); err != nil {
-		return fmt.Errorf("mysql: null-fill pass 1: commit: %w", err)
-	}
-	committed1 = true
 
 	// Pass 2: stage (pk + fk) into a TEMP table and UPDATE the FK columns.
 	pkNames := make([]string, len(pk))
@@ -142,6 +153,7 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		cols    []string
 		charset string
 		tgt     engine.Table
+		empty   bool
 	}
 	infos := make([]tinfo, 0, len(tables))
 	for _, ref := range tables {
@@ -160,7 +172,14 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		if err != nil {
 			return err
 		}
-		infos = append(infos, tinfo{ref: ref, cols: transportCols(tbl), charset: charset, tgt: tgt})
+		// Probe emptiness on the POOL, before pinning: an empty target loads via a light
+		// direct LOAD DATA (scales to very large tables); a populated one uses the
+		// idempotent staged upsert so a re-copy converges instead of colliding on the PK.
+		empty, err := targetEmptyMy(ctx, sink, ref)
+		if err != nil {
+			return err
+		}
+		infos = append(infos, tinfo{ref: ref, cols: transportCols(tbl), charset: charset, tgt: tgt, empty: empty})
 	}
 
 	conn, err := sink.db.Conn(ctx)
@@ -184,10 +203,17 @@ func LoadCyclicFKChecks(ctx context.Context, src *Source, sink *Sink, tables []e
 		return fmt.Errorf("mysql: cyclic load: disable fk checks: %w", err)
 	}
 	for i, info := range infos {
-		// Idempotent staged upsert (not a direct LOAD DATA) so a re-copy into a populated
-		// target converges instead of colliding on the PK — FK_CHECKS=0 disables FK
-		// checks, not the unique/PK check. Distinct staging name per table (all share the
-		// one deferred tx). The pre-commit orphan verify below is unchanged.
+		// Empty target: light direct LOAD DATA into the real table (no whole-table staging
+		// upsert, so it scales to very large tables). Populated target: idempotent staged
+		// upsert so a re-copy converges instead of colliding on the PK — FK_CHECKS=0 disables
+		// FK checks, not the unique/PK check. Distinct staging name per table (all share the
+		// one deferred tx). The pre-commit orphan verify below is unchanged either way.
+		if info.empty {
+			if err := pipeLoad(ctx, src, info.ref, info.cols, tx, qualify(info.ref.Schema, info.ref.Name), info.charset, sink.localInfile); err != nil {
+				return fmt.Errorf("mysql: cyclic load %s: %w", info.ref, err)
+			}
+			continue
+		}
 		stg := fmt.Sprintf("rc_fk_stg_%d", i)
 		if err := idempotentStageLoad(ctx, src, tx, info.ref, info.cols, info.tgt, info.charset, sink.localInfile, stg); err != nil {
 			return fmt.Errorf("mysql: cyclic load %s: %w", info.ref, err)
@@ -297,6 +323,24 @@ func idempotentStageLoad(ctx context.Context, src *Source, ex execQuerier, ref e
 		return fmt.Errorf("mysql: staged load: drop staging: %w", err)
 	}
 	return nil
+}
+
+// targetEmptyMy reports whether the target table holds no rows, so a cyclic load
+// can take the light direct-LOAD path on an empty target (no whole-table staging
+// upsert, which does not scale to very large tables) and the idempotent staged
+// upsert only when the target is already populated. It runs on the pool (NOT a
+// pinned connection), so callers must probe emptiness BEFORE pinning the sink
+// connection for the load transaction.
+func targetEmptyMy(ctx context.Context, sink *Sink, ref engine.TableRef) (bool, error) {
+	var one int
+	err := sink.db.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s LIMIT 1", qualify(ref.Schema, ref.Name))).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("mysql: probe target emptiness %s: %w", ref, err)
+	}
+	return false, nil
 }
 
 // pipeLoad streams an explicit column subset of a whole source table into `into`

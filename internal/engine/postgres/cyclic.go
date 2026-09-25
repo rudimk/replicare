@@ -108,13 +108,13 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	order := nonCyclicTopoOrder(members, cyclicEdge)
 
 	// Pass 1: copy every table, omitting its cyclic FK columns (NULL on the target).
-	// Idempotent staging+upsert (not a direct COPY) so a re-copy into a target that
-	// already holds these rows — restart/reschedule after a lost state store, or a
-	// re-run against a populated target — converges instead of colliding on the PK.
+	// Empty target → a plain streaming COPY (light: no staging, no whole-table upsert);
+	// non-empty target → an idempotent staged upsert so a re-copy over existing rows
+	// converges instead of colliding on the PK. See copyOrUpsert.
 	for _, ref := range order {
 		table := byRef[ref]
 		cols := subtractCols(transportColumns(table), cyclicCols[ref])
-		if err := stagedUpsertCopy(ctx, src, s, ref, cols, "replicare_stg", true); err != nil {
+		if err := copyOrUpsert(ctx, src, s, ref, cols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
 		}
 	}
@@ -241,6 +241,17 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 	if sink.conn == nil {
 		return errNotConnected("sink")
 	}
+	// Probe each target's emptiness BEFORE opening the deferred transaction, so an
+	// empty table takes the light direct COPY and only a populated one pays for the
+	// staged upsert (see copyOrUpsert rationale).
+	empty := make(map[engine.TableRef]bool, len(tables))
+	for _, ref := range tables {
+		e, err := targetEmpty(ctx, sink, ref)
+		if err != nil {
+			return fmt.Errorf("postgres: cyclic deferred: %w", err)
+		}
+		empty[ref] = e
+	}
 	if _, err := sink.conn.Exec(ctx, "BEGIN"); err != nil {
 		return fmt.Errorf("postgres: cyclic deferred: begin: %w", err)
 	}
@@ -259,10 +270,18 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 			return err
 		}
 		cols := transportColumns(table)
-		// Idempotent staging+upsert within this deferred transaction (FK checks fire at
-		// COMMIT), so a re-copy into a populated target converges instead of colliding
-		// on the PK. Each table needs a distinct staging name because ON COMMIT DROP
-		// only fires at the single outer COMMIT.
+		if empty[ref] {
+			// Empty target: light direct COPY into the deferred txn (FK checks fire at
+			// COMMIT). No whole-table staging/upsert — that can't complete on a very
+			// large table.
+			sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+			if err := pipeCopy(ctx, src, ref, cols, sink, sql); err != nil {
+				return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
+			}
+			continue
+		}
+		// Non-empty target: idempotent staged upsert within the deferred transaction.
+		// Distinct staging name because ON COMMIT DROP fires only at the outer COMMIT.
 		stg := fmt.Sprintf("replicare_stg_%d", i)
 		if err := stagedUpsertCopy(ctx, src, sink, ref, cols, stg, false); err != nil {
 			return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
@@ -302,10 +321,9 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 	all := transportColumns(table)
 	pass1 := subtractCols(all, fkCols)
 
-	// Pass 1: load every row with the FK column(s) omitted (NULL on target), via an
-	// idempotent staging+upsert so a re-copy into a populated target converges instead
-	// of colliding on the PK.
-	if err := stagedUpsertCopy(ctx, src, sink, ref, pass1, "replicare_stg", true); err != nil {
+	// Pass 1: load every row with the FK column(s) omitted (NULL on target). Empty
+	// target → light direct COPY; non-empty → idempotent chunked staged upsert.
+	if err := copyOrUpsert(ctx, src, sink, ref, pass1); err != nil {
 		return fmt.Errorf("postgres: null-fill pass 1 (%s): %w", ref, err)
 	}
 
@@ -434,8 +452,12 @@ func stagedUpsertCopy(ctx context.Context, src *Source, sink *Sink, ref engine.T
 	if err := pipeCopy(ctx, src, ref, cols, sink, copySQL); err != nil {
 		return fmt.Errorf("postgres: staged upsert: copy %s: %w", ref, err)
 	}
-	if _, err := sink.conn.Exec(ctx, mergeInsertSQL(ref, stg, cols, pk, colSetOf(pk), identity)); err != nil {
-		return fmt.Errorf("postgres: staged upsert: upsert %s: %w", ref, err)
+	// Upsert from staging in bounded keyset chunks so no single INSERT statement ever
+	// processes the whole table — a whole-table INSERT ... ON CONFLICT cannot complete
+	// on a very large table (it surfaced as "unexpected EOF" on the statement). Chunk
+	// boundaries come from the source's PK distribution (identical keys to staging).
+	if err := upsertFromStaging(ctx, src, sink, ref, stg, cols, pk, identity); err != nil {
+		return err
 	}
 	if ownTxn {
 		if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
@@ -444,6 +466,108 @@ func stagedUpsertCopy(ctx context.Context, src *Source, sink *Sink, ref engine.T
 		committed = true
 	}
 	return nil
+}
+
+// targetEmpty reports whether the target table currently holds no rows. It is a cheap
+// existence probe (stops at the first row), used to pick the cyclic-copy load strategy.
+func targetEmpty(ctx context.Context, sink *Sink, ref engine.TableRef) (bool, error) {
+	if sink.conn == nil {
+		return false, errNotConnected("sink")
+	}
+	var nonEmpty bool
+	if err := sink.conn.QueryRow(ctx,
+		fmt.Sprintf("SELECT EXISTS(SELECT 1 FROM %s)", qualifyTable(ref))).Scan(&nonEmpty); err != nil {
+		return false, fmt.Errorf("postgres: probe %s emptiness: %w", ref, err)
+	}
+	return !nonEmpty, nil
+}
+
+// copyOrUpsert loads a column subset of the source table into the target, picking the
+// strategy by the target's current state: an EMPTY target gets a plain streaming COPY
+// (light and atomic — no staging, no whole-table upsert, so it scales to very large
+// tables), a NON-EMPTY target gets the idempotent chunked staged upsert (so a re-copy
+// over existing rows converges instead of colliding on the PK). Used by the per-table
+// NULL-fill cyclic paths (its own autocommit COPY / own-txn upsert).
+func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string) error {
+	empty, err := targetEmpty(ctx, sink, ref)
+	if err != nil {
+		return err
+	}
+	if empty {
+		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+		return pipeCopy(ctx, src, ref, cols, sink, sql)
+	}
+	return stagedUpsertCopy(ctx, src, sink, ref, cols, "replicare_stg", true)
+}
+
+// upsertFromStaging upserts every staged row into the target in bounded keyset chunks,
+// so no single INSERT statement processes the whole table. Chunk boundaries come from
+// the source's PK distribution (the staging table holds the same keys). If chunk
+// planning is unavailable or falls back to non-keyset (ctid) ranges — which carry no
+// key bounds to slice the staging table by — it does a single whole-staging upsert.
+func upsertFromStaging(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, stg string, cols []string, pk []captureCol, identity bool) error {
+	pkSet := colSetOf(pk)
+	chunks, err := src.PlanChunks(ctx, ref, engine.ChunkOptions{Method: engine.ChunkKeyset, TargetRows: upsertChunkRows})
+	if err != nil || !allKeyset(chunks) {
+		if _, e := sink.conn.Exec(ctx, mergeInsertSQL(ref, stg, cols, pk, pkSet, identity)); e != nil {
+			return fmt.Errorf("postgres: staged upsert: upsert %s: %w", ref, e)
+		}
+		return nil
+	}
+	for _, ch := range chunks {
+		pred, err := keysetPredicate(pk, ch.Lo, ch.Hi)
+		if err != nil {
+			return err
+		}
+		if _, err := sink.conn.Exec(ctx, mergeInsertRangeSQL(ref, stg, cols, pk, pkSet, identity, pred)); err != nil {
+			return fmt.Errorf("postgres: staged upsert: upsert %s chunk: %w", ref, err)
+		}
+	}
+	return nil
+}
+
+// upsertChunkRows is the approximate rows-per-chunk for the staged upsert. Small enough
+// that a single INSERT statement stays well within any statement/connection limit.
+const upsertChunkRows = 50000
+
+// allKeyset reports whether chunk planning produced at least one chunk and every chunk
+// is a keyset range (so it carries key bounds usable to slice the staging table).
+func allKeyset(chunks []engine.Chunk) bool {
+	if len(chunks) == 0 {
+		return false
+	}
+	for _, c := range chunks {
+		if c.Method != engine.ChunkKeyset {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeInsertRangeSQL is mergeInsertSQL restricted to a staging key range (WHERE pred),
+// so the upsert can be driven one bounded chunk at a time.
+func mergeInsertRangeSQL(t engine.TableRef, stg string, cols []string, pk []captureCol, pkSet map[string]bool, identity bool, pred string) string {
+	overriding := ""
+	if identity {
+		overriding = " OVERRIDING SYSTEM VALUE"
+	}
+	pkNames := make([]string, len(pk))
+	for i, c := range pk {
+		pkNames[i] = quoteIdentifier(c.Name)
+	}
+	var setParts []string
+	for _, c := range cols {
+		if !pkSet[c] {
+			setParts = append(setParts, fmt.Sprintf("%s = EXCLUDED.%s", quoteIdentifier(c), quoteIdentifier(c)))
+		}
+	}
+	action := "DO NOTHING"
+	if len(setParts) > 0 {
+		action = "DO UPDATE SET " + strings.Join(setParts, ", ")
+	}
+	return fmt.Sprintf("INSERT INTO %s (%s)%s SELECT %s FROM %s WHERE %s ON CONFLICT (%s) %s",
+		qualifyTable(t), quotedColumnList(cols), overriding, quotedColumnList(cols),
+		quoteIdentifier(stg), pred, strings.Join(pkNames, ", "), action)
 }
 
 // pipeCopy streams an explicit column subset of a whole source table into the
