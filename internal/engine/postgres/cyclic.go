@@ -526,14 +526,46 @@ func targetEmpty(ctx context.Context, sink *Sink, ref engine.TableRef) (bool, er
 // lower it to force multi-chunk copies on small fixtures.
 var copyChunkRows = 50000
 
+// rangeUpsertMeta is the per-table metadata a chunked staged upsert needs, computed
+// ONCE per table (not per chunk) so the chunk loop does no repeated introspection.
+type rangeUpsertMeta struct {
+	pk       []captureCol
+	pkSet    map[string]bool
+	stgDDL   string // "col type, col type, ..." for the TEMP staging table
+	identity bool   // any transported column is an identity column (needs OVERRIDING SYSTEM VALUE)
+}
+
+// buildRangeUpsertMeta derives the staging DDL, PK set, and identity flag for a chunked
+// staged upsert of `cols` into target table `tgt`.
+func buildRangeUpsertMeta(tgt engine.Table, cols []string) rangeUpsertMeta {
+	typeByName := make(map[string]string, len(tgt.Columns))
+	colSet := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		colSet[c] = true
+	}
+	identity := false
+	for _, c := range tgt.Columns {
+		typeByName[c.Name] = c.DataType
+		if c.Identity && colSet[c.Name] {
+			identity = true
+		}
+	}
+	stgCols := make([]string, len(cols))
+	for i, c := range cols {
+		stgCols[i] = quoteIdentifier(c) + " " + typeByName[c]
+	}
+	pk := captureColsFor(tgt)
+	return rangeUpsertMeta{pk: pk, pkSet: colSetOf(pk), stgDDL: strings.Join(stgCols, ", "), identity: identity}
+}
+
 // copyOrUpsert loads a column subset of the source table into the target in bounded
-// keyset key-range CHUNKS, each its own committed DELETE-range + COPY. During a table's
-// initial-copy phase the copier is the sole writer of that table (delta apply begins only
-// at cutover), so delete-range + re-COPY is exclusive and idempotent — it converges over
-// an empty OR a populated target (a restart/re-run) without a giant whole-table COPY or a
-// staging round-trip (§4.1). A keyless or tiny table (no usable keyset chunking) falls
-// back to a single whole-table copy: direct COPY into an empty target, idempotent staged
-// upsert into a populated one.
+// keyset key-range CHUNKS, each a committed per-chunk staged UPSERT (COPY the range into a
+// TEMP table, then INSERT ... ON CONFLICT DO UPDATE from it). Chunking keeps every COPY
+// and every statement bounded, so a huge table never rides one giant COPY that EOFs/times
+// out. The upsert (never a DELETE) is idempotent, so a re-copy over an empty OR a populated
+// target (a restart/re-run) converges — and, crucially, it NEVER removes a parent row that
+// a child already references (a range DELETE on a hub table like clinic would). A keyless
+// or tiny table (no usable keyset chunking) falls back to a single whole-table copy.
 func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string) error {
 	tgt, err := sink.tableMeta(ctx, ref)
 	if err != nil {
@@ -560,21 +592,22 @@ func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.Table
 		}
 		return stagedUpsertCopy(ctx, src, sink, ref, cols, "replicare_stg", true)
 	}
+	meta := buildRangeUpsertMeta(tgt, cols)
 	for _, ch := range chunks {
-		if err := copyRange(ctx, src, sink, ref, cols, pk, ch.Lo, ch.Hi); err != nil {
+		if err := copyRange(ctx, src, sink, ref, cols, meta, ch.Lo, ch.Hi); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// copyRange copies one keyset key-range [lo, hi) of a column subset from source to
-// target, as a single committed DELETE-range + COPY transaction. The DELETE clears any
-// rows already present in the range (restart/re-run idempotency; a no-op on an empty
-// target), then the ranged COPY streams the range's rows. Bounding every COPY to one
-// chunk is what keeps a huge table from riding one giant COPY that EOFs/times out.
-func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, pk []captureCol, lo, hi engine.KeyValues) error {
-	pred, err := keysetPredicate(pk, lo, hi)
+// copyRange copies one keyset key-range [lo, hi) of a column subset from source to target
+// as a single committed per-chunk staged UPSERT: COPY the range into a TEMP staging table,
+// then INSERT ... ON CONFLICT DO UPDATE from it (staging holds only this range's rows, so
+// the upsert is chunk-bounded). It performs NO DELETE — so it never violates or stalls on a
+// child FK by removing a parent row — and is idempotent, so a re-run converges.
+func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues) error {
+	pred, err := keysetPredicate(meta.pk, lo, hi)
 	if err != nil {
 		return err
 	}
@@ -587,12 +620,17 @@ func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef
 			_, _ = sink.conn.Exec(context.Background(), "ROLLBACK")
 		}
 	}()
-	if _, err := sink.conn.Exec(ctx, fmt.Sprintf("DELETE FROM %s WHERE %s", qualifyTable(ref), pred)); err != nil {
-		return fmt.Errorf("postgres: cyclic copy range: clear %s: %w", ref, err)
+	const stg = "replicare_stg"
+	if _, err := sink.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
+		quoteIdentifier(stg), meta.stgDDL)); err != nil {
+		return fmt.Errorf("postgres: cyclic copy range: staging %s: %w", ref, err)
 	}
-	sinkCopySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+	sinkCopySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
 	if err := pipeCopyWhere(ctx, src, ref, cols, pred, sink, sinkCopySQL); err != nil {
 		return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, err)
+	}
+	if _, err := sink.conn.Exec(ctx, mergeInsertSQL(ref, stg, cols, meta.pk, meta.pkSet, meta.identity)); err != nil {
+		return fmt.Errorf("postgres: cyclic copy range: upsert %s: %w", ref, err)
 	}
 	if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("postgres: cyclic copy range: commit: %w", err)
@@ -667,8 +705,9 @@ func copyTableChunkedWithParentRetry(ctx context.Context, src *Source, sink *Sin
 	if !allKeyset(chunks) {
 		return copyChildWithParentRetry(ctx, src, sink, ref, cols, parentRefs, byRef, cyclicCols)
 	}
+	meta := buildRangeUpsertMeta(tgt, cols)
 	for _, ch := range chunks {
-		if err := copyRangeWithParentRetry(ctx, src, sink, ref, cols, pk, ch.Lo, ch.Hi, parentRefs, byRef, cyclicCols); err != nil {
+		if err := copyRangeWithParentRetry(ctx, src, sink, ref, cols, meta, ch.Lo, ch.Hi, parentRefs, byRef, cyclicCols); err != nil {
 			return err
 		}
 	}
@@ -680,10 +719,10 @@ func copyTableChunkedWithParentRetry(ctx context.Context, src *Source, sink *Sin
 // up rows inserted mid-copy and retries just this chunk. Non-FK errors halt immediately;
 // on exhaustion it returns the FK error classified transient for the syncer's coarse
 // retry / a clean restart.
-func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, pk []captureCol, lo, hi engine.KeyValues, parentRefs []engine.TableRef, byRef map[engine.TableRef]engine.Table, cyclicCols map[engine.TableRef][]string) error {
+func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues, parentRefs []engine.TableRef, byRef map[engine.TableRef]engine.Table, cyclicCols map[engine.TableRef][]string) error {
 	var lastErr error
 	for attempt := 0; attempt < cyclicCopyRetries; attempt++ {
-		err := copyRange(ctx, src, sink, ref, cols, pk, lo, hi)
+		err := copyRange(ctx, src, sink, ref, cols, meta, lo, hi)
 		if err == nil {
 			return nil
 		}
