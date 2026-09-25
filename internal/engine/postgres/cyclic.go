@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -80,12 +81,14 @@ func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, table
 	}
 
 	// All cyclic FKs deferrable -> one deferred transaction over the whole component.
+	// classifyFKViolation marks a live-source transient FK skew (§3.3/§4) transient so
+	// the syncer's coarse retry recovers instead of the daemon crash-looping.
 	if allDeferrable(cyc) {
-		return LoadCyclicDeferred(ctx, pgSrc, s, orderMembers(members))
+		return classifyFKViolation(LoadCyclicDeferred(ctx, pgSrc, s, orderMembers(members)))
 	}
 
 	// NULL-then-fill: null every cyclic FK column, copy in non-cyclic order, then fill.
-	return s.nullFillComponent(ctx, pgSrc, members, cyc)
+	return classifyFKViolation(s.nullFillComponent(ctx, pgSrc, members, cyc))
 }
 
 // nullFillComponent runs the multi-table NULL-then-fill: copy each table with its
@@ -106,6 +109,12 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	}
 
 	order := nonCyclicTopoOrder(members, cyclicEdge)
+	// Non-cyclic in-component parents per child: the tables whose rows a child's
+	// KEPT (non-nulled) FK columns reference. On a LIVE source these parents keep
+	// gaining rows while the copy runs, so a child copied from a later snapshot can
+	// reference a parent row not yet in the parent's earlier snapshot — a transient
+	// FK violation (§3.3, §4). We recover by re-copying just those parents.
+	parents := nonCyclicParents(members, cyclicEdge)
 
 	// Pass 1: copy every table, omitting its cyclic FK columns (NULL on the target).
 	// Empty target → a plain streaming COPY (light: no staging, no whole-table upsert);
@@ -114,7 +123,7 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	for _, ref := range order {
 		table := byRef[ref]
 		cols := subtractCols(transportColumns(table), cyclicCols[ref])
-		if err := copyOrUpsert(ctx, src, s, ref, cols); err != nil {
+		if err := copyChildWithParentRetry(ctx, src, s, ref, cols, parents[ref], byRef, cyclicCols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
 		}
 	}
@@ -498,6 +507,86 @@ func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.Table
 		return pipeCopy(ctx, src, ref, cols, sink, sql)
 	}
 	return stagedUpsertCopy(ctx, src, sink, ref, cols, "replicare_stg", true)
+}
+
+// cyclicCopyRetries bounds the per-child retry that recovers from a live-source
+// transient FK violation during cyclic pass 1. Each attempt re-copies only the
+// child's non-cyclic parents (small hub tables like "user"), never the whole
+// component, so convergence is cheap. A write burst that keeps inserting fresh
+// parents past this bound falls through to the syncer's coarse retry.
+const cyclicCopyRetries = 6
+
+// copyChildWithParentRetry loads one component table and, on a transient FK
+// violation (a parent row inserted on the live source after the parent's snapshot
+// but referenced by this child's later snapshot — §3.3/§4), re-copies the child's
+// non-cyclic in-component parents to pick up those rows and retries. Non-FK errors
+// halt immediately. On exhaustion it returns the FK error classified transient, so
+// the syncer's coarse retry (and, failing that, a clean restart) can recover
+// instead of the daemon crash-looping.
+func copyChildWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, parentRefs []engine.TableRef, byRef map[engine.TableRef]engine.Table, cyclicCols map[engine.TableRef][]string) error {
+	var lastErr error
+	for attempt := 0; attempt < cyclicCopyRetries; attempt++ {
+		err := copyOrUpsert(ctx, src, sink, ref, cols)
+		if err == nil {
+			return nil
+		}
+		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
+			return err // not an FK skew — halt loud
+		}
+		lastErr = err
+		if len(parentRefs) == 0 {
+			break // nothing to re-copy — cannot make progress here
+		}
+		// Re-copy the direct non-cyclic parents so their newly-inserted rows land,
+		// then retry this child on the next loop iteration.
+		for _, p := range parentRefs {
+			pcols := subtractCols(transportColumns(byRef[p]), cyclicCols[p])
+			if e := copyOrUpsert(ctx, src, sink, p, pcols); e != nil {
+				return e
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cyclicRetryBackoff(attempt)):
+		}
+	}
+	return classifyFKViolation(lastErr)
+}
+
+// cyclicRetryBackoff is a short, bounded backoff between parent re-copy attempts.
+func cyclicRetryBackoff(attempt int) time.Duration {
+	d := time.Duration(500*(attempt+1)) * time.Millisecond
+	if d > 3*time.Second {
+		d = 3 * time.Second
+	}
+	return d
+}
+
+// nonCyclicParents maps each component member to the distinct in-component parent
+// tables reached by its NON-cyclic FK edges (cyclic edges are NULLed in pass 1, so
+// they impose no load dependency). These are exactly the parents whose fresh rows a
+// child may need re-copied to satisfy a transient FK during a live-source copy.
+func nonCyclicParents(members []engine.Table, cyclicEdge map[string]bool) map[engine.TableRef][]engine.TableRef {
+	inComp := make(map[engine.TableRef]bool, len(members))
+	for _, t := range members {
+		inComp[t.Ref] = true
+	}
+	out := make(map[engine.TableRef][]engine.TableRef, len(members))
+	for _, t := range members {
+		seen := map[engine.TableRef]bool{}
+		for _, fk := range t.ForeignKeys {
+			if !inComp[fk.Parent] || cyclicEdge[fkKey(fk)] || fk.Child == fk.Parent {
+				continue
+			}
+			if !seen[fk.Parent] {
+				seen[fk.Parent] = true
+				out[t.Ref] = append(out[t.Ref], fk.Parent)
+			}
+		}
+		sortRefs(out[t.Ref])
+	}
+	return out
 }
 
 // upsertFromStaging upserts every staged row into the target in bounded keyset chunks,

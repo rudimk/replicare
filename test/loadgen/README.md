@@ -58,9 +58,14 @@ or keyword string; empty uses the standard `PG*` environment variables.
 
 ### Commands & flags
 
-- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cyclic]` — ensure schema,
-  then **seed if empty** or **churn** `N` statements. `--seed` makes a run
-  reproducible.
+- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cyclic] [--duration D]` —
+  ensure schema, then **seed if empty** or **churn** `N` statements. `--seed`
+  makes a run reproducible. `--duration D` churns **continuously** for `D`
+  (repeated `--ops` bursts) — run it **while replicare does its initial copy** to
+  exercise the live-source cyclic-copy skew: parent rows (tenants/users) inserted
+  mid-copy are referenced by children copied from a later snapshot, a transient FK
+  the cyclic copy must recover from (§3.3/§4) rather than crash-loop on. Pair with
+  `--cyclic`.
 - `ddl --dsn <db> [--cyclic]` — apply the schema only (prep the target).
 - `verify --source <src> --target <tgt> [--wait D] [--interval D]` — per-table
   row-count + ordered content-checksum comparison. Exits non-zero on drift.

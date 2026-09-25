@@ -380,6 +380,140 @@ syncs:
 	<-done
 }
 
+// TestDaemonCyclicCopyConvergesUnderConcurrentWrites reproduces the production
+// crash-loop end-to-end: a CYCLIC FK component (hub with a nullable self-ref, plus a
+// child with a NOT NULL FK to hub) copied from a LIVE source that keeps gaining rows.
+// A concurrent writer inserts fresh hub rows AND child rows referencing them while the
+// initial copy runs, so a child snapshot can reference a hub row not yet in the hub's
+// earlier snapshot — a transient FK violation (SQLSTATE 23503). Before the fix the
+// cyclic copy aborted on that and the daemon exited (crash-loop); now the copy retries
+// (re-copying parents) and converges. The load-harness fixtures never covered this —
+// they seed a STATIC source, so the skew window never opens.
+func TestDaemonCyclicCopyConvergesUnderConcurrentWrites(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	defer src.Close(context.Background())
+	tgt := dial(t, ctx, envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"))
+	defer tgt.Close(context.Background())
+	writer := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	defer writer.Close(context.Background())
+
+	// hub is cyclic via a nullable self-ref (routes the component through the cyclic
+	// null-then-fill copy); child has a NOT NULL, non-cyclic FK to hub — the edge that
+	// skews under live writes and cannot be NULLed.
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	for _, c := range []*pgx.Conn{src, tgt} {
+		mustExec(t, ctx, c, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		mustExec(t, ctx, c, "CREATE SCHEMA rc_it")
+		mustExec(t, ctx, c, hubDDL)
+		mustExec(t, ctx, c, childDDL)
+	}
+	mustExec(t, ctx, src, "DROP SCHEMA IF EXISTS replicare CASCADE")
+	mustExec(t, ctx, tgt, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	// Seed a body large enough that the copy takes long enough for concurrent inserts to
+	// land mid-copy (opening the skew window).
+	const seed = 4000
+	mustExec(t, ctx, src, fmt.Sprintf("INSERT INTO rc_it.hub SELECT g, NULL, 'h'||g FROM generate_series(1,%d) g", seed))
+	mustExec(t, ctx, src, fmt.Sprintf("INSERT INTO rc_it.child SELECT g, g, 'c'||g FROM generate_series(1,%d) g", seed))
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS replicare CASCADE")
+		_, _ = tgt.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = tgt.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	})
+
+	syncBlock := `
+syncs:
+  - name: s1
+    source: src
+    targets: [dst]
+    include: ["rc_it.*"]
+    tuning: { drain_interval: 100ms }
+`
+	cfg, err := config.Load(writeConfig(t, harnessConfigYAML(syncBlock)))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+
+	// Concurrent writer: insert a fresh hub + a child referencing it, back-to-back, so a
+	// child copied from a later snapshot references a hub the parent snapshot missed.
+	stopWrites := make(chan struct{})
+	writesDone := make(chan struct{})
+	go func() {
+		defer close(writesDone)
+		id := seed + 1
+		for {
+			select {
+			case <-stopWrites:
+				return
+			default:
+			}
+			if _, err := writer.Exec(ctx, "INSERT INTO rc_it.hub (id, buddy_id, name) VALUES ($1, NULL, $2)", id, fmt.Sprintf("h%d", id)); err != nil {
+				return // ctx cancelled or shutting down
+			}
+			if _, err := writer.Exec(ctx, "INSERT INTO rc_it.child (id, hub_id, note) VALUES ($1, $2, $3)", id, id, fmt.Sprintf("c%d", id)); err != nil {
+				return
+			}
+			id++
+			time.Sleep(2 * time.Millisecond)
+		}
+	}()
+
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+
+	// Let the copy run under sustained concurrent writes, then quiesce the writer so the
+	// source stops moving and the target can fully catch up.
+	time.Sleep(5 * time.Second)
+	close(stopWrites)
+	<-writesDone
+
+	// The daemon must be alive (no crash from a transient FK) and converge to the source.
+	select {
+	case err := <-done:
+		t.Fatalf("daemon exited during cyclic copy under concurrent writes: %v", err)
+	default:
+	}
+	converged := pollUntil(t, 60*time.Second, func() bool {
+		sh := count(t, ctx, src, "rc_it.hub")
+		sc := count(t, ctx, src, "rc_it.child")
+		th := count(t, ctx, tgt, "rc_it.hub")
+		tc := count(t, ctx, tgt, "rc_it.child")
+		return sh > 0 && sh == th && sc == tc
+	})
+	if !converged {
+		t.Fatalf("did not converge under concurrent writes: src hub=%d child=%d, tgt hub=%d child=%d",
+			count(t, ctx, src, "rc_it.hub"), count(t, ctx, src, "rc_it.child"),
+			count(t, ctx, tgt, "rc_it.hub"), count(t, ctx, tgt, "rc_it.child"))
+	}
+	// No orphaned children on the target — referential integrity held throughout.
+	if orphans := count(t, ctx, tgt, "rc_it.child c WHERE NOT EXISTS (SELECT 1 FROM rc_it.hub h WHERE h.id=c.hub_id)"); orphans != 0 {
+		t.Errorf("%d target child rows reference a missing hub", orphans)
+	}
+
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon Run returned %v, want nil on graceful shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("daemon did not stop within 15s of cancellation")
+	}
+}
+
 // TestDaemonResumesAfterRestart proves checkpoint-resume: after one daemon stops,
 // a fresh daemon on the same state resumes without re-copying (copy progress is
 // Done) and streams deltas queued in the interim to convergence — no duplicates.

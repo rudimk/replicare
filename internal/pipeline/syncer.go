@@ -190,7 +190,13 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 		return nil
 	}
 
-	if err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables); err != nil {
+	// Coarse retry backstop: a cyclic component copied from a LIVE source can hit a
+	// transient FK violation when a parent row inserted mid-copy is referenced by a
+	// child copied from a later snapshot (§3.3/§4). The engine copier already retries
+	// per-child by re-copying parents; this outer loop covers deeper multi-level skew
+	// and MySQL's whole-component paths, so a normal write burst converges here instead
+	// of the daemon crash-looping. A non-transient error still halts loud immediately.
+	if err := s.copyCyclicWithRetry(ctx, copier, comp); err != nil {
 		return fmt.Errorf("syncer %s: cyclic copy: %w", s.Name, err)
 	}
 	// Mark every table copied so cutover proceeds and a restart resumes.
@@ -200,6 +206,52 @@ func (s *Syncer) copyCyclicComponent(ctx context.Context, comp engine.Component)
 		}
 	}
 	return nil
+}
+
+// cyclicCopyMaxAttempts bounds the coarse retry around a cyclic component copy on a
+// live source. The engine copier already converges cheaply per-child; this outer
+// loop is the backstop for deeper skew and MySQL's whole-component paths.
+const cyclicCopyMaxAttempts = 10
+
+// copyCyclicWithRetry runs the engine's cyclic component copy, retrying on a
+// transient FK violation (a live-source snapshot skew, §3.3/§4) with backoff. Each
+// re-run re-reads the current source, so a parent inserted mid-copy is picked up and
+// the component converges. A non-transient error halts immediately; on exhaustion the
+// last transient error is returned (a clean restart re-attempts) rather than looping
+// forever in-process.
+func (s *Syncer) copyCyclicWithRetry(ctx context.Context, copier engine.CyclicComponentCopier, comp engine.Component) error {
+	var lastErr error
+	for attempt := 0; attempt < cyclicCopyMaxAttempts; attempt++ {
+		err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables)
+		if err == nil {
+			return nil
+		}
+		if !engine.IsTransientConstraint(err) {
+			return err
+		}
+		lastErr = err
+		s.recordEvent(ctx, state.Event{
+			Sync: s.Name, Target: string(s.Target), Level: "WARN", Event: observability.EventCopyRetry,
+			Message: fmt.Sprintf("cyclic component copy hit a transient FK violation (live-source skew), retry %d/%d: %v",
+				attempt+1, cyclicCopyMaxAttempts, err),
+		})
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(cyclicCopyBackoff(attempt)):
+		}
+	}
+	return lastErr
+}
+
+// cyclicCopyBackoff grows the wait between coarse cyclic-copy retries, capped so a
+// converging write burst is caught quickly without hammering the source.
+func cyclicCopyBackoff(attempt int) time.Duration {
+	d := time.Duration(1<<attempt) * time.Second
+	if d > 30*time.Second {
+		d = 30 * time.Second
+	}
+	return d
 }
 
 // copyOptions builds the initial-copy options for this syncer: the rows-copied
