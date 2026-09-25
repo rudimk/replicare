@@ -307,6 +307,33 @@ no source-side queue). `replicare verify config.yml` checks both. Scope any comm
 > [redis-statestore.md](redis-statestore.md). If you have no Postgres to spare, that is the one piece
 > of infrastructure a Redis-only deployment still needs.
 
+### Pausing one pipeline
+
+Set `enabled: false` on a sync to **pause just that pipeline** while the others keep running — e.g.
+to work on the Postgres pipeline above while Redis keeps streaming:
+
+```yaml
+syncs:
+  - name: pg-pipeline
+    source: pg-src
+    targets: [pg-dst]
+    enabled: false            # paused; skipped at startup, no ownership lock taken
+    include: ["public.*"]
+  - name: redis-pipeline      # still runs
+    source: redis-src
+    targets: [redis-dst]
+    include: ["*"]
+```
+
+The pause is **data-loss-free**: the paused sync's source capture stays installed, so deltas keep
+queuing and setting `enabled: true` again (then restarting) drains the backlog. It is **start-time
+only** — a config change + daemon restart, not a live command. Because it's not a live toggle, a long
+pause lets the source-side delta tables grow and suspends the [source-footprint
+protection](#source-footprint-the-thing-to-watch) (retention runs in the streaming loop, which is
+skipped) — so pause for maintenance/cutover, not indefinitely. Full semantics:
+[configuration.md → Pausing a sync](configuration.md#pausing-a-sync-enabled). On Kubernetes, flip it
+with `helm upgrade` (see [kubernetes.md](kubernetes.md#configuring-the-daemon)).
+
 ## Forcing a reseed
 
 To re-copy a target from scratch (e.g. after out-of-band divergence):

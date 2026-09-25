@@ -100,6 +100,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(ctx)
 	owned := 0
 	for _, sync := range d.cfg.Syncs {
+		if !sync.IsEnabled() {
+			d.log.Info("sync disabled (paused); skipping", slog.String("sync", sync.Name))
+			continue
+		}
 		held, release, err := d.store.Acquire(gctx, sync.Name)
 		if err != nil {
 			return fmt.Errorf("daemon: acquire ownership for %q: %w", sync.Name, err)
@@ -122,6 +126,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// apply). A config with no clusters runs exactly as the one-way daemon.
 	edges := 0
 	for _, edge := range clusterEdges(d.cfg.Clusters) {
+		if !edge.cluster.IsEnabled() {
+			d.log.Info("cluster disabled (paused); skipping edge", slog.String("edge", edge.name()))
+			continue
+		}
 		held, release, err := d.store.Acquire(gctx, edge.name())
 		if err != nil {
 			return fmt.Errorf("daemon: acquire ownership for %q: %w", edge.name(), err)

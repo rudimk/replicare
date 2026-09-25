@@ -70,10 +70,17 @@ targets:
       tls: require
 
 syncs:
+  # Each sync has an independent pause switch: `enabled: false` stops just that
+  # pipeline (skipped at startup; source capture stays installed so it resumes with no
+  # data loss on `enabled: true` + restart). Omitting it means enabled. Pausing one
+  # pipeline here leaves the other running — e.g. set the Postgres one false to work on
+  # it while Redis keeps streaming.
+  #
   # Pipeline 1 — Postgres -> Postgres. `include`/`exclude` are schema.table globs.
   - name: pg-pipeline
     source: pg-src
     targets: [pg-dst]
+    enabled: true
     include: ["public.*"]
     exclude: ["*_audit"]
     tuning:
@@ -84,4 +91,5 @@ syncs:
   - name: redis-pipeline
     source: redis-src
     targets: [redis-dst]
+    enabled: true
     include: ["*"]            # e.g. "session:*" to scope to a key prefix

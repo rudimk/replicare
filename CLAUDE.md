@@ -645,6 +645,15 @@ without changing the single-static-binary distribution.
 - **Table selection:** include/exclude lists with **schema globs** (e.g. `public.*`, exclude
   `*_audit`) for relational engines; **key-pattern selection for Redis**. Selection is part of the
   engine-specific block. *(Decision.)*
+- **Per-pipeline pause (`enabled`, decision).** Each `sync` (and `cluster`) carries an optional
+  `enabled: true|false` on the **neutral** layer — a pure opt-out (unset/`true` = runs, so all
+  pre-existing configs are unchanged). `enabled: false` **pauses** just that pipeline: the daemon
+  skips it at startup and does **not** take its ownership lock (`Sync.IsEnabled()` /
+  `Cluster.IsEnabled()`, checked before `Acquire` in `daemon.Run`). Pause is **data-loss-free**:
+  source capture is left installed, so deltas keep queuing and an unpause (+ restart) drains the
+  backlog — at the cost of source-side delta growth while paused (retention enforcement runs in the
+  streaming loop, which is skipped), so it is a maintenance/cutover switch, not an indefinite stop.
+  It takes effect **at daemon start** (config change + restart / Helm rollout), not a live toggle.
 - **Distribution:** single static binary + sample `systemd` unit now; **Helm chart later**
   (YAML injected via chart values — no rush).
 
@@ -747,6 +756,7 @@ invasive.
 | Topology | **User choice**: default single→single; **fan-out supported**; **multi-master on roadmap**. |
 | Engine scope | **Never cross-engine.** A sync is **single-engine** (source + all targets share one engine: PG→PG, MySQL→MySQL, Redis→Redis). Follows from faithful transport (§1.7); enforced in config validation. |
 | Config model | **Neutral envelope + typed per-engine block, registry-dispatched** (§11). Each engine owns/validates its connection, selection, and CDC tuning. v1: Postgres block only; MySQL/Redis are extension points. |
+| Per-pipeline pause | Optional neutral **`enabled: true\|false`** on each `sync`/`cluster` (unset = enabled, pure opt-out). `false` = daemon skips it at startup (no ownership lock); source capture left installed so unpause+restart drains the backlog (data-loss-free), but source deltas grow + retention is paused while off. Start-time only (config change + restart). See §11. |
 | Schema | **Target pre-exists; data-only; no live DDL** (v1). |
 | Process model | **Single daemon, many syncs, goroutine worker pools.** |
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |

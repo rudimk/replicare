@@ -58,6 +58,19 @@ placeholders need no quoting (they render in block style). If you'd rather hand 
 daemon a **byte-exact** config, set `config` to a block-scalar **string** instead and
 it is emitted verbatim.
 
+**Pausing a pipeline.** Each sync (and cluster) takes an optional `enabled: true|false`
+— set it `false` to pause just that pipeline; the others keep running. Because it's a
+config change, the `helm upgrade` pod rollout applies it (it's start-time, not live):
+
+```
+helm upgrade replicare deploy/helm/replicare-controller -f values.yaml \
+  --set-string 'config.syncs[0].enabled=false'
+```
+
+The paused sync's source capture stays installed, so re-enabling it drains the queued
+backlog with no data loss (a long pause grows the source-side delta tables). Full
+semantics: [configuration.md → Pausing a sync](../../../docs/configuration.md#pausing-a-sync-enabled).
+
 Secrets stay out of `config` using `${VAR}` placeholders (replicare expands env vars
 in **any** field), supplied via a Secret:
 
