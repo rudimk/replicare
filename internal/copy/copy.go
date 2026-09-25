@@ -11,7 +11,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -161,7 +163,7 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 		wk := workers[w]
 		g.Go(func() error {
 			for i := range idxCh {
-				n, err := copyChunk(gctx, wk.Src, wk.Sink, ref, cols, chunks[i], mode)
+				n, err := copyChunkResilient(gctx, wk, ref, cols, chunks[i], mode)
 				if err != nil {
 					return fmt.Errorf("copy %s: chunk %d: %w", ref, i, err)
 				}
@@ -232,6 +234,81 @@ func copyChunk(ctx context.Context, src engine.Source, sink engine.Sink,
 		return 0, fmt.Errorf("write side: %w", loadErr)
 	}
 	return n, nil
+}
+
+const (
+	// copyChunkMaxAttempts bounds how many times a chunk is retried after a dropped
+	// connection before giving up. A live source/target (RDS failover, an idle-conn
+	// reaper, a backend the server kills under load) can drop a socket mid-COPY,
+	// surfacing as "unexpected EOF"; without this the whole bring-up would crash.
+	copyChunkMaxAttempts = 6
+	// copyRetryBackoff is the wait between reconnect attempts.
+	copyRetryBackoff = 2 * time.Second
+	// copyHealthTimeout bounds each health-check / reconnect round-trip.
+	copyHealthTimeout = 10 * time.Second
+)
+
+// copyChunkResilient copies one chunk and, on a dropped connection, reconnects the
+// worker's source/target and retries — mirroring the streaming loop's reconnect policy
+// so a transient socket drop heals instead of crashing the initial copy. A chunk error
+// with BOTH endpoints still healthy is a real data error (type/constraint), so it halts
+// loud immediately — never retried. Retries use LoadMerge (idempotent upsert) regardless
+// of the first attempt's mode, so re-copying a range whose prior attempt may have
+// partially/ambiguously landed converges instead of colliding on the PK.
+func copyChunkResilient(ctx context.Context, wk Worker, ref engine.TableRef, cols []string, c engine.Chunk, mode engine.LoadMode) (int64, error) {
+	var lastErr error
+	for attempt := 0; attempt < copyChunkMaxAttempts; attempt++ {
+		m := mode
+		if attempt > 0 {
+			m = engine.LoadMerge
+		}
+		n, err := copyChunk(ctx, wk.Src, wk.Sink, ref, cols, c, m)
+		if err == nil {
+			return n, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return 0, err
+		}
+		// Only a connectivity failure is retryable; a healthy-connection error is a real
+		// data error that must halt loud.
+		if !endpointDown(ctx, wk.Src.HealthCheck) && !endpointDown(ctx, wk.Sink.HealthCheck) {
+			return 0, err
+		}
+		slog.Warn("copy chunk hit a dropped connection; reconnecting and retrying",
+			"table", ref.String(), "attempt", attempt+1, "max", copyChunkMaxAttempts, "error", err.Error())
+		reconnectConn(ctx, wk.Src.HealthCheck, wk.Src.Close, wk.Src.Connect)
+		reconnectConn(ctx, wk.Sink.HealthCheck, wk.Sink.Close, wk.Sink.Connect)
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(copyRetryBackoff):
+		}
+	}
+	return 0, fmt.Errorf("after %d attempts: %w", copyChunkMaxAttempts, lastErr)
+}
+
+// endpointDown reports whether a health-check fails within the bounded timeout.
+func endpointDown(ctx context.Context, healthCheck func(context.Context) error) bool {
+	hctx, cancel := context.WithTimeout(ctx, copyHealthTimeout)
+	defer cancel()
+	return healthCheck(hctx) != nil
+}
+
+// reconnectConn re-establishes one endpoint if its health-check fails: Close + Connect
+// (pgx holds a single connection with no auto-redial). Best-effort — a still-failing
+// Connect surfaces as the next copy attempt's error rather than aborting here.
+func reconnectConn(ctx context.Context, healthCheck, closeConn, connect func(context.Context) error) {
+	hctx, cancel := context.WithTimeout(ctx, copyHealthTimeout)
+	healthErr := healthCheck(hctx)
+	cancel()
+	if healthErr == nil {
+		return // already alive
+	}
+	_ = closeConn(context.Background())
+	cctx, ccancel := context.WithTimeout(ctx, copyHealthTimeout)
+	defer ccancel()
+	_ = connect(cctx)
 }
 
 // resolveLoadMode picks the per-table target-write strategy (CLAUDE.md §4.1).
