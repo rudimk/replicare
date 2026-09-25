@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	goredis "github.com/redis/go-redis/v9"
+
 	"github.com/rudimk/replicare/internal/engine"
 )
 
@@ -97,5 +99,76 @@ func TestVerifyKeysetIntegration(t *testing.T) {
 	}
 	if n != 2 {
 		t.Errorf("selected count = %d, want 2 (keep:* only)", n)
+	}
+}
+
+// TestVerifyValueDriftIntegration proves the content fingerprint catches same-key
+// VALUE drift — the case a key-set-only hash misses (a SET/HSET/etc. that changes a
+// value without changing the key set). For each native type it seeds identical
+// key+value on both ends (checksum matches across the 6.2->7.4 version gap), mutates
+// only the target's value, and asserts the count is unchanged but the checksum drifts.
+func TestVerifyValueDriftIntegration(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	src, sink := mustConnectPair(t, ctx, srcCfg(), tgtCfg())
+	sc, tc := src.db.uc, sink.db.uc
+	must(t, sc.FlushDB(ctx).Err())
+	must(t, tc.FlushDB(ctx).Err())
+	ref := unitRef(src.cfg)
+
+	// Seed one key of each native type, identical on both ends.
+	seed := func(c goredis.Cmdable) {
+		must(t, c.Set(ctx, "s", "v1", 0).Err())
+		must(t, c.HSet(ctx, "h", "f", "1", "g", "2").Err())
+		must(t, c.RPush(ctx, "l", "a", "b", "c").Err())
+		must(t, c.SAdd(ctx, "st", "x", "y", "z").Err())
+		must(t, c.ZAdd(ctx, "z", goredis.Z{Score: 1, Member: "m1"}, goredis.Z{Score: 2, Member: "m2"}).Err())
+	}
+	seed(sc)
+	seed(tc)
+
+	sf, err := src.Fingerprint(ctx, ref, nil)
+	must(t, err)
+	tf, err := sink.Fingerprint(ctx, ref, nil)
+	must(t, err)
+	if sf.Rows != 5 || tf.Rows != 5 {
+		t.Fatalf("counts: src=%d tgt=%d, want 5/5", sf.Rows, tf.Rows)
+	}
+	if sf.Checksum != tf.Checksum {
+		t.Fatalf("identical content differs across version gap: src=%s tgt=%s", sf.Checksum, tf.Checksum)
+	}
+
+	// Mutate only the TARGET's value for each type (key set unchanged) and assert drift.
+	cases := []struct {
+		name   string
+		mutate func()
+	}{
+		{"string", func() { must(t, tc.Set(ctx, "s", "v2", 0).Err()) }},
+		{"hash", func() { must(t, tc.HSet(ctx, "h", "f", "999").Err()) }},
+		{"list", func() { must(t, tc.RPush(ctx, "l", "d").Err()) }},
+		{"set", func() { must(t, tc.SAdd(ctx, "st", "w").Err()) }},
+		{"zset", func() { must(t, tc.ZAdd(ctx, "z", goredis.Z{Score: 5, Member: "m1"}).Err()) }},
+	}
+	for _, tcase := range cases {
+		// Re-seed the target to the identical baseline before each case.
+		must(t, tc.FlushDB(ctx).Err())
+		seed(tc)
+		base, err := sink.Fingerprint(ctx, ref, nil)
+		must(t, err)
+		if base.Checksum != sf.Checksum {
+			t.Fatalf("%s: baseline re-seed did not match source: %s vs %s", tcase.name, base.Checksum, sf.Checksum)
+		}
+		tcase.mutate()
+		got, err := sink.Fingerprint(ctx, ref, nil)
+		must(t, err)
+		if got.Rows != sf.Rows {
+			t.Errorf("%s: count changed to %d (want %d) — value drift should not change the key count", tcase.name, got.Rows, sf.Rows)
+		}
+		if got.Checksum == sf.Checksum {
+			t.Errorf("%s: value drift NOT detected — checksum unchanged after mutating the target's value", tcase.name)
+		}
 	}
 }
