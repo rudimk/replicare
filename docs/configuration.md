@@ -198,6 +198,12 @@ restart**, not a live toggle. On Kubernetes/Helm, change the value and `helm upg
 the resulting pod rollout applies it. (Clusters have the same `enabled` flag; setting it
 `false` pauses all of that cluster's mesh edges.)
 
+**Pausing every pipeline is fine — the daemon stays up.** With all syncs (and clusters)
+paused the daemon does **not** exit; it idles, keeps serving `/metrics`, `/status`, and
+`/healthz`, and stays a healthy pod (so a Kubernetes Deployment does not restart-loop it).
+`replicare status` then shows each paused sync with a **`[PAUSED]`** banner (and, live,
+its still-growing delta backlog) rather than a stale "streaming" phase.
+
 ### Selection
 
 `include`/`exclude` are `schema.table` globs (`*` matches within a name segment).

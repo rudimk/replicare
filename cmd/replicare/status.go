@@ -92,6 +92,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 	defer func() { _ = store.Close(context.Background()) }()
 
 	names := syncNames(cfg, only)
+	paused := pausedSyncs(cfg)
 	reporter := status.NewReporter(store)
 	var enricher *live.Enricher
 	if liveMode {
@@ -106,6 +107,11 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 			if err != nil {
 				return nil, fmt.Errorf("report %s: %w", name, err)
 			}
+			rep.Paused = paused[name]
+			// Live enrichment still runs for a paused sync: its persisted cursors and the
+			// growing source-side delta backlog (how much has queued while paused) are
+			// exactly what an operator wants to see. The PAUSED banner marks it as not
+			// running so the last-known phase isn't mistaken for live.
 			if enricher != nil {
 				rep = enricher.Enrich(ctx, name, rep)
 			}
@@ -190,11 +196,25 @@ func syncNames(cfg *config.Config, only string) []string {
 	return names
 }
 
+// pausedSyncs maps each sync name to whether it is paused (enabled: false), so the
+// status view can flag a disabled sync as PAUSED rather than showing its stale
+// last-known phase as if it were live.
+func pausedSyncs(cfg *config.Config) map[string]bool {
+	m := make(map[string]bool, len(cfg.Syncs))
+	for _, s := range cfg.Syncs {
+		m[s.Name] = !s.IsEnabled()
+	}
+	return m
+}
+
 // renderReports prints a human-readable status table per sync. When live is true it
 // includes the live SRC_ROWS / TGT_ROWS / BACKLOG columns.
 func renderReports(w io.Writer, reports []status.Report, live bool) {
 	for _, rep := range reports {
 		fmt.Fprintf(w, "sync: %s\n", rep.Sync)
+		if rep.Paused {
+			fmt.Fprintln(w, "  [PAUSED] disabled (enabled: false) — not running; source capture still queues deltas. Set enabled: true and restart to resume.")
+		}
 		if rep.LiveError != "" {
 			fmt.Fprintf(w, "  live: partial (%s)\n", rep.LiveError)
 		}
