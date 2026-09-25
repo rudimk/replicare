@@ -26,6 +26,39 @@ const (
 	meshTestBudget      = 300 * time.Second // per-test ctx; must exceed the sum of the ceilings above
 )
 
+// pgMeshConfigYAML builds a 2-node Postgres active-active cluster config with a
+// caller-supplied cluster name. Each test passes a UNIQUE name (t.Name()) so the
+// per-edge ownership advisory keys never collide across cluster tests that share the
+// one Postgres state store. A same-named cluster in a sibling test could otherwise
+// still hold an edge's advisory lock — released asynchronously on the prior daemon's
+// connection close — just as this test's daemon tries to acquire it, leaving an edge
+// unowned and the mesh unable to converge (the flake this fixes).
+func pgMeshConfigYAML(cluster string) string {
+	return fmt.Sprintf(`
+logging: { level: warn, format: text }
+state_store:
+  engine: postgres
+  postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+nodes:
+  a:
+    engine: postgres
+    postgres: { host: %[6]s, port: %[7]s, database: %[8]s, user: %[4]s, password: %[5]s, sslmode: disable }
+  b:
+    engine: postgres
+    postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
+clusters:
+  - name: %[9]s
+    engine: postgres
+    members: [a, b]
+    include: ["rc_it.*"]
+    tuning: { drain_interval: 100ms }
+`,
+		envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"),
+		envd("RC_USER", "postgres"), envd("RC_PASSWORD", "postgres"),
+		envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"),
+		cluster)
+}
+
 // TestDaemonTwoNodeMeshConverges is the MM3 acceptance: a 2-node Postgres mesh
 // (active-active) where writes accepted on EITHER node converge on both, and — the
 // heart of loop suppression — an inbound change applied to a node is NOT re-captured
@@ -69,28 +102,9 @@ func TestDaemonTwoNodeMeshConverges(t *testing.T) {
 		_, _ = b.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
 	})
 
-	cfgYAML := fmt.Sprintf(`
-logging: { level: warn, format: text }
-state_store:
-  engine: postgres
-  postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
-nodes:
-  a:
-    engine: postgres
-    postgres: { host: %[6]s, port: %[7]s, database: %[8]s, user: %[4]s, password: %[5]s, sslmode: disable }
-  b:
-    engine: postgres
-    postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
-clusters:
-  - name: c1
-    engine: postgres
-    members: [a, b]
-    include: ["rc_it.*"]
-    tuning: { drain_interval: 100ms }
-`,
-		envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"),
-		envd("RC_USER", "postgres"), envd("RC_PASSWORD", "postgres"),
-		envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	// Unique cluster name per test (t.Name()) so ownership advisory keys never collide
+	// across cluster tests sharing the one Postgres state store — see pgMeshConfigYAML.
+	cfgYAML := pgMeshConfigYAML(t.Name())
 
 	cfg, err := config.Load(writeConfig(t, cfgYAML))
 	if err != nil {
@@ -195,28 +209,9 @@ func TestDaemonMeshSameKeyConflictConverges(t *testing.T) {
 		_, _ = b.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
 	})
 
-	cfgYAML := fmt.Sprintf(`
-logging: { level: warn, format: text }
-state_store:
-  engine: postgres
-  postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
-nodes:
-  a:
-    engine: postgres
-    postgres: { host: %[6]s, port: %[7]s, database: %[8]s, user: %[4]s, password: %[5]s, sslmode: disable }
-  b:
-    engine: postgres
-    postgres: { host: %[1]s, port: %[2]s, database: %[3]s, user: %[4]s, password: %[5]s, sslmode: disable }
-clusters:
-  - name: c1
-    engine: postgres
-    members: [a, b]
-    include: ["rc_it.*"]
-    tuning: { drain_interval: 100ms }
-`,
-		envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"),
-		envd("RC_USER", "postgres"), envd("RC_PASSWORD", "postgres"),
-		envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	// Unique cluster name per test (t.Name()) so ownership advisory keys never collide
+	// across cluster tests sharing the one Postgres state store — see pgMeshConfigYAML.
+	cfgYAML := pgMeshConfigYAML(t.Name())
 
 	cfg, err := config.Load(writeConfig(t, cfgYAML))
 	if err != nil {
