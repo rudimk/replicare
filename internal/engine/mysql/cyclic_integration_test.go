@@ -145,3 +145,95 @@ func TestLoadCyclicFKChecks(t *testing.T) {
 		t.Errorf("after orphan rollback, a has %d rows, want 0 (nothing committed)", nAfter)
 	}
 }
+
+// TestLoadCyclicNullFillPrepopulated proves the null-fill copy is idempotent over a
+// populated target (restart/reschedule after a lost state store, or a re-run). Before
+// the fix pass 1 did a direct LOAD DATA and errored 1062 on the duplicate PK.
+func TestLoadCyclicNullFillPrepopulated(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := connectSource(t, ctx)
+	sink := connectSink(t, ctx)
+
+	ddl := "CREATE TABLE rc_it.emp (id INT PRIMARY KEY, mgr INT NULL, name VARCHAR(20), " +
+		"CONSTRAINT fk_mgr FOREIGN KEY (mgr) REFERENCES rc_it.emp(id)) ENGINE=InnoDB"
+	mustExec(t, ctx, src.db, ddl)
+	mustExec(t, ctx, sink.db, "DROP DATABASE IF EXISTS rc_it", "CREATE DATABASE rc_it", ddl)
+	t.Cleanup(func() { _, _ = sink.db.Exec("DROP DATABASE IF EXISTS rc_it") })
+	mustExec(t, ctx, src.db, "INSERT INTO rc_it.emp VALUES (1,NULL,'ceo'),(2,1,'a'),(3,1,'b')")
+	// Pre-existing target rows (stale name; mgr NULL to avoid an FK on the seed).
+	mustExec(t, ctx, sink.db, "INSERT INTO rc_it.emp VALUES (1,NULL,'stale'),(2,NULL,'stale')")
+
+	ref := engine.TableRef{Schema: "rc_it", Name: "emp"}
+	if err := LoadCyclicNullFill(ctx, src, sink, ref); err != nil {
+		t.Fatalf("null-fill into a populated target: %v", err)
+	}
+	var n int
+	if err := sink.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it.emp WHERE mgr=1").Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("employees reporting to 1 = %d, want 2", n)
+	}
+	var stale int
+	_ = sink.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it.emp WHERE name='stale'").Scan(&stale)
+	if stale != 0 {
+		t.Errorf("%d stale rows survived — upsert did not correct pre-existing values", stale)
+	}
+	var total int
+	_ = sink.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it.emp").Scan(&total)
+	if total != 3 {
+		t.Errorf("emp has %d rows, want 3", total)
+	}
+}
+
+// TestLoadCyclicFKChecksPrepopulated proves the FOREIGN_KEY_CHECKS=0 whole-component
+// load is idempotent over a populated target (FK_CHECKS=0 disables FK checks, not the
+// PK check, so a direct LOAD DATA still hit 1062 before the fix).
+func TestLoadCyclicFKChecksPrepopulated(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := connectSource(t, ctx)
+	sink := connectSink(t, ctx)
+
+	setup := []string{
+		"CREATE TABLE rc_it.b (id INT PRIMARY KEY, a_id INT NOT NULL, note VARCHAR(20) NULL) ENGINE=InnoDB",
+		"CREATE TABLE rc_it.a (id INT PRIMARY KEY, b_id INT NOT NULL, note VARCHAR(20) NULL, " +
+			"CONSTRAINT fk_ab FOREIGN KEY (b_id) REFERENCES rc_it.b(id)) ENGINE=InnoDB",
+		"ALTER TABLE rc_it.b ADD CONSTRAINT fk_ba FOREIGN KEY (a_id) REFERENCES rc_it.a(id)",
+	}
+	mustExec(t, ctx, src.db, setup...)
+	mustExec(t, ctx, sink.db, "DROP DATABASE IF EXISTS rc_it", "CREATE DATABASE rc_it")
+	mustExec(t, ctx, sink.db, setup...)
+	t.Cleanup(func() { _, _ = sink.db.Exec("DROP DATABASE IF EXISTS rc_it") })
+	mustExec(t, ctx, src.db, "SET FOREIGN_KEY_CHECKS=0",
+		"INSERT INTO rc_it.a VALUES (1,1,'a1')", "INSERT INTO rc_it.b VALUES (1,1,'b1')",
+		"SET FOREIGN_KEY_CHECKS=1")
+	// Pre-existing target rows (stale note) forming the same cycle, seeded with checks off.
+	mustExec(t, ctx, sink.db, "SET FOREIGN_KEY_CHECKS=0",
+		"INSERT INTO rc_it.a VALUES (1,1,'stale')", "INSERT INTO rc_it.b VALUES (1,1,'stale')",
+		"SET FOREIGN_KEY_CHECKS=1")
+
+	a := engine.TableRef{Schema: "rc_it", Name: "a"}
+	b := engine.TableRef{Schema: "rc_it", Name: "b"}
+	if err := LoadCyclicFKChecks(ctx, src, sink, []engine.TableRef{a, b}); err != nil {
+		t.Fatalf("cyclic FK_CHECKS load into a populated target: %v", err)
+	}
+	for _, tbl := range []string{"a", "b"} {
+		var n, stale int
+		_ = sink.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it."+tbl).Scan(&n)
+		_ = sink.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it."+tbl+" WHERE note='stale'").Scan(&stale)
+		if n != 1 {
+			t.Errorf("table %s has %d rows, want 1", tbl, n)
+		}
+		if stale != 0 {
+			t.Errorf("table %s: %d stale rows survived", tbl, stale)
+		}
+	}
+}
