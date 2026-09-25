@@ -87,9 +87,12 @@ config:
       # Per-pipeline pause switch. Omit or `true` to run; set `false` to PAUSE just this
       # sync (skipped at startup; other syncs keep running). Source capture stays
       # installed, so `enabled: true` + a rollout resumes it and drains the backlog with
-      # no data loss (a long pause grows the source delta tables). Change it with
-      # `helm upgrade --set-string 'config.syncs[0].enabled=false'` (or edit values) —
-      # it takes effect on the pod restart the upgrade triggers, not live.
+      # no data loss (a long pause grows the source delta tables). Edit it here by name
+      # (recommended) and `helm upgrade`; it takes effect on the pod restart the upgrade
+      # triggers, not live. NOTE: `--set 'config.syncs[N].enabled=false'` addresses syncs
+      # by ARRAY INDEX (0 = first sync in this list), NOT by name — with several syncs it
+      # is easy to pause the wrong one, so prefer editing the block. Verify in the pod
+      # logs: "sync disabled (paused); skipping sync=<name>" vs "sync streaming sync=<name>".
       enabled: true
       include: ["*"]
       tuning:

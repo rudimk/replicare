@@ -137,17 +137,35 @@ form above needs no shell.
 - **Config changes roll the pod** automatically: a checksum annotation over the
   rendered ConfigMap means `helm upgrade` after editing `config` restarts the daemon
   cleanly.
-- **Pause one pipeline without touching the others** by setting `enabled: false` on a
+- **Pause one pipeline without touching the others** by setting `enabled: false` on that
   sync (a per-pipeline switch; omit it or `true` to run). Because it's a config change,
-  the upgrade's pod rollout applies it — it is start-time, not a live command:
+  the upgrade's pod rollout applies it — it is start-time, not a live command. **Prefer
+  editing the sync's block in your values file by name**, so you pause the pipeline you
+  mean to:
+  ```yaml
+  config:
+    syncs:
+      - name: pg-pipeline
+        # ...
+        enabled: false        # pauses THIS pipeline only
+      - name: redis-pipeline
+        # ...                  # (no enabled / true) keeps running
   ```
-  helm upgrade replicare deploy/helm/replicare-controller -f values.yaml \
-    --set-string 'config.syncs[0].enabled=false'
+  then `helm upgrade -f values.yaml`. You *can* use `--set`, but it addresses syncs by
+  **array index**, not name — `config.syncs[0]` is the **first** sync in your list, which
+  may not be the one you want:
   ```
-  The paused sync's source capture stays installed, so re-enabling it (`enabled: true`
-  + the rollout) drains the queued backlog with no data loss. Full semantics and the
-  long-pause caveat (source-side delta growth): [configuration.md → Pausing a
-  sync](configuration.md#pausing-a-sync-enabled).
+  # WRONG target if redis-pipeline is the 2nd sync — this pauses syncs[0] (e.g. pg-pipeline):
+  helm upgrade ... --set-string 'config.syncs[0].enabled=false'
+  # Pause the second sync instead:
+  helm upgrade ... --set-string 'config.syncs[1].enabled=false'
+  ```
+  **Verify which sync actually paused** in the pod logs: `sync disabled (paused);
+  skipping sync=<name>` for the paused one, and `sync streaming sync=<name>` for each
+  still running. `replicare status` also shows `[PAUSED]` per sync. The paused sync's
+  source capture stays installed, so re-enabling it drains the queued backlog with no
+  data loss. Full semantics and the long-pause caveat (source-side delta growth):
+  [configuration.md → Pausing a sync](configuration.md#pausing-a-sync-enabled).
 - **The state store lives outside the chart, always.** Every sync needs a Postgres
   state store (v1's only backend) — including Redis→Redis and MySQL→MySQL. Point
   `state_store` at your own managed Postgres (e.g. RDS). The chart never bundles it;

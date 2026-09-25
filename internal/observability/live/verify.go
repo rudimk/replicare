@@ -13,6 +13,7 @@ import (
 // identically and their checksums are directly comparable.
 type VerifyReport struct {
 	Sync      string         `json:"sync"`
+	Paused    bool           `json:"paused,omitempty"`
 	Targets   []VerifyTarget `json:"targets"`
 	Converged bool           `json:"converged"`
 	Error     string         `json:"error,omitempty"`

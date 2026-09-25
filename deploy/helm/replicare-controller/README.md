@@ -60,13 +60,23 @@ it is emitted verbatim.
 
 **Pausing a pipeline.** Each sync (and cluster) takes an optional `enabled: true|false`
 — set it `false` to pause just that pipeline; the others keep running. Because it's a
-config change, the `helm upgrade` pod rollout applies it (it's start-time, not live):
+config change, the `helm upgrade` pod rollout applies it (it's start-time, not live).
+**Prefer editing the sync's block by name** in your values so you pause the right one:
 
-```
-helm upgrade replicare deploy/helm/replicare-controller -f values.yaml \
-  --set-string 'config.syncs[0].enabled=false'
+```yaml
+config:
+  syncs:
+    - name: pg-pipeline
+      enabled: false      # pauses THIS pipeline only
+    - name: redis-pipeline
+      # ...               # keeps running
 ```
 
+`--set` works too but addresses syncs by **array index**, not name — `config.syncs[0]`
+is the *first* sync in your list, which may not be the one you intend
+(`--set-string 'config.syncs[1].enabled=false'` for the second, etc.). After the
+rollout, confirm which sync paused in the pod logs (`sync disabled (paused); skipping
+sync=<name>` vs `sync streaming sync=<name>`) or via `replicare status` (`[PAUSED]`).
 The paused sync's source capture stays installed, so re-enabling it drains the queued
 backlog with no data loss (a long pause grows the source-side delta tables). Full
 semantics: [configuration.md → Pausing a sync](../../../docs/configuration.md#pausing-a-sync-enabled).

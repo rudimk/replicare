@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -94,6 +95,64 @@ syncs:
 	if n := count(t, ctx, src,
 		"information_schema.tables WHERE table_schema = 'replicare' AND table_name LIKE '%rc_off%'"); n != 0 {
 		t.Errorf("paused sync installed capture: %d replicare tables match rc_off", n)
+	}
+}
+
+// TestDaemonPausedRedisSyncDoesNotRun proves the enabled:false pause gate works for a
+// REDIS sync too (not just Postgres): with the sole redis sync paused, the daemon must
+// not copy any keys to the target. Gated on REPLICARE_REDIS=1.
+func TestDaemonPausedRedisSyncDoesNotRun(t *testing.T) {
+	if !redisDaemon(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	src := rDial(t, envd("RC_REDIS_SRC_HOST", "127.0.0.1"), envd("RC_REDIS_SRC_PORT", "6390"))
+	tgt := rDial(t, envd("RC_REDIS_DST_HOST", "127.0.0.1"), envd("RC_REDIS_DST_PORT", "6391"))
+	if err := src.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("flush src: %v", err)
+	}
+	if err := tgt.FlushDB(ctx).Err(); err != nil {
+		t.Fatalf("flush tgt: %v", err)
+	}
+	clearPGState(t, ctx)
+	for i := 0; i < 30; i++ {
+		if err := src.Set(ctx, fmt.Sprintf("rc:%d", i), fmt.Sprintf("v%d", i), 0).Err(); err != nil {
+			t.Fatalf("seed src: %v", err)
+		}
+	}
+
+	cfg, err := config.Load(writeConfig(t, redisDaemonConfigYAML(`
+syncs:
+  - name: s1
+    source: rsrc
+    targets: [rdst]
+    include: ["rc:*"]
+    enabled: false
+    tuning: { drain_interval: 100ms }
+`)))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+
+	// Give the daemon time to (not) do anything, then assert the target is untouched.
+	time.Sleep(3 * time.Second)
+	if n := rDBSize(t, ctx, tgt); n != 0 {
+		t.Errorf("paused redis sync copied to target: dbsize=%d, want 0", n)
+	}
+	stop()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon did not shut down")
 	}
 }
 
