@@ -136,4 +136,5 @@ const (
 	EventCaptureInstalled  = "capture.installed"
 	EventCaptureRemoved    = "capture.removed"
 	EventCutover           = "table.cutover_to_streaming"
+	EventCopyRetry         = "copy.transient_retry"
 )

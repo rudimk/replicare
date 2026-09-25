@@ -266,3 +266,228 @@ func TestLoadCyclicDeferredIdempotentPrepopulated(t *testing.T) {
 		t.Errorf("%d stale rows survived deferred upsert", stale)
 	}
 }
+
+// TestNonCyclicParents verifies the parent map used by the live-source retry: only
+// in-component, non-cyclic, non-self FK edges count.
+func TestNonCyclicParents(t *testing.T) {
+	members := []engine.Table{
+		{Ref: ref("public.hub")},
+		{Ref: ref("public.survey"), ForeignKeys: []engine.ForeignKey{
+			fkN("survey_hub", "public.survey", "public.hub", []string{"hub_id"}, false),
+		}},
+		{Ref: ref("public.tree"), ForeignKeys: []engine.ForeignKey{
+			fkN("tree_self", "public.tree", "public.tree", []string{"parent_id"}, false), // self-ref, excluded
+		}},
+		{Ref: ref("public.item"), ForeignKeys: []engine.ForeignKey{
+			fkN("item_hub", "public.item", "public.hub", []string{"hub_id"}, false),
+			fkN("item_ext", "public.item", "public.outside", []string{"ext_id"}, false), // out of component
+		}},
+	}
+	cyclicEdge := map[string]bool{} // no cyclic edges in this fixture
+	got := nonCyclicParents(members, cyclicEdge)
+	if p := got[ref("public.survey")]; len(p) != 1 || p[0] != ref("public.hub") {
+		t.Errorf("survey parents = %v, want [public.hub]", p)
+	}
+	if p := got[ref("public.item")]; len(p) != 1 || p[0] != ref("public.hub") {
+		t.Errorf("item parents = %v, want [public.hub] (outside-component edge excluded)", p)
+	}
+	if p := got[ref("public.tree")]; len(p) != 0 {
+		t.Errorf("tree parents = %v, want [] (self-ref excluded)", p)
+	}
+	// A cyclic edge imposes no load dependency (it is NULLed in pass 1), so it drops out.
+	cyclicEdge[fkKey(fkN("survey_hub", "public.survey", "public.hub", []string{"hub_id"}, false))] = true
+	got = nonCyclicParents(members, cyclicEdge)
+	if p := got[ref("public.survey")]; len(p) != 0 {
+		t.Errorf("survey parents with cyclic edge = %v, want [] ", p)
+	}
+}
+
+// TestCyclicCopyRecoversFromParentSkew reproduces the production crash: on a LIVE
+// source a parent row (a fresh "user") is copied into the parent's snapshot AFTER a
+// child ("user_signup_survey") already captured a row referencing it, so at child-copy
+// time the target parent is MISSING that row and the child's non-nullable FK is
+// violated (SQLSTATE 23503). Modeled deterministically as a target parent that lags
+// the source by one row. Before the fix this aborted the whole cyclic copy and
+// crash-looped the daemon; copyChildWithParentRetry must re-copy the parent and
+// converge. THIS is the case the load-harness fixtures never exercised — they load a
+// static source with no concurrent writes, so the skew window never opens.
+func TestCyclicCopyRecoversFromParentSkew(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, name text)"
+	surveyDDL := "CREATE TABLE rc_it.survey (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), name text)"
+	setupSourceTables(t, ctx, src, hubDDL, surveyDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, surveyDDL)
+
+	// Source is complete and self-consistent: hubs 1..3, a survey per hub.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, 'h'||g FROM generate_series(1,3) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.survey SELECT g, g, 's'||g FROM generate_series(1,3) g")
+	// Target parent LAGS the source by one row (the skew): hub 3 not yet copied, so the
+	// survey referencing it cannot load until the parent is re-copied.
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.hub VALUES (1,'h1'),(2,'h2')")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.hub", "rc_it.survey"}})
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	surveyRef := ref("rc_it.survey")
+	hubRef := ref("rc_it.hub")
+
+	err = copyChildWithParentRetry(ctx, src, sink, surveyRef,
+		transportColumns(byRef[surveyRef]), []engine.TableRef{hubRef}, byRef, map[engine.TableRef][]string{})
+	if err != nil {
+		t.Fatalf("copyChildWithParentRetry did not recover from parent skew: %v", err)
+	}
+	// The child fully loaded, and the re-copied parent picked up the lagging row.
+	sel := "SELECT id::text, hub_id::text, name FROM rc_it.survey ORDER BY id"
+	if !eqLines(dumpText(t, ctx, src.conn, sel), dumpText(t, ctx, sink.conn, sel)) {
+		t.Error("survey did not converge to source after parent-skew recovery")
+	}
+	if orphans := tgtCount(t, ctx, sink,
+		"SELECT count(*) FROM rc_it.survey s WHERE NOT EXISTS (SELECT 1 FROM rc_it.hub h WHERE h.id=s.hub_id)"); orphans != 0 {
+		t.Errorf("%d survey rows reference a missing hub after recovery", orphans)
+	}
+}
+
+// TestCyclicCopyChunkedLargeTable is the regression for the production crash-loop's real
+// cause: the cyclic copy used to move each table in ONE whole-table COPY, which dies with
+// "unexpected EOF" on a multi-million-row table (public.user_answer). The copy is now
+// chunked into bounded keyset ranges, each its own committed COPY. This forces MANY
+// chunks on a small fixture (copyChunkRows lowered) and asserts the component still copies
+// faithfully — proving the chunked path is correct end to end, including pass-2 fill.
+func TestCyclicCopyChunkedLargeTable(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	// Force many small chunks so the whole-table path can't sneak by.
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	// Cyclic component: hub with a nullable self-ref (routes through null-then-fill) and a
+	// child with a NOT NULL FK to hub. Both bigger than one chunk.
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	// 300 rows each -> ~12 chunks per table at copyChunkRows=25. hub buddy_id closes a
+	// self-cycle (chain), filled in pass 2.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%300), 'c'||g FROM generate_series(1,300) g")
+
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+		t.Fatalf("chunked cyclic copy: %v", err)
+	}
+	for _, tc := range []struct{ tbl, sel string }{
+		{"hub", "SELECT id::text, coalesce(buddy_id::text,'<n>'), name FROM rc_it.hub ORDER BY id"},
+		{"child", "SELECT id::text, hub_id::text, note FROM rc_it.child ORDER BY id"},
+	} {
+		if !eqLines(dumpText(t, ctx, src.conn, tc.sel), dumpText(t, ctx, sink.conn, tc.sel)) {
+			t.Errorf("table %s did not copy faithfully via the chunked path", tc.tbl)
+		}
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.child"); n != 300 {
+		t.Errorf("child has %d rows, want 300 (chunk coverage gap?)", n)
+	}
+	if orphans := tgtCount(t, ctx, sink,
+		"SELECT count(*) FROM rc_it.hub h WHERE h.buddy_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM rc_it.hub m WHERE m.id=h.buddy_id)"); orphans != 0 {
+		t.Errorf("%d hub rows have a dangling buddy_id after chunked fill", orphans)
+	}
+}
+
+// TestCyclicCopyChunkedPopulatedParentWithChildren is the regression for the clinic crash:
+// re-copying a hub PARENT over a populated target while a child already references it. The
+// earlier chunked path issued DELETE FROM parent per range, which stalls/EOFs against the
+// child FK on a live re-run. The copy is now a pure per-chunk staged UPSERT (no DELETE), so
+// re-copying a referenced parent converges without touching the child rows.
+func TestCyclicCopyChunkedPopulatedParentWithChildren(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,120) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%120), 'c'||g FROM generate_series(1,120) g")
+	// Populated target from a prior partial run: hub rows AND child rows that REFERENCE
+	// them (stale values). A DELETE-range on hub here would fight child.hub_id's FK.
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.hub SELECT g, NULL, 'stale' FROM generate_series(1,120) g")
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%120), 'stale' FROM generate_series(1,120) g")
+
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+		t.Fatalf("chunked cyclic copy over a populated referenced parent: %v", err)
+	}
+	for _, tc := range []struct{ tbl, sel, staleCol string }{
+		{"hub", "SELECT id::text, coalesce(buddy_id::text,'<n>'), name FROM rc_it.hub ORDER BY id", "name"},
+		{"child", "SELECT id::text, hub_id::text, note FROM rc_it.child ORDER BY id", "note"},
+	} {
+		if !eqLines(dumpText(t, ctx, src.conn, tc.sel), dumpText(t, ctx, sink.conn, tc.sel)) {
+			t.Errorf("table %s did not converge to source over a populated target", tc.tbl)
+		}
+		if stale := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it."+tc.tbl+" WHERE "+tc.staleCol+"='stale'"); stale != 0 {
+			t.Errorf("table %s: %d stale rows survived the upsert", tc.tbl, stale)
+		}
+	}
+}
+
+// TestCyclicCopyParentSkewGivesUpTransient verifies the retry does not spin forever
+// when the parent genuinely cannot supply the row (a true source orphan): it exhausts
+// the bound and returns a TRANSIENT-classified error, so the syncer's coarse retry /
+// a restart decides what to do — the daemon is never wedged in a tight loop.
+func TestCyclicCopyParentSkewGivesUpTransient(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, name text)"
+	// Source survey references a hub id (99) that does NOT exist in source hub — a real
+	// orphan the source FK never enforced, so no amount of re-copying the parent helps.
+	surveyDDL := "CREATE TABLE rc_it.survey (id int PRIMARY KEY, hub_id int NOT NULL, name text)"
+	setupSourceTables(t, ctx, src, hubDDL, surveyDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, "CREATE TABLE rc_it.survey (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), name text)")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub VALUES (1,'h1')")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.survey VALUES (1, 99, 's1')")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.hub", "rc_it.survey"}})
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	surveyRef := ref("rc_it.survey")
+	err = copyChildWithParentRetry(ctx, src, sink, surveyRef,
+		transportColumns(byRef[surveyRef]), []engine.TableRef{ref("rc_it.hub")}, byRef, map[engine.TableRef][]string{})
+	if err == nil {
+		t.Fatal("expected a transient error for an unsatisfiable FK, got nil")
+	}
+	if !engine.IsTransientConstraint(err) {
+		t.Errorf("error is not classified transient: %v", err)
+	}
+}
