@@ -101,6 +101,21 @@ func pollUntil(t *testing.T, timeout time.Duration, cond func() bool) bool {
 	return false
 }
 
+// The initial-copy and streaming-convergence polls in these daemon integration tests
+// are ORACLES driven by the daemon's continuous drain loop, so their durations are
+// generous CEILINGS, not expected times — convergence normally happens in well under a
+// second. Under the serial (-p 1) integration suite on a CPU-shared CI runner a
+// late-running test can occasionally need far longer than a local run, which surfaced
+// as flaky timeouts (e.g. TestDaemonFanOutTwoTargets "did not converge on both
+// targets" at the old 40s ceiling). Set the ceilings high so load-induced slowness is
+// tolerated; a genuine non-convergence still fails, just later. Mirrors the mesh-test
+// hardening in cluster_test.go (#66).
+const (
+	copyTimeout      = 60 * time.Second  // initial-copy completion polls
+	convergeTimeout  = 90 * time.Second  // streaming-convergence polls
+	daemonTestBudget = 300 * time.Second // per-test context budget
+)
+
 // TestDaemonRunConvergesAndStopsCleanly exercises the whole process path: load a
 // config, run the daemon, and — with the source mutated while it streams —
 // converge the target, then a cancellation stops it cleanly (graceful shutdown).
@@ -108,7 +123,7 @@ func TestDaemonRunConvergesAndStopsCleanly(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
 	defer cancel()
 
 	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
@@ -156,7 +171,7 @@ syncs:
 	go func() { done <- d.Run(runCtx) }()
 
 	// Initial copy converges.
-	if !pollUntil(t, 30*time.Second, func() bool { return count(t, ctx, tgt, "rc_it.orders") == 30 }) {
+	if !pollUntil(t, copyTimeout, func() bool { return count(t, ctx, tgt, "rc_it.orders") == 30 }) {
 		t.Fatalf("initial copy did not converge: target has %d rows", count(t, ctx, tgt, "rc_it.orders"))
 	}
 
@@ -164,7 +179,7 @@ syncs:
 	mustExec(t, ctx, src, "INSERT INTO rc_it.orders VALUES (31, 'v31')")
 	mustExec(t, ctx, src, "UPDATE rc_it.orders SET note = 'v1-updated' WHERE id = 1")
 	mustExec(t, ctx, src, "DELETE FROM rc_it.orders WHERE id = 2")
-	converged := pollUntil(t, 30*time.Second, func() bool {
+	converged := pollUntil(t, convergeTimeout, func() bool {
 		return count(t, ctx, tgt, "rc_it.orders") == 30 &&
 			count(t, ctx, tgt, "rc_it.orders WHERE id = 31") == 1 &&
 			count(t, ctx, tgt, "rc_it.orders WHERE id = 2") == 0
@@ -194,7 +209,7 @@ func TestDaemonFanOutTwoTargets(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
 	defer cancel()
 
 	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
@@ -269,7 +284,7 @@ syncs:
 	go func() { done <- d.Run(runCtx) }()
 
 	// Both targets converge from cold copy — independently.
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, copyTimeout, func() bool {
 		return count(t, ctx, tgt1, "rc_it.orders") == 30 && count(t, ctx, tgt2, "rc_it.orders") == 30
 	}) {
 		t.Fatalf("fan-out initial copy did not converge: dst1=%d dst2=%d",
@@ -293,14 +308,14 @@ syncs:
 		}
 		return n
 	}
-	if !pollUntil(t, 10*time.Second, func() bool { return progRows() == 2 }) {
+	if !pollUntil(t, copyTimeout, func() bool { return progRows() == 2 }) {
 		t.Errorf("copy_progress rows for orders = %d, want 2 (one per target)", progRows())
 	}
 
 	// A live mutation streams to BOTH targets.
 	mustExec(t, ctx, src, "INSERT INTO rc_it.orders VALUES (31, 'v31')")
 	mustExec(t, ctx, src, "DELETE FROM rc_it.orders WHERE id = 2")
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, convergeTimeout, func() bool {
 		return count(t, ctx, tgt1, "rc_it.orders") == 30 && count(t, ctx, tgt2, "rc_it.orders") == 30 &&
 			count(t, ctx, tgt1, "rc_it.orders WHERE id = 31") == 1 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 31") == 1 &&
 			count(t, ctx, tgt1, "rc_it.orders WHERE id = 2") == 0 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 2") == 0
@@ -325,7 +340,7 @@ func TestDaemonTwoConcurrentSyncs(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
 	defer cancel()
 
 	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
@@ -371,7 +386,7 @@ syncs:
 	done := make(chan error, 1)
 	go func() { done <- d.Run(runCtx) }()
 
-	if !pollUntil(t, 40*time.Second, func() bool {
+	if !pollUntil(t, convergeTimeout, func() bool {
 		return count(t, ctx, tgt, "rc_a.t") == 15 && count(t, ctx, tgt, "rc_b.t") == 25
 	}) {
 		t.Fatalf("two syncs did not both converge: rc_a=%d rc_b=%d", count(t, ctx, tgt, "rc_a.t"), count(t, ctx, tgt, "rc_b.t"))
@@ -387,7 +402,7 @@ func TestDaemonResumesAfterRestart(t *testing.T) {
 	if !integration(t) {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
 	defer cancel()
 
 	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
@@ -427,7 +442,7 @@ syncs:
 	ctx1, stop1 := context.WithCancel(ctx)
 	done1 := make(chan error, 1)
 	go func() { done1 <- d1.Run(ctx1) }()
-	if !pollUntil(t, 30*time.Second, func() bool { return count(t, ctx, tgt, "rc_it.orders") == 20 }) {
+	if !pollUntil(t, copyTimeout, func() bool { return count(t, ctx, tgt, "rc_it.orders") == 20 }) {
 		t.Fatalf("daemon 1 did not converge initial copy")
 	}
 	stop1()
@@ -446,7 +461,7 @@ syncs:
 	ctx2, stop2 := context.WithCancel(ctx)
 	done2 := make(chan error, 1)
 	go func() { done2 <- d2.Run(ctx2) }()
-	converged := pollUntil(t, 30*time.Second, func() bool {
+	converged := pollUntil(t, convergeTimeout, func() bool {
 		return count(t, ctx, tgt, "rc_it.orders") == 29 && // 20 + 10 - 1 delete
 			count(t, ctx, tgt, "rc_it.orders WHERE id = 3") == 0 &&
 			count(t, ctx, tgt, "rc_it.orders WHERE id = 30") == 1
