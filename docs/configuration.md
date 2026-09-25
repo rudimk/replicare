@@ -195,8 +195,14 @@ can teardown so capture is uninstalled) over an open-ended pause.
 
 **It takes effect at daemon start**, so pausing or resuming is a **config change +
 restart**, not a live toggle. On Kubernetes/Helm, change the value and `helm upgrade` —
-the resulting pod rollout applies it. (Clusters have the same `enabled` flag; setting it
-`false` pauses all of that cluster's mesh edges.)
+the resulting pod rollout applies it. Set `enabled` on the sync **by name** in your
+config; if you use Helm `--set`, note it addresses syncs by **array index**
+(`config.syncs[0]` = the first sync), so with several pipelines it's easy to pause the
+wrong one — see [kubernetes.md](kubernetes.md#single-active-rollouts--state).
+**Verify which sync actually paused** in the daemon logs — `sync disabled (paused);
+skipping sync=<name>` for a paused sync, `sync streaming sync=<name>` for a running one —
+or with `replicare status` (the `[PAUSED]` banner). (Clusters have the same `enabled`
+flag; setting it `false` pauses all of that cluster's mesh edges.)
 
 **Pausing every pipeline is fine — the daemon stays up.** With all syncs (and clusters)
 paused the daemon does **not** exit; it idles, keeps serving `/metrics`, `/status`, and
