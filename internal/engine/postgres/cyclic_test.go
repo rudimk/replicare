@@ -408,6 +408,50 @@ func TestCyclicCopyChunkedLargeTable(t *testing.T) {
 	}
 }
 
+// TestCyclicCopyChunkedPopulatedParentWithChildren is the regression for the clinic crash:
+// re-copying a hub PARENT over a populated target while a child already references it. The
+// earlier chunked path issued DELETE FROM parent per range, which stalls/EOFs against the
+// child FK on a live re-run. The copy is now a pure per-chunk staged UPSERT (no DELETE), so
+// re-copying a referenced parent converges without touching the child rows.
+func TestCyclicCopyChunkedPopulatedParentWithChildren(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,120) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%120), 'c'||g FROM generate_series(1,120) g")
+	// Populated target from a prior partial run: hub rows AND child rows that REFERENCE
+	// them (stale values). A DELETE-range on hub here would fight child.hub_id's FK.
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.hub SELECT g, NULL, 'stale' FROM generate_series(1,120) g")
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%120), 'stale' FROM generate_series(1,120) g")
+
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+		t.Fatalf("chunked cyclic copy over a populated referenced parent: %v", err)
+	}
+	for _, tc := range []struct{ tbl, sel, staleCol string }{
+		{"hub", "SELECT id::text, coalesce(buddy_id::text,'<n>'), name FROM rc_it.hub ORDER BY id", "name"},
+		{"child", "SELECT id::text, hub_id::text, note FROM rc_it.child ORDER BY id", "note"},
+	} {
+		if !eqLines(dumpText(t, ctx, src.conn, tc.sel), dumpText(t, ctx, sink.conn, tc.sel)) {
+			t.Errorf("table %s did not converge to source over a populated target", tc.tbl)
+		}
+		if stale := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it."+tc.tbl+" WHERE "+tc.staleCol+"='stale'"); stale != 0 {
+			t.Errorf("table %s: %d stale rows survived the upsert", tc.tbl, stale)
+		}
+	}
+}
+
 // TestCyclicCopyParentSkewGivesUpTransient verifies the retry does not spin forever
 // when the parent genuinely cannot supply the row (a true source orphan): it exhausts
 // the bound and returns a TRANSIENT-classified error, so the syncer's coarse retry /
