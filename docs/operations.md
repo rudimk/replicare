@@ -249,7 +249,13 @@ replicare verify config.yml            # source<->target convergence spot-check 
 - **`verify`** is a [read-only convergence check](cli.md#verify-config---json---sync-name---watch-dur):
   it counts and content-fingerprints every replicated unit on both ends and reports `ok` /
   `drift-count` / `drift-checksum` per table, exiting non-zero on drift — the same count+checksum
-  convergence logic the load-test harnesses use, folded into the shipped binary.
+  convergence logic the load-test harnesses use, folded into the shipped binary. The fingerprint is
+  by **value content**, including for Redis: it hashes each key's type + canonical *logical* value
+  (not just which keys exist), so a changed value on an existing key is caught, not only missing/extra
+  keys. (Redis TTL is excluded — replicated relative, so exact remaining differs by design; stream
+  consumer-groups/PEL aren't deep-verified yet.) A **paused** sync (`enabled: false`) is tagged
+  `[PAUSED]` in the output, since convergence of a static source and target says nothing about whether
+  the pipeline is running.
 
 Both take `--json` (for scripting) and `--watch <dur>` (repeat on an interval). Both are read-only and
 install nothing, so they're safe to run against a source you may not own.

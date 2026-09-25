@@ -618,8 +618,15 @@ the databases, not just the state store:
   non-zero on drift (the load-harness convergence check, folded into the binary).
 Both go through the optional **`engine.Verifier`** capability (`CountRows` + an order-independent,
 column-name-matched `Fingerprint`), implemented per engine (Postgres/MySQL: content hash; Redis:
-key-set membership hash — value-faithful `DUMP`/`RESTORE` makes per-value drift unexpected, deep
-content-verify is a follow-up). This is an **additive** operator surface: it installs nothing and is
+**content hash by default** — key + type + canonical *logical* value XOR-folded, so it catches
+same-key **value drift** as well as missing/extra keys). The Redis value hash uses **type-aware
+logical reads** (`GET`/`LRANGE`/`SMEMBERS`/`ZRANGE WITHSCORES`/`HGETALL`/`XRANGE`), **never raw
+`DUMP` bytes** — DUMP is not byte-identical across versions for equal values, so hashing it would
+false-positive across a version gap; the logical form matches because transport is value-faithful.
+**TTL is excluded** (replicated relative → skew-safe, exact remaining differs by design); stream
+consumer groups/PEL are not deep-verified in v1 (entries are). Reads are pipelined per SCAN batch
+(~2 round-trips per `scanCount` keys), so the deep check stays O(batch); `CountRows` remains a cheap
+count-only SCAN for the status path. This is an **additive** operator surface: it installs nothing and is
 safe against a source we may not own. The runtime image is **Chainguard `wolfi-base`** (not `scratch`)
 so `kubectl exec … -- replicare status <config>` works — and a shell exists for interactive debugging —
 without changing the single-static-binary distribution.
@@ -766,7 +773,7 @@ invasive.
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
-| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis key-set membership). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
+| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
 | Compatibility | **Must read from very old source Postgres**; keep source SQL conservative; target may use modern features. |
