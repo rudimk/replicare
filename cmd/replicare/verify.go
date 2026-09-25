@@ -77,6 +77,7 @@ func runVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "verify: no syncs in config")
 		return 2
 	}
+	paused := pausedSyncs(cfg)
 	enricher := live.New(cfg, connectTimeout)
 
 	runOnce := func(ctx context.Context) ([]live.VerifyReport, bool) {
@@ -84,6 +85,7 @@ func runVerify(args []string, stdout, stderr io.Writer) int {
 		converged := true
 		for _, name := range names {
 			rep := enricher.Verify(ctx, name)
+			rep.Paused = paused[name]
 			if rep.Error != "" || !rep.Converged {
 				converged = false
 			}
@@ -155,7 +157,14 @@ func renderVerify(w io.Writer, reports []live.VerifyReport) {
 		if rep.Error != "" || !rep.Converged {
 			summary = "DIVERGED"
 		}
-		fmt.Fprintf(w, "sync: %s  [%s]\n", rep.Sync, summary)
+		if rep.Paused {
+			// A paused sync isn't replicating, so convergence here is just a static
+			// source-vs-target snapshot, not evidence the pipeline is live. Flag it so
+			// "[CONVERGED]" on a paused sync isn't read as "still working".
+			fmt.Fprintf(w, "sync: %s  [PAUSED] [%s]\n", rep.Sync, summary)
+		} else {
+			fmt.Fprintf(w, "sync: %s  [%s]\n", rep.Sync, summary)
+		}
 		if rep.Error != "" {
 			fmt.Fprintf(w, "  error: %s\n\n", rep.Error)
 			continue
