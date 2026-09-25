@@ -137,6 +137,17 @@ form above needs no shell.
 - **Config changes roll the pod** automatically: a checksum annotation over the
   rendered ConfigMap means `helm upgrade` after editing `config` restarts the daemon
   cleanly.
+- **Pause one pipeline without touching the others** by setting `enabled: false` on a
+  sync (a per-pipeline switch; omit it or `true` to run). Because it's a config change,
+  the upgrade's pod rollout applies it — it is start-time, not a live command:
+  ```
+  helm upgrade replicare deploy/helm/replicare-controller -f values.yaml \
+    --set-string 'config.syncs[0].enabled=false'
+  ```
+  The paused sync's source capture stays installed, so re-enabling it (`enabled: true`
+  + the rollout) drains the queued backlog with no data loss. Full semantics and the
+  long-pause caveat (source-side delta growth): [configuration.md → Pausing a
+  sync](configuration.md#pausing-a-sync-enabled).
 - **The state store lives outside the chart, always.** Every sync needs a Postgres
   state store (v1's only backend) — including Redis→Redis and MySQL→MySQL. Point
   `state_store` at your own managed Postgres (e.g. RDS). The chart never bundles it;
