@@ -108,11 +108,13 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	order := nonCyclicTopoOrder(members, cyclicEdge)
 
 	// Pass 1: copy every table, omitting its cyclic FK columns (NULL on the target).
+	// Idempotent staging+upsert (not a direct COPY) so a re-copy into a target that
+	// already holds these rows — restart/reschedule after a lost state store, or a
+	// re-run against a populated target — converges instead of colliding on the PK.
 	for _, ref := range order {
 		table := byRef[ref]
 		cols := subtractCols(transportColumns(table), cyclicCols[ref])
-		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
-		if err := pipeCopy(ctx, src, ref, cols, s, sql); err != nil {
+		if err := stagedUpsertCopy(ctx, src, s, ref, cols, "replicare_stg", true); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
 		}
 	}
@@ -251,14 +253,18 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 	if _, err := sink.conn.Exec(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		return fmt.Errorf("postgres: cyclic deferred: defer constraints: %w", err)
 	}
-	for _, ref := range tables {
+	for i, ref := range tables {
 		table, err := src.tableMeta(ctx, ref)
 		if err != nil {
 			return err
 		}
 		cols := transportColumns(table)
-		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
-		if err := pipeCopy(ctx, src, ref, cols, sink, sql); err != nil {
+		// Idempotent staging+upsert within this deferred transaction (FK checks fire at
+		// COMMIT), so a re-copy into a populated target converges instead of colliding
+		// on the PK. Each table needs a distinct staging name because ON COMMIT DROP
+		// only fires at the single outer COMMIT.
+		stg := fmt.Sprintf("replicare_stg_%d", i)
+		if err := stagedUpsertCopy(ctx, src, sink, ref, cols, stg, false); err != nil {
 			return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
 		}
 	}
@@ -296,9 +302,10 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 	all := transportColumns(table)
 	pass1 := subtractCols(all, fkCols)
 
-	// Pass 1: load every row with the FK column(s) omitted (NULL on target).
-	sql1 := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(pass1))
-	if err := pipeCopy(ctx, src, ref, pass1, sink, sql1); err != nil {
+	// Pass 1: load every row with the FK column(s) omitted (NULL on target), via an
+	// idempotent staging+upsert so a re-copy into a populated target converges instead
+	// of colliding on the PK.
+	if err := stagedUpsertCopy(ctx, src, sink, ref, pass1, "replicare_stg", true); err != nil {
 		return fmt.Errorf("postgres: null-fill pass 1 (%s): %w", ref, err)
 	}
 
@@ -366,6 +373,76 @@ func (s *Source) fillFKColumns(ctx context.Context, sink *Sink, ref engine.Table
 		return fmt.Errorf("postgres: null-fill pass 2: commit: %w", err)
 	}
 	committed = true
+	return nil
+}
+
+// stagedUpsertCopy streams an explicit column subset of the source table into a TEMP
+// staging table on the target, then INSERT ... ON CONFLICT DO UPDATE into the target —
+// the idempotent, populated-target-safe equivalent of a direct COPY (it is the cyclic-
+// copy analogue of Sink.mergeLoad, which the chunked copy path uses). A re-copy into a
+// target that already holds these rows therefore converges instead of erroring on the
+// primary key, matching the empty-vs-non-empty handling of the acyclic path.
+//
+// ownTxn=true wraps the load in its own BEGIN/COMMIT (used by the NULL-fill paths,
+// where each table loads independently under live FK checks). ownTxn=false runs inside
+// the caller's already-open transaction (the deferred strategy's single SET CONSTRAINTS
+// DEFERRED txn); there the caller must pass a distinct stg name per table, since the
+// staging tables' ON COMMIT DROP only fires at the one outer COMMIT.
+func stagedUpsertCopy(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, stg string, ownTxn bool) error {
+	table, err := sink.tableMeta(ctx, ref)
+	if err != nil {
+		return err
+	}
+	pk := captureColsFor(table)
+	if len(pk) == 0 {
+		return fmt.Errorf("postgres: staged upsert: target %s has no usable key for ON CONFLICT", ref)
+	}
+	typeByName := make(map[string]string, len(table.Columns))
+	colSet := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		colSet[c] = true
+	}
+	identity := false
+	for _, c := range table.Columns {
+		typeByName[c.Name] = c.DataType
+		if c.Identity && colSet[c.Name] {
+			identity = true
+		}
+	}
+	stgCols := make([]string, len(cols))
+	for i, c := range cols {
+		stgCols[i] = quoteIdentifier(c) + " " + typeByName[c]
+	}
+
+	if ownTxn {
+		if _, err := sink.conn.Exec(ctx, "BEGIN"); err != nil {
+			return fmt.Errorf("postgres: staged upsert: begin: %w", err)
+		}
+	}
+	committed := !ownTxn
+	defer func() {
+		if ownTxn && !committed {
+			_, _ = sink.conn.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	if _, err := sink.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
+		quoteIdentifier(stg), strings.Join(stgCols, ", "))); err != nil {
+		return fmt.Errorf("postgres: staged upsert: create staging: %w", err)
+	}
+	copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
+	if err := pipeCopy(ctx, src, ref, cols, sink, copySQL); err != nil {
+		return fmt.Errorf("postgres: staged upsert: copy %s: %w", ref, err)
+	}
+	if _, err := sink.conn.Exec(ctx, mergeInsertSQL(ref, stg, cols, pk, colSetOf(pk), identity)); err != nil {
+		return fmt.Errorf("postgres: staged upsert: upsert %s: %w", ref, err)
+	}
+	if ownTxn {
+		if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("postgres: staged upsert: commit: %w", err)
+		}
+		committed = true
+	}
 	return nil
 }
 
