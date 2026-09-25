@@ -56,6 +56,13 @@ syncs:
   - name: app-to-warehouse
     source: app
     targets: [warehouse]
+    # Per-pipeline pause switch. Omit (or set true) to run; set false to PAUSE this
+    # sync: the daemon skips it at startup and does not take its ownership lock. Source
+    # capture stays installed, so deltas keep queuing and unpausing (enabled: true +
+    # restart) drains the backlog with no data loss — but a long pause grows the source
+    # delta tables (retention enforcement is paused too). Takes effect at daemon start,
+    # so pause/resume is a config change + restart, not a live toggle.
+    enabled: true
     # Selection globs (relational engines interpret these as schema.table).
     include:
       - "public.*"

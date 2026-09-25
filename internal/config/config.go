@@ -86,7 +86,21 @@ type Sync struct {
 	Include []string `yaml:"include"` // selection globs, e.g. "public.*"
 	Exclude []string `yaml:"exclude"` // selection globs, e.g. "*_audit"
 	Tuning  Tuning   `yaml:"tuning"`
+	// Enabled gates whether this sync runs. Unset (nil) or true → the daemon brings
+	// it up and streams it (the default; a config without this field behaves exactly
+	// as before). false → the sync is PAUSED: the daemon skips it at startup and does
+	// not acquire its ownership lock. Existing source capture triggers are left in
+	// place, so deltas keep queuing and a later unpause (enabled: true + restart)
+	// drains the backlog with no data loss — at the cost of source-side delta growth
+	// while paused (retention enforcement runs in the streaming loop, which is
+	// skipped). Takes effect at daemon start, so pausing/resuming is a config change +
+	// restart, not a live toggle.
+	Enabled *bool `yaml:"enabled"`
 }
+
+// IsEnabled reports whether the sync should run. The zero/unset value is enabled, so
+// the flag is a pure opt-out and every pre-existing config keeps running unchanged.
+func (s *Sync) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
 
 // Cluster is one active-active (multi-master) replication group: a set of peer
 // nodes, each simultaneously a source and a target, kept converged with writes
@@ -105,7 +119,14 @@ type Cluster struct {
 	Include  []string `yaml:"include"` // selection globs, engine-interpreted (as syncs)
 	Exclude  []string `yaml:"exclude"`
 	Tuning   Tuning   `yaml:"tuning"`
+	// Enabled gates whether this cluster runs, with the same opt-out semantics as
+	// Sync.Enabled: unset/true runs every mesh edge; false pauses the whole cluster
+	// (the daemon skips all of its edges at startup). Per-edge pausing is not exposed.
+	Enabled *bool `yaml:"enabled"`
 }
+
+// IsEnabled reports whether the cluster should run. Unset value is enabled.
+func (c *Cluster) IsEnabled() bool { return c.Enabled == nil || *c.Enabled }
 
 // Tuning holds engine-neutral tuning knobs.
 type Tuning struct {

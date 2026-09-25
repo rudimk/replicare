@@ -163,10 +163,40 @@ syncs:
   - name: app-to-warehouse    # unique; also the ownership-lock key
     source: app               # a key in `sources`
     targets: [warehouse]      # keys in `targets` (one or more; fan-out)
+    enabled: true             # optional; false PAUSES just this sync (see below)
     include: ["public.*"]     # selection globs (schema.table)
     exclude: ["*_audit"]      # excluded from the include set
     tuning: { ... }           # optional (see below)
 ```
+
+### Pausing a sync (`enabled`)
+
+`enabled` is a per-pipeline pause switch. It is a pure opt-out: **omit it (or set
+`true`) and the sync runs** — a config written before this field existed is
+unchanged. Set `enabled: false` to **pause** that one sync; other syncs (and
+clusters) in the same config keep running.
+
+| `enabled` | Behavior |
+|---|---|
+| unset / `true` | The daemon brings the sync up and streams it (default). |
+| `false` | The daemon **skips it at startup** and does not take its ownership lock. No copy, no streaming, no capture install for a never-started sync. |
+
+**Pause is data-loss-free, by design.** If a sync was already running when you pause
+it, its **source capture triggers are left in place**, so change deltas keep queuing
+on the source while it's paused. Setting `enabled: true` again (and restarting) resumes
+it and **drains the accumulated backlog** — the target catches up with nothing lost.
+
+**The tradeoff:** while paused, the source-side delta tables keep growing, and the
+[retention/reseed source-protection](operations.md) does **not** run (it lives in the
+streaming loop, which is skipped). So a *long* pause on a busy source can grow the
+source's `replicare` schema unbounded. Pause for maintenance/cutover windows, not
+indefinitely; if you need to stop for a long time, prefer removing the sync (which you
+can teardown so capture is uninstalled) over an open-ended pause.
+
+**It takes effect at daemon start**, so pausing or resuming is a **config change +
+restart**, not a live toggle. On Kubernetes/Helm, change the value and `helm upgrade` —
+the resulting pod rollout applies it. (Clusters have the same `enabled` flag; setting it
+`false` pauses all of that cluster's mesh edges.)
 
 ### Selection
 
@@ -256,10 +286,15 @@ clusters:
   - name: global-app
     engine: postgres
     members: [us, eu, ap]     # any N >= 2; node_id defaults to us/eu/ap
+    enabled: true             # optional; false pauses ALL of this cluster's mesh edges
     include: ["public.*"]
     exclude: ["*_audit"]
     # No conflict block: HLC last-write-wins is automatic. Nothing to declare.
 ```
+
+A cluster has the same `enabled` opt-out as a sync ([above](#pausing-a-sync-enabled)):
+unset/`true` runs every mesh edge; `false` pauses the whole cluster (all edges skipped
+at startup). Per-edge pausing is not exposed.
 
 ### Cycle safety for one-way syncs
 

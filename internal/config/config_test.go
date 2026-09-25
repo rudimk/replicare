@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,6 +166,44 @@ syncs:
 	}
 	if tn.Retention.MaxAge.Duration() != 24*time.Hour {
 		t.Errorf("default max_age = %v, want 24h", tn.Retention.MaxAge)
+	}
+}
+
+func TestSyncEnabledFlag(t *testing.T) {
+	registerFake(t)
+	base := `
+sources:
+  s:
+    engine: fake
+    fake: {dsn: "x"}
+targets:
+  t:
+    engine: fake
+    fake: {dsn: "y"}
+syncs:
+  - name: only
+    source: s
+    targets: [t]%s
+`
+	cases := []struct {
+		name  string
+		line  string
+		wantE bool
+	}{
+		{"unset defaults to enabled", "", true},
+		{"explicit true", "\n    enabled: true", true},
+		{"explicit false is paused", "\n    enabled: false", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeTemp(t, fmt.Sprintf(base, tc.line)))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if got := c.Syncs[0].IsEnabled(); got != tc.wantE {
+				t.Errorf("IsEnabled() = %v, want %v", got, tc.wantE)
+			}
+		})
 	}
 }
 
