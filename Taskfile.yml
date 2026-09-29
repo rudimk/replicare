@@ -273,3 +273,31 @@ tasks:
     desc: 'DEL every lg:*/lgskip:* key on a Redis (DSN=...). CLUSTER=1 for cluster mode.'
     cmds:
       - go run ./test/loadgen-redis reset --dsn "{{.DSN}}" --yes {{if eq .CLUSTER "1"}}--cluster{{end}}
+
+  # loadgen-mysql: manual MySQL load + verification harness (test/loadgen-mysql). Not
+  # shipped. Pass connection info via vars, e.g.
+  # `task loadgen-mysql:seed DSN="root:replicare@tcp(127.0.0.1:3340)/"`.
+  loadgen-mysql:ddl:
+    desc: 'Apply the loadgen schema to a MySQL DB (DSN=..., e.g. the target). CYCLIC=1 adds FK cycles.'
+    cmds:
+      - go run ./test/loadgen-mysql ddl --dsn "{{.DSN}}" {{if eq .CYCLIC "1"}}--cyclic{{end}}
+
+  loadgen-mysql:seed:
+    desc: 'Seed-or-churn a source MySQL (DSN=...). SCALE scales row counts, SEED for reproducibility.'
+    cmds:
+      - go run ./test/loadgen-mysql run --dsn "{{.DSN}}" --scale {{.SCALE | default "1.0"}} --seed {{.SEED | default "1"}}
+
+  loadgen-mysql:churn:
+    desc: 'Apply a churn burst to a seeded source MySQL (DSN=..., OPS=number of statements).'
+    cmds:
+      - go run ./test/loadgen-mysql run --dsn "{{.DSN}}" --ops {{.OPS | default "200"}} --seed {{.SEED | default "1"}}
+
+  loadgen-mysql:verify:
+    desc: 'Verify a target MySQL converged with the source (SRC=..., TGT=..., WAIT=e.g. 60s).'
+    cmds:
+      - go run ./test/loadgen-mysql verify --source "{{.SRC}}" --target "{{.TGT}}" --wait {{.WAIT | default "0s"}}
+
+  loadgen-mysql:reset:
+    desc: 'DROP DATABASE loadgen on a MySQL DB (DSN=...).'
+    cmds:
+      - go run ./test/loadgen-mysql reset --dsn "{{.DSN}}" --yes
