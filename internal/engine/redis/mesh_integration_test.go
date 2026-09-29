@@ -86,6 +86,71 @@ func meshFingerprint(t *testing.T, ctx context.Context, m meshMember) (int64, ui
 	return n, sum
 }
 
+// cfgDB returns cfg pointed at a specific logical DB, so several isolated mesh members
+// can run against one harness Redis (each DB is a separate keyspace).
+func cfgDB(cfg engine.ConnConfig, db int) engine.ConnConfig {
+	cfg.Database = strconv.Itoa(db)
+	return cfg
+}
+
+// TestMeshThreeNodeConverges proves the mesh has no 2-node limit: THREE members (three
+// isolated DBs on the harness) form a full mesh (6 directed edges) and converge —
+// disjoint writes union on all three, a 3-way same-key conflict settles to one value
+// everywhere, and a delete on one reaches both peers. Uses per-member FlushDB (not
+// FlushAll) since the three share a server.
+func TestMeshThreeNodeConverges(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	a := newMeshMember(t, ctx, cfgDB(srcCfg(), 0), "a")
+	b := newMeshMember(t, ctx, cfgDB(srcCfg(), 1), "b")
+	c := newMeshMember(t, ctx, cfgDB(srcCfg(), 2), "c")
+	for _, m := range []meshMember{a, b, c} {
+		must(t, m.src.db.uc.FlushDB(ctx).Err())
+	}
+
+	// Disjoint keys on each node → all three converge to the 6-key union.
+	must(t, a.src.db.uc.Set(ctx, "ka1", "va", 0).Err())
+	must(t, a.src.db.uc.Set(ctx, "ka2", "va", 0).Err())
+	must(t, b.src.db.uc.Set(ctx, "kb1", "vb", 0).Err())
+	must(t, b.src.db.uc.Set(ctx, "kb2", "vb", 0).Err())
+	must(t, c.src.db.uc.Set(ctx, "kc1", "vc", 0).Err())
+	must(t, c.src.db.uc.Set(ctx, "kc2", "vc", 0).Err())
+	// A 3-way conflict on one shared key.
+	must(t, a.src.db.uc.Set(ctx, "shared", "from-a", 0).Err())
+	must(t, b.src.db.uc.Set(ctx, "shared", "from-b", 0).Err())
+	must(t, c.src.db.uc.Set(ctx, "shared", "from-c", 0).Err())
+
+	meshConverge(t, ctx, a, b, c)
+
+	na, sa := meshFingerprint(t, ctx, a)
+	nb, sb := meshFingerprint(t, ctx, b)
+	nc, sc := meshFingerprint(t, ctx, c)
+	if na != 7 || nb != 7 || nc != 7 { // 6 disjoint + 1 shared
+		t.Fatalf("key counts a=%d b=%d c=%d, want 7 each", na, nb, nc)
+	}
+	if sa != sb || sb != sc {
+		t.Fatalf("fingerprints differ across 3 nodes: a=%016x b=%016x c=%016x", sa, sb, sc)
+	}
+	// The shared key settled to ONE of the three writes on every node.
+	shared, err := a.src.db.uc.Get(ctx, "shared").Result()
+	must(t, err)
+	if shared != "from-a" && shared != "from-b" && shared != "from-c" {
+		t.Fatalf("shared converged to a fabricated value %q", shared)
+	}
+
+	// A delete on c must reach a and b.
+	must(t, c.src.db.uc.Del(ctx, "kc1").Err())
+	meshConverge(t, ctx, a, b, c)
+	for _, m := range []meshMember{a, b, c} {
+		if n, _ := m.src.db.uc.Exists(ctx, "kc1").Result(); n != 0 {
+			t.Fatalf("delete of kc1 did not reach node %s", m.id)
+		}
+	}
+}
+
 // TestMeshDisjointConverges: two members writing DISJOINT keys each end up with the
 // union, and both keyspaces are byte-for-byte convergent (identical content fingerprint).
 func TestMeshDisjointConverges(t *testing.T) {

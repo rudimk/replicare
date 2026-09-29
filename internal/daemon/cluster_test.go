@@ -226,19 +226,47 @@ func TestDaemonMeshSameKeyConflictConverges(t *testing.T) {
 	go func() { done <- d.Run(runCtx) }()
 	defer func() { stop(); <-done }()
 
-	// Give both edges a moment to install capture + reach streaming (tables empty, so
-	// there is nothing to copy).
+	// Wait for capture to be FULLY installed on both nodes — not just hlc_state.
+	// InstallOriginCapture creates hlc_state (ensureMeshState) BEFORE the per-table trigger +
+	// version register (installOne), so a write made while only hlc_state exists is silently
+	// NOT captured. The per-table register (reg_<hash>) exists only once the trigger is
+	// installed too, so this guarantees the sentinel writes below are captured.
+	captureReady := func(c *pgx.Conn) bool {
+		var hlc, reg int
+		_ = c.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&hlc)
+		_ = c.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename LIKE 'reg\\_%'").Scan(&reg)
+		return hlc == 1 && reg >= 1
+	}
 	if !pollUntil(t, meshBringupTimeout, func() bool {
-		var n int
-		_ = b.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&n)
-		var m int
-		_ = a.QueryRow(ctx, "SELECT count(*) FROM pg_tables WHERE schemaname='replicare' AND tablename='hlc_state'").Scan(&m)
-		return n == 1 && m == 1
+		return captureReady(a) && captureReady(b)
 	}) {
-		t.Fatalf("cluster did not bring up mesh state on both nodes")
+		t.Fatalf("cluster did not install mesh capture (hlc_state + register) on both nodes")
 	}
 
-	// Concurrent conflict on the SAME key: different values written on each node.
+	// Establish STEADY-STATE STREAMING on both edges before creating the conflict. This is
+	// the real fix for the flake: the conflict must be resolved by the version-guarded
+	// STREAMING apply (MM4), but the initial COPY is a blind, non-version-guarded merge
+	// (MM3). If the two conflicting writes land during the bringup/copy window, the edges'
+	// blind copies can cross-write and leave row and register inconsistent, and streaming
+	// does not always reconcile that within the budget — the intermittent "a=from-b,
+	// b=from-a" divergence. A disjoint sentinel written on each node and observed on the
+	// other proves both edges are past copy and streaming, so the conflict below flows
+	// purely through version-guarded apply.
+	mustExec(t, ctx, a, "INSERT INTO rc_it.orders (id, note) VALUES (900, 'sentinel-a')")
+	mustExec(t, ctx, b, "INSERT INTO rc_it.orders (id, note) VALUES (901, 'sentinel-b')")
+	present := func(c *pgx.Conn, id int) bool {
+		var n int
+		_ = c.QueryRow(ctx, "SELECT count(*) FROM rc_it.orders WHERE id=$1", id).Scan(&n)
+		return n == 1
+	}
+	if !pollUntil(t, meshConvergeTimeout, func() bool {
+		return present(b, 900) && present(a, 901) // each sentinel reached the other node
+	}) {
+		t.Fatalf("mesh did not reach steady-state streaming (sentinels did not round-trip)")
+	}
+
+	// Concurrent conflict on the SAME key, now that both edges stream: each write is
+	// captured and the version-guarded apply resolves the conflict by HLC-LWW.
 	mustExec(t, ctx, a, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-a')")
 	mustExec(t, ctx, b, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-b')")
 
