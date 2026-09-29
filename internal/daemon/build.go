@@ -74,7 +74,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return fail(fmt.Errorf("connect target: %w", err))
 	}
 	if clusterMode {
-		if err := enableClusterReads(source); err != nil {
+		if err := enableClusterReads(source, srcNodeID); err != nil {
 			return fail(err)
 		}
 		if err := enableOriginMarking(sink, tgtNodeID); err != nil {
@@ -97,7 +97,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 			return fail(fmt.Errorf("connect copy target: %w", err))
 		}
 		if clusterMode {
-			if err := enableClusterReads(ws); err != nil {
+			if err := enableClusterReads(ws, srcNodeID); err != nil {
 				return fail(err)
 			}
 			if err := enableOriginMarking(wk, tgtNodeID); err != nil {
@@ -181,12 +181,12 @@ func enableOriginMarking(sink engine.Sink, nodeID string) error {
 // enableClusterReads switches a cluster member's source to version-aware re-read so
 // each re-read row carries its mesh version for HLC-LWW. The engine must implement
 // ClusterReadSource to be a cluster member.
-func enableClusterReads(src engine.Source) error {
+func enableClusterReads(src engine.Source, nodeID string) error {
 	c, ok := src.(engine.ClusterReadSource)
 	if !ok {
 		return fmt.Errorf("engine source does not support cluster reads (cannot be a cluster member)")
 	}
-	c.EnableClusterReads()
+	c.EnableClusterReads(nodeID)
 	return nil
 }
 

@@ -260,19 +260,45 @@ The optional notification accelerator additionally needs `+psubscribe`/`+subscri
 (and `CONFIG SET` where the server isn't preconfigured) on the source. In cluster
 mode, grant the same user on **every master** and add `+cluster|shards`/`|slots`.
 
+## Active-active mesh (multi-master)
+
+Redis participates in an active-active `clusters:` mesh (writes accepted on **any**
+node, converging on all under HLC last-write-wins) — same config surface as the
+relational engines, detailed in [multi-master.md](multi-master.md). Because Redis is
+capture-less, the `(hlc, node_id)` version register lives in a **parallel metadata
+keyspace**: for each data key `K`, a sibling hash `\x00rc:m:{…}K` (co-located in `K`'s
+cluster slot) holding its version + a logical-value fingerprint. The **value key is
+never wrapped** — faithful transport holds. Everything below is **cluster-mode-only**;
+a one-way Redis sync is byte-for-byte unchanged:
+
+- **Convergence & loop suppression fall out of one comparison.** A re-read RESTOREs/DELs
+  on a peer only when the incoming `(hlc, node)` strictly beats the local register — so
+  replicare's own applied writes lose (no echo storm) and concurrent same-key writes
+  resolve to one value everywhere. Value+register are written in **one atomic Lua**.
+- **Deletes are version-guarded tombstones**, not the stateless sweep (which is disabled
+  in a mesh — a key absent at one node but present here is a peer's legitimate write, never
+  an orphan). Tombstones GC by age (`rc_tombstone_retention`, default 24h).
+- **Extra ACLs:** a mesh member is both source and target and additionally needs the
+  metadata keyspace RW + logical readers + `+eval`/`+evalsha` — see the mesh sections in
+  `deploy/acl-*-redis.txt`.
+- **Cost:** the metadata keyspace ~doubles key count; correctness runs on the local gate
+  (`REPLICARE_REDIS=1`), not the Postgres-only CI.
+
 ## Limitations / non-goals (v1)
 
 - **Redis fan-out** (one source → multiple Redis targets) — a single source `SCAN`
   cursor can't serve two targets at different rates without per-target scan state.
-  Single source → single target only.
+  Single source → single target only (a mesh is different: each edge is its own job).
 - **Sentinel-hardened failover** — wired but not hardened/tested.
 - **Dragonfly** — blocked (RDB compat unverified).
 - **Command-reconstruction / big-key incremental transport** — refused (§1.7).
 - **Cross-key/group atomicity** — apply is per-key idempotent, **not** wrapped in
   `MULTI`/`EXEC` (a deliberate departure from the relational per-component
-  atomicity in §8.1).
-- **Cross-engine, multi-master, point-in-time consistency** — never / deferred, as
-  for the other engines. Redis converges eventually and self-heals.
+  atomicity in §8.1). This holds in mesh mode too: each key's value+register pair is
+  atomic, but there is no cross-key transaction.
+- **Cross-engine and point-in-time consistency** — never / deferred, as for the other
+  engines. Redis converges eventually and self-heals. **Multi-master IS supported**
+  (see above); pre-mesh divergent data / pre-mesh deletes resolve by LWW at join.
 
 ## Validating
 

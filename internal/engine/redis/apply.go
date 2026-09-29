@@ -23,26 +23,31 @@ import (
 // the RM6 delete sweep stages nothing then "deletes absent" the missing keys (all
 // absent → all DELeted).
 type redisApplyTx struct {
-	db     *conn
-	staged map[string]bool
+	db      *conn
+	staged  map[string]bool
+	cluster bool // MM6 mesh: version-guarded apply, no blind deletes
 }
 
 var _ engine.ApplyTx = (*redisApplyTx)(nil)
 
 // BeginApply starts a drain-pass apply. cyclic is always false for Redis (a unit is
 // a single-member acyclic component) and componentTables is a single ref; both are
-// accepted for interface parity and ignored.
+// accepted for interface parity and ignored. In cluster mode the tx applies with the
+// version-guarded mesh path.
 func (s *Sink) BeginApply(_ context.Context, _ bool, _ []engine.TableRef) (engine.ApplyTx, error) {
 	if s.db == nil {
 		return nil, errNotConnected
 	}
-	return &redisApplyTx{db: s.db, staged: map[string]bool{}}, nil
+	return &redisApplyTx{db: s.db, staged: map[string]bool{}, cluster: s.cluster}, nil
 }
 
-// StageUpsert reads the faithful re-read framing and applies it with RESTORE ...
-// REPLACE, recording each key as staged. For Redis this IS the upsert — there is no
-// separate staging table.
+// StageUpsert reads the faithful re-read framing and applies it. One-way: RESTORE ...
+// REPLACE per record. Cluster: version-guarded RESTORE/DEL per mesh record (loop
+// suppression + HLC-LWW). Either way each key is recorded as staged.
 func (tx *redisApplyTx) StageUpsert(ctx context.Context, _ engine.TableRef, _ []string, reread io.Reader) error {
+	if tx.cluster {
+		return stageUpsertCluster(ctx, tx.db, reread, tx.staged)
+	}
 	_, err := restoreStream(ctx, tx.db, reread, tx.staged)
 	return err
 }
@@ -51,7 +56,14 @@ func (tx *redisApplyTx) StageUpsert(ctx context.Context, _ engine.TableRef, _ []
 // source). The RM6 sweep calls it with the missing keys and no prior StageUpsert, so
 // every key is deleted; the RM5 upsert pass calls it with the just-staged keys, so
 // none are. DEL routes each key to its owning shard.
+//
+// In cluster (mesh) mode it is a NO-OP: a blind DEL would destroy a peer's legitimate
+// write, so mesh deletes flow only as version-guarded tombstone records through
+// StageUpsert (docs/multi-master.md §5.4).
 func (tx *redisApplyTx) DeleteAbsent(ctx context.Context, _ engine.TableRef, keys []engine.KeyValues) error {
+	if tx.cluster {
+		return nil
+	}
 	pipe := tx.db.pipeline()
 	n := 0
 	for _, kv := range keys {

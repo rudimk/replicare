@@ -24,10 +24,21 @@ type Sink struct {
 	// targetRecon is the delete-sweep's bounded per-shard target-SCAN state, held
 	// across ScanTargetKeys calls (RM6, §0.4).
 	targetRecon *reconState
+
+	// cluster and nodeID enable active-active mesh mode (MM6). In cluster mode apply
+	// is version-guarded (loop suppression + HLC last-write-wins, mesh_sink.go) and
+	// the stateless delete sweep is disabled (deletes flow as version-guarded
+	// tombstones instead). nodeID is this target member's origin identity. A one-way
+	// sink leaves both zero and behaves exactly as before.
+	cluster bool
+	nodeID  string
 }
 
-var _ engine.Sink = (*Sink)(nil)
-var _ engine.KeyLister = (*Sink)(nil)
+var (
+	_ engine.Sink              = (*Sink)(nil)
+	_ engine.KeyLister         = (*Sink)(nil)
+	_ engine.OriginMarkingSink = (*Sink)(nil)
+)
 
 // Connect opens the (standalone, RM0) Redis client and pings it.
 func (s *Sink) Connect(ctx context.Context) error {
@@ -91,6 +102,14 @@ func (s *Sink) Introspect(ctx context.Context, sel engine.Selection) (*engine.Sc
 func (s *Sink) ScanTargetKeys(ctx context.Context, _ engine.TableRef, _ uint64, count int) ([]engine.KeyValues, uint64, error) {
 	if s.db == nil {
 		return nil, 0, errNotConnected
+	}
+	// Cluster (mesh) mode disables the stateless "missing at source => DEL" sweep:
+	// in a full mesh a key absent at one source but present here is a legitimate peer
+	// write, not an orphan, so deleting it would destroy a peer's data. Mesh deletes
+	// flow only as version-guarded tombstones through the apply path (mesh_sink.go).
+	// Returning an empty completed pass makes the neutral DeleteSweepStep a no-op.
+	if s.cluster {
+		return nil, 0, nil
 	}
 	if count <= 0 {
 		count = defaultScanCount

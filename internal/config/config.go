@@ -246,18 +246,13 @@ func applyTuningDefaults(t *Tuning) {
 // topologyMesh is the only cluster topology supported in v1 (full mesh, any N >= 2).
 const topologyMesh = "mesh"
 
-// clusterEngineUnsupported names engines that cannot participate in an
-// active-active (multi-master) cluster. Active-active is a trigger-CDC capability:
-// a node must capture with an origin marker and read the whole cluster to converge
-// under last-write-wins. Postgres and MySQL ship it. Redis does not — its
-// capture-less SCAN reconciliation has no per-key origin/version, so bidirectional
-// wiring would loop writes back with no way to suppress them. Kept here, hardcoded,
-// mirroring the state-store engine check (config.go elsewhere hardcodes engine
-// names too). A blocklist (not an allowlist) so the test engines and any future
-// trigger-CDC engine keep working without a config change.
-var clusterEngineUnsupported = map[string]string{
-	"redis": "Redis has no per-key origin/version (capture-less SCAN reconciliation), so bidirectional replication cannot suppress its own writes",
-}
+// clusterEngineUnsupported names engines that cannot participate in an active-active
+// (multi-master) cluster, with the reason. Postgres and MySQL ship active-active via
+// trigger CDC; Redis ships it via a metadata-keyspace version register (MM6), so it is
+// no longer listed. The map (and the guard in validateCluster) is retained so a future
+// engine that cannot do active-active can be rejected at config-load time with a clear
+// message. A blocklist, not an allowlist, so the test engines keep working.
+var clusterEngineUnsupported = map[string]string{}
 
 // resolveEngines parses and validates each endpoint's engine-specific block.
 func (c *Config) resolveEngines() error {

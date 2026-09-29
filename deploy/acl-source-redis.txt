@@ -46,3 +46,23 @@ ACL SETUSER replicare on >CHANGE-ME ~* resetchannels \
 # reads topology via CLUSTER SHARDS/SLOTS — so also allow:
 #
 # ACL SETUSER replicare +cluster|shards +cluster|slots +cluster|nodes
+
+# --- OPTIONAL: active-active mesh (MM6, a `clusters:` member) ---
+# In active-active mode EVERY node is BOTH a source and a target, so the user needs
+# the union of this file and acl-target-redis.txt PLUS the mesh version-register
+# machinery. The source (re-read/stamp) side additionally needs:
+#   - the metadata keyspace (a parallel `\x00rc:m:*` keyspace holding per-key
+#     {hlc, node, deleted, vhash}): +hgetall +hmget +hset +del
+#   - logical value reads for the version-gap-stable change fingerprint (vhash):
+#     +get +lrange +smembers +zrange +hgetall +xrange
+# The metadata keyspace shares each data key's slot (hash-tagged), so if you scope
+# the key pattern, widen it to cover `\x00rc:m:*` too (or use `~*`).
+#
+# ACL SETUSER replicare ~* \
+#   +hgetall +hmget +hset +del \
+#   +get +lrange +smembers +zrange +xrange
+#
+# The version-guarded apply itself (RESTORE/DEL + register write in one atomic Lua)
+# runs on the TARGET side — see acl-target-redis.txt for +eval/+evalsha. Still NO
+# admin. The mesh writes the metadata keyspace on every node; the "reads nothing on
+# the source" property holds only for one-way syncs.

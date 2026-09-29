@@ -295,8 +295,20 @@ register. Combined no-superuser grants + `deploy/` presets are MM5 acceptance.
 - **BC proof:** one-way trigger bodies unchanged for non-cluster tables; one-way
   apply/copy set no variable, write no register; full MySQL one-way suite green.
 
-### MM6 — Redis mesh (metadata keyspace = version register + tombstones) — co-equal, NOT deferred
-The tallest pole, but in scope. A **parallel metadata keyspace** — per data key `K`, a
+### MM6 — Redis mesh (metadata keyspace = version register + tombstones) — SHIPPED
+**Status: SHIPPED.** Implemented in `internal/engine/redis/mesh.go` (pure: slot hashing via
+CRC16 + inverse table, version codec, LWW `beats`, HLC tick, framing extension),
+`mesh_source.go` (`ClusterReadSource`/`OriginAwareCapturer`/`TombstoneGC`: version-stamping
+re-read, dual data+metadata keyspace enumeration, age-based tombstone GC), and `mesh_sink.go`
+(`OriginMarkingSink`: the atomic version-guarded apply Lua). The stateless delete sweep is
+disabled in cluster mode (`ScanTargetKeys`/`DeleteAbsent` no-op) and the reserved metadata
+namespace is excluded from all data ops at `selection.match`. Config guard lifted; `EnableClusterReads`
+gained a `nodeID` param (PG/MySQL ignore it). Bootstrap is lazy (first pass seeds the register,
+no spurious tombstones). Pure logic unit-tested in CI; 2-node convergence/conflict/delete/peer-
+safety on the local gate (`REPLICARE_REDIS=1`). ACLs updated in `deploy/acl-*-redis.txt`. N≥3
+and daemon-level Redis-mesh acceptance land with MM10.
+
+Original plan below (for reference). A **parallel metadata keyspace** — per data key `K`, a
 sibling entry under a reserved prefix **hash-tagged into K's cluster slot** — holds the
 register `{hlc, node_id, deleted_at?}`, written **atomically with** the value via
 Lua/`MULTI`. Redesign delete reconciliation from today's stateless "missing at source ⇒

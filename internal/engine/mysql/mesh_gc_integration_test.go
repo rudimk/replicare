@@ -18,7 +18,7 @@ func TestGCTombstonesReclaimsConsumed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
 	defer cancel()
 	s := connectSource(t, ctx)
-	s.EnableClusterReads()
+	s.EnableClusterReads("n1")
 	mustExec(t, ctx, s.db, "DROP DATABASE IF EXISTS replicare")
 	t.Cleanup(func() { _, _ = s.db.Exec("DROP DATABASE IF EXISTS replicare") })
 

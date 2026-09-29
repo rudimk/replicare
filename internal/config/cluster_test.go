@@ -14,10 +14,9 @@ func registerFake2(t *testing.T) {
 	registerFake2Once.Do(func() { RegisterEngine("fake2", parseFake) })
 }
 
-// registerRedisFake registers the generic fake parser under the "redis" engine
-// name so a cluster whose engine is "redis" reaches validateCluster (which then
-// rejects it — Redis can't do active-active). This avoids importing the real
-// redis engine package into the config tests.
+// registerRedisFake registers the generic fake parser under the "redis" engine name so
+// a cluster whose engine is "redis" reaches validateCluster without importing the real
+// redis engine into the config tests.
 var registerRedisFakeOnce sync.Once
 
 func registerRedisFake(t *testing.T) {
@@ -25,10 +24,10 @@ func registerRedisFake(t *testing.T) {
 	registerRedisFakeOnce.Do(func() { RegisterEngine("redis", parseFake) })
 }
 
-// TestClusterRejectsUnsupportedEngine: an active-active cluster on an engine that
-// can't do multi-master (Redis) is rejected at config-validation time with a clear,
-// actionable message — not left to fail later at capture install.
-func TestClusterRejectsUnsupportedEngine(t *testing.T) {
+// TestClusterAcceptsRedisEngine: since MM6 shipped active-active for Redis (via a
+// metadata-keyspace version register), a Redis cluster now passes config validation —
+// the earlier config-load guard has been lifted. Regression guard against re-blocking it.
+func TestClusterAcceptsRedisEngine(t *testing.T) {
 	registerRedisFake(t)
 	yml := `
 nodes:
@@ -39,9 +38,30 @@ clusters:
     engine: redis
     members: [a, b]
 `
+	if _, err := Load(writeTemp(t, yml)); err != nil {
+		t.Fatalf("a Redis cluster should now load (MM6): %v", err)
+	}
+}
+
+// TestClusterRejectsUnsupportedEngine documents that the engine-capability guard is
+// retained for a future engine that cannot do active-active: injecting an entry into the
+// blocklist makes validateCluster reject that engine's cluster with an actionable message.
+func TestClusterRejectsUnsupportedEngine(t *testing.T) {
+	registerFake(t)
+	clusterEngineUnsupported["fake"] = "the fake test engine cannot do active-active"
+	defer delete(clusterEngineUnsupported, "fake")
+	yml := `
+nodes:
+  a: { engine: fake, fake: { dsn: "fake://a" } }
+  b: { engine: fake, fake: { dsn: "fake://b" } }
+clusters:
+  - name: c1
+    engine: fake
+    members: [a, b]
+`
 	_, err := Load(writeTemp(t, yml))
 	if err == nil {
-		t.Fatal("expected a Redis cluster to be rejected, got nil")
+		t.Fatal("expected the blocklisted engine's cluster to be rejected, got nil")
 	}
 	for _, want := range []string{"does not support active-active", "postgres and mysql", "docs/multi-master.md"} {
 		if !strings.Contains(err.Error(), want) {

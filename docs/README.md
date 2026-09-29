@@ -17,11 +17,11 @@
 
 - **[Multi-master replication](multi-master.md)** — active-active (multi-master)
   across the engines: the `nodes:`/`clusters:` config surface, loop suppression, and
-  HLC last-write-wins conflict resolution with GC'd tombstones. **Shipped for Postgres
-  and MySQL** — a full N-node mesh runs on both today. **Redis is not yet supported**
-  (a Redis `clusters:` entry is rejected at config load until the Redis mesh lands);
-  HA leader election is also still pending. The note also records why naive
-  bidirectional wiring breaks and the invariants that keep the one-way path unchanged.
+  HLC last-write-wins conflict resolution with GC'd tombstones. **Shipped for Postgres,
+  MySQL, and Redis** — a full N-node mesh runs on all three today (on Redis via a
+  parallel metadata keyspace, since it is capture-less). HA leader election is still
+  pending. The note also records why naive bidirectional wiring breaks and the
+  invariants that keep the one-way path unchanged.
 
 ### Engine pages
 
