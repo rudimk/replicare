@@ -14,6 +14,42 @@ func registerFake2(t *testing.T) {
 	registerFake2Once.Do(func() { RegisterEngine("fake2", parseFake) })
 }
 
+// registerRedisFake registers the generic fake parser under the "redis" engine
+// name so a cluster whose engine is "redis" reaches validateCluster (which then
+// rejects it — Redis can't do active-active). This avoids importing the real
+// redis engine package into the config tests.
+var registerRedisFakeOnce sync.Once
+
+func registerRedisFake(t *testing.T) {
+	t.Helper()
+	registerRedisFakeOnce.Do(func() { RegisterEngine("redis", parseFake) })
+}
+
+// TestClusterRejectsUnsupportedEngine: an active-active cluster on an engine that
+// can't do multi-master (Redis) is rejected at config-validation time with a clear,
+// actionable message — not left to fail later at capture install.
+func TestClusterRejectsUnsupportedEngine(t *testing.T) {
+	registerRedisFake(t)
+	yml := `
+nodes:
+  a: { engine: redis, redis: { dsn: "redis://a" } }
+  b: { engine: redis, redis: { dsn: "redis://b" } }
+clusters:
+  - name: redis-mesh
+    engine: redis
+    members: [a, b]
+`
+	_, err := Load(writeTemp(t, yml))
+	if err == nil {
+		t.Fatal("expected a Redis cluster to be rejected, got nil")
+	}
+	for _, want := range []string{"does not support active-active", "postgres and mysql", "docs/multi-master.md"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want containing %q", err.Error(), want)
+		}
+	}
+}
+
 const clusterYAML = `
 nodes:
   us:

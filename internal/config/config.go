@@ -246,6 +246,19 @@ func applyTuningDefaults(t *Tuning) {
 // topologyMesh is the only cluster topology supported in v1 (full mesh, any N >= 2).
 const topologyMesh = "mesh"
 
+// clusterEngineUnsupported names engines that cannot participate in an
+// active-active (multi-master) cluster. Active-active is a trigger-CDC capability:
+// a node must capture with an origin marker and read the whole cluster to converge
+// under last-write-wins. Postgres and MySQL ship it. Redis does not — its
+// capture-less SCAN reconciliation has no per-key origin/version, so bidirectional
+// wiring would loop writes back with no way to suppress them. Kept here, hardcoded,
+// mirroring the state-store engine check (config.go elsewhere hardcodes engine
+// names too). A blocklist (not an allowlist) so the test engines and any future
+// trigger-CDC engine keep working without a config change.
+var clusterEngineUnsupported = map[string]string{
+	"redis": "Redis has no per-key origin/version (capture-less SCAN reconciliation), so bidirectional replication cannot suppress its own writes",
+}
+
 // resolveEngines parses and validates each endpoint's engine-specific block.
 func (c *Config) resolveEngines() error {
 	for name, ep := range c.Sources {
@@ -465,6 +478,12 @@ func (c *Config) validateCluster(i int, cl *Cluster, seen map[string]bool) error
 
 	if cl.Engine == "" {
 		return fmt.Errorf("cluster %q: engine is required", cl.Name)
+	}
+	// Reject engines that can't do active-active here, at config time, instead of
+	// failing later at capture install with an opaque error. See docs/multi-master.md.
+	if why, bad := clusterEngineUnsupported[cl.Engine]; bad {
+		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres and mysql do — use a one-way `syncs:` entry for this engine instead (see docs/multi-master.md)",
+			cl.Name, cl.Engine, why)
 	}
 	if cl.Topology != topologyMesh {
 		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see docs/multi-master.md)",
