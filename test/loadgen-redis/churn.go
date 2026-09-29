@@ -29,48 +29,48 @@ func churnOps() []churnOp {
 	return []churnOp{
 		{"set_string", 18, 10, 100, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.Set(ctx, dataKey("str", existing(rng, s.str)), randVal(rng, 8, 64), 0)
+				p.Set(ctx, r.dataKey("str", existing(rng, s.str)), randVal(rng, 8, 64), 0)
 			})
 		}},
 		{"insert_string", 10, 10, 80, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			// Brand-new keys beyond the seeded range grow the keyspace.
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
 				i := s.str + 1 + rng.Intn(1_000_000)
-				p.Set(ctx, dataKey("str", i), randVal(rng, 8, 64), 0)
+				p.Set(ctx, r.dataKey("str", i), randVal(rng, 8, 64), 0)
 			})
 		}},
 		{"update_hash", 12, 5, 60, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.HSet(ctx, dataKey("hash", existing(rng, s.hash)), "u"+randVal(rng, 3, 3), randVal(rng, 4, 32))
+				p.HSet(ctx, r.dataKey("hash", existing(rng, s.hash)), "u"+randVal(rng, 3, 3), randVal(rng, 4, 32))
 			})
 		}},
 		{"append_list", 10, 5, 60, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.RPush(ctx, dataKey("list", existing(rng, s.list)), randVal(rng, 4, 24))
+				p.RPush(ctx, r.dataKey("list", existing(rng, s.list)), randVal(rng, 4, 24))
 			})
 		}},
 		{"add_set", 10, 5, 60, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.SAdd(ctx, dataKey("set", existing(rng, s.set)), randVal(rng, 4, 24))
+				p.SAdd(ctx, r.dataKey("set", existing(rng, s.set)), randVal(rng, 4, 24))
 			})
 		}},
 		{"add_zset", 10, 5, 60, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.ZAdd(ctx, dataKey("zset", existing(rng, s.zset)),
+				p.ZAdd(ctx, r.dataKey("zset", existing(rng, s.zset)),
 					goredis.Z{Score: float64(rng.Intn(100000)) + rng.Float64(), Member: randVal(rng, 4, 16)})
 			})
 		}},
 		{"xadd_stream", 8, 5, 40, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
 				p.XAdd(ctx, &goredis.XAddArgs{
-					Stream: dataKey("stream", existing(rng, s.stream)),
+					Stream: r.dataKey("stream", existing(rng, s.stream)),
 					Values: map[string]any{"v": randVal(rng, 6, 24)},
 				})
 			})
 		}},
 		{"set_ttl", 8, 10, 80, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				key := dataKey("str", existing(rng, s.str))
+				key := r.dataKey("str", existing(rng, s.str))
 				if rng.Float64() < 0.3 {
 					p.Persist(ctx, key)
 				} else {
@@ -86,7 +86,7 @@ func churnOps() []churnOp {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
 				typ := keyTypes[rng.Intn(len(keyTypes))]
 				if n := s.countFor(typ); n > 0 {
-					p.Del(ctx, dataKey(typ, existing(rng, n)))
+					p.Del(ctx, r.dataKey(typ, existing(rng, n)))
 				}
 			})
 		}},
@@ -94,7 +94,7 @@ func churnOps() []churnOp {
 		// and verify keeps confirming it never leaks to the target.
 		{"set_skip", 5, 10, 60, func(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (int64, error) {
 			return pipeK(ctx, r, k, func(p goredis.Pipeliner) {
-				p.Set(ctx, skipKey(existing(rng, s.skip)), randVal(rng, 8, 32), 0)
+				p.Set(ctx, r.skipKey(existing(rng, s.skip)), randVal(rng, 8, 32), 0)
 			})
 		}},
 	}
@@ -107,8 +107,10 @@ func renameChurn(ctx context.Context, r *rdb, s scale, rng *rand.Rand, k int) (i
 	var done int64
 	for j := 0; j < k; j++ {
 		i := existing(rng, s.str)
-		src := dataKey("str", i)
-		dst := fmt.Sprintf("%s{%d}:str:%d:r%d", keyPrefix, bucketOf(i), i, rng.Intn(1_000_000_000))
+		src := r.dataKey("str", i)
+		// Keep the rename target in THIS node's namespace and the SAME hash-tag bucket
+		// as the source (a cross-slot RENAME errors in cluster mode).
+		dst := fmt.Sprintf("%s%s{%d}:str:%d:r%d", keyPrefix, r.seg(), bucketOf(i), i, rng.Intn(1_000_000_000))
 		if err := r.uc.Rename(ctx, src, dst).Err(); err != nil {
 			if strings.Contains(err.Error(), "no such key") {
 				continue
