@@ -5,6 +5,11 @@
 - **[Configuration reference](configuration.md)** — every config field, with types and defaults.
 - **[CLI reference](cli.md)** — every command and flag, with examples.
 - **[Operations](operations.md)** — tuning, health signals, retention/reseed, restarts, ownership.
+- **Verifying data integrity** — standalone source↔target checks for when you can't
+  reach the pod (the no-`verify` fallback):
+  [Postgres](integrity-checks-postgres.md) ·
+  [MySQL](integrity-checks-mysql.md) ·
+  [Redis](integrity-checks-redis.md).
 - **[Kubernetes (Helm)](kubernetes.md)** — deploy the daemon with the Helm chart.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 
