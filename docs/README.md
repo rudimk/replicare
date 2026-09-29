@@ -13,13 +13,15 @@
 - **[Kubernetes (Helm)](kubernetes.md)** — deploy the daemon with the Helm chart.
 - **[Troubleshooting](troubleshooting.md)** — common problems and fixes.
 
-### Design notes (forward-looking)
+### Advanced topologies
 
-- **[Multi-master replication](multi-master.md)** — design note for active-active
-  (multi-master) across Postgres, MySQL, and Redis: what exists today (one-way,
-  source-authoritative), why naive bidirectional wiring breaks, the mechanisms and
-  config-schema changes it would take, and the invariants that keep the existing
-  one-way path unchanged. **Not implemented — a plan.**
+- **[Multi-master replication](multi-master.md)** — active-active (multi-master)
+  across the engines: the `nodes:`/`clusters:` config surface, loop suppression, and
+  HLC last-write-wins conflict resolution with GC'd tombstones. **Shipped for Postgres
+  and MySQL** — a full N-node mesh runs on both today. **Redis is not yet supported**
+  (a Redis `clusters:` entry is rejected at config load until the Redis mesh lands);
+  HA leader election is also still pending. The note also records why naive
+  bidirectional wiring breaks and the invariants that keep the one-way path unchanged.
 
 ### Engine pages
 

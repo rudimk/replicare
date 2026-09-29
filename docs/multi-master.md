@@ -422,6 +422,12 @@ Notes:
 1. **Cluster validation** — single-engine members; every member has a `node_id`;
    `topology: mesh` only (v1); no member endpoint reused in a conflicting plain sync.
    (No conflict-policy validation — there is no policy to configure.)
+   **Engine-capability guard (shipped):** `validateCluster` (`internal/config/config.go`)
+   rejects a cluster on an engine that can't do active-active — today **Redis** — at
+   config-load time with an actionable error (*"engine \"redis\" does not support
+   active-active replication … use a one-way `syncs:` entry for this engine instead"*),
+   rather than letting it fail opaquely later at capture install. This is a temporary
+   floor: it is lifted for Redis when the Redis mesh (MM6) lands.
 2. **Cycle detection for plain `syncs`** — refuse an *un-declared* cycle among one-way
    syncs (`A→B` + `B→A`, or a ring) not part of a `clusters:` block. Closes the
    silent-corruption footgun in §4, worth doing **independently**. It only *adds* a
@@ -488,7 +494,7 @@ compiles and runs exactly as before.
 | MM3 | **Postgres loop suppression** — origin-aware capture, marked apply/copy, cluster→edge wiring, idempotent mesh copy | **Shipped** |
 | MM4 | **Postgres HLC-LWW** — version register + HLC, version-guarded apply, tombstones, GC | **Shipped** |
 | MM5 | **MySQL mesh** — mirror of MM3+MM4 for MySQL (`@replicare_apply` guard, inline HLC, version-guarded apply, GC) | **Shipped** |
-| MM6 | Redis mesh | Not started |
+| MM6 | Redis mesh | Not started — a Redis `clusters:` entry is **rejected at config load** until this lands (§6.3) |
 | MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
 
 **What works today (Postgres AND MySQL):** define members under `nodes:`, group them in a
