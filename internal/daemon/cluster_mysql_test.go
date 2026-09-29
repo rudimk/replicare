@@ -73,14 +73,29 @@ func TestDaemonMySQLMeshSameKeyConflictConverges(t *testing.T) {
 	go func() { done <- d.Run(runCtx) }()
 	defer func() { stop(); <-done }()
 
-	// Wait for both members to bring up mesh state (tables are empty, nothing to copy).
+	// Wait for capture to be FULLY installed (hlc_state AND the per-table register) on
+	// both members before the conflicting writes: hlc_state is created before the trigger
+	// + register, so an INSERT made while only hlc_state exists is not captured and never
+	// converges. The register (reg_<hash>) exists only once the trigger is installed too.
 	if !pollUntil(t, 40*time.Second, func() bool {
-		return myHasHLCState(ctx, a) && myHasHLCState(ctx, b)
+		return myCaptureReady(ctx, a) && myCaptureReady(ctx, b)
 	}) {
-		t.Fatalf("cluster did not bring up mesh state on both nodes")
+		t.Fatalf("cluster did not install mesh capture (hlc_state + register) on both nodes")
 	}
 
-	// Concurrent same-key conflict: different values on each node.
+	// Establish steady-state streaming before the conflict: the version-guarded resolution
+	// is a STREAMING (MM5) property, while the initial COPY is a blind merge, so a conflict
+	// written during the bringup/copy window can diverge. A disjoint sentinel per node,
+	// observed on the other, proves both edges are past copy and streaming.
+	myExec(t, ctx, a, "INSERT INTO rc_it.orders (id, note) VALUES (900, 'sentinel-a')")
+	myExec(t, ctx, b, "INSERT INTO rc_it.orders (id, note) VALUES (901, 'sentinel-b')")
+	if !pollUntil(t, 60*time.Second, func() bool {
+		return myNote(ctx, b, 900) != "" && myNote(ctx, a, 901) != ""
+	}) {
+		t.Fatalf("mesh did not reach steady-state streaming (sentinels did not round-trip)")
+	}
+
+	// Concurrent same-key conflict: different values on each node, now that both edges stream.
 	myExec(t, ctx, a, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-a')")
 	myExec(t, ctx, b, "INSERT INTO rc_it.orders (id, note) VALUES (1, 'from-b')")
 
@@ -139,6 +154,21 @@ func myHasHLCState(ctx context.Context, db *sql.DB) bool {
 		return false
 	}
 	return n == 1
+}
+
+// myCaptureReady reports whether mesh capture is fully installed: hlc_state AND the
+// per-table version register (reg_<hash>), the latter created only once the capture
+// trigger is installed, so a subsequent local write is guaranteed to be captured.
+func myCaptureReady(ctx context.Context, db *sql.DB) bool {
+	if !myHasHLCState(ctx, db) {
+		return false
+	}
+	var n int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='replicare' AND TABLE_NAME LIKE 'reg\\_%'").Scan(&n); err != nil {
+		return false
+	}
+	return n >= 1
 }
 
 func myNote(ctx context.Context, db *sql.DB, id int) string {
