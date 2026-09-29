@@ -43,6 +43,64 @@ func TestFramingRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFramingMeshRoundTrip: mesh records carry the version register (phys, log,
+// node, vhash) and tombstone flag through the framing intact, and a mesh reader still
+// reads plain one-way records correctly (mixed stream). The one-way record's bytes are
+// unchanged by the mesh extension (flagMesh unset → no extra fields).
+func TestFramingMeshRoundTrip(t *testing.T) {
+	recs := []record{
+		// plain one-way record in the same stream — must still round-trip.
+		{key: []byte("plain"), ttl: 10, flags: 0, dump: []byte("v")},
+		// alive mesh record with a version + value.
+		{key: []byte("k1"), ttl: 5000, flags: flagMesh, dump: []byte{0x01, 0x02},
+			ver: version{phys: 1893456000000, log: 7, node: "eu", vhash: 0xDEADBEEFCAFEBABE}},
+		// mesh tombstone: deleted, empty dump, node with odd bytes.
+		{key: []byte{0x00, 0xff}, ttl: 0, flags: flagMesh | flagDeleted, dump: []byte{},
+			ver: version{phys: 42, log: 0, node: "us-west-1", deleted: true}},
+		// mesh + absttl together.
+		{key: []byte("k2"), ttl: 1893456000000, flags: flagMesh | flagAbsTTL, dump: []byte{0xAB},
+			ver: version{phys: 99, log: 3, node: "", vhash: 1}},
+	}
+
+	var buf bytes.Buffer
+	sw := newSyncWriter(&buf)
+	for _, r := range recs {
+		if err := sw.write(r); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	for i, want := range recs {
+		got, err := readRecord(&buf)
+		if err != nil {
+			t.Fatalf("readRecord[%d]: %v", i, err)
+		}
+		if !bytes.Equal(got.key, want.key) || got.ttl != want.ttl || got.flags != want.flags || !bytes.Equal(got.dump, want.dump) {
+			t.Errorf("record[%d] base mismatch:\n got  %+v\n want %+v", i, got, want)
+		}
+		if want.flags&flagMesh != 0 && got.ver != want.ver {
+			t.Errorf("record[%d] version mismatch:\n got  %+v\n want %+v", i, got.ver, want.ver)
+		}
+	}
+	if _, err := readRecord(&buf); err != io.EOF {
+		t.Errorf("trailing read = %v, want io.EOF", err)
+	}
+}
+
+// TestFramingMeshBytesUnchangedForOneWay: a record with flagMesh unset serializes to
+// the exact same bytes as before the mesh extension existed — the wire-level backward
+// compatibility invariant.
+func TestFramingMeshBytesUnchangedForOneWay(t *testing.T) {
+	var buf bytes.Buffer
+	sw := newSyncWriter(&buf)
+	if err := sw.write(record{key: []byte("k"), ttl: 5, flags: flagAbsTTL, dump: []byte{0x01, 0x02}}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// keyLen(4)=1 + key(1) + ttl(8) + flags(1) + dumpLen(4)=2 + dump(2) = 20 bytes; NO mesh fields.
+	if got := buf.Len(); got != 4+1+8+1+4+2 {
+		t.Errorf("one-way record length = %d, want %d (mesh extension must not touch it)", got, 4+1+8+1+4+2)
+	}
+}
+
 // TestFramingTruncated: a stream cut mid-record is a loud ErrUnexpectedEOF, never a
 // silent short record.
 func TestFramingTruncated(t *testing.T) {
