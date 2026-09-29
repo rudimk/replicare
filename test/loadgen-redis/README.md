@@ -65,17 +65,25 @@ go run ./test/loadgen-redis verify --source "$SOURCE" --target "$TARGET" --wait 
 
 ### Commands & flags
 
-- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cluster]` — **seed if empty**
-  or **churn** `N` ops. `--seed` makes a run reproducible (op selection + generated
-  values).
-- `verify --source <src> --target <tgt> [--wait D] [--interval D] [--cluster]` —
+- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cluster] [--node-id K]` —
+  **seed if empty** or **churn** `N` ops. `--seed` makes a run reproducible (op
+  selection + generated values). `--node-id K` (default 0) selects this writer's
+  **key namespace** for active-active testing — see
+  [Active-active](#active-active-multi-master-load-testing); 0 is the default
+  single-writer (active-passive) behaviour, unchanged.
+- `verify --source <src> --target <tgt> [--wait D] [--interval D] [--cluster] [--node-id K]` —
   compares every `lg:*` key **version-independently**: a type-aware canonical
   content hash (`GET` / sorted `HGETALL` / `LRANGE` / sorted `SMEMBERS` /
   `ZRANGE WITHSCORES` / `XRANGE` + group last-ids) plus **TTL presence**. Also
-  asserts no `lgskip:*` leaked to the target. `--wait` polls until converged or the
-  timeout. Exits non-zero on drift.
+  asserts no `lgskip:*` leaked to the target. It is a pure **equality** check over
+  the whole `lg:*` keyspace, so it doubles as the active-active convergence oracle
+  (run it between any two mesh nodes — both hold the union). `--node-id K` is the
+  **source's** node index; it scopes the skip-leak check to that source's own
+  `lgskip:*` namespace (0 = the classic single-writer check). `--wait` polls until
+  converged or the timeout. Exits non-zero on drift.
 - `reset --dsn <db> --yes [--cluster]` — `DEL` every `lg:*`, `lgskip:*`, and the
-  `lgmeta:*` marker key. Scoped by prefix — it never runs `FLUSHDB`.
+  `lgmeta:*` marker key (all nodes' namespaces). Scoped by prefix — it never runs
+  `FLUSHDB`.
 
 > **Why not compare `DUMP` bytes directly?** The harness runs an **old source
 > (6.2)** against a **modern target (7.4)**, whose RDB serializations differ even
@@ -83,6 +91,77 @@ go run ./test/loadgen-redis verify --source "$SOURCE" --target "$TARGET" --wait 
 > encoding). So `verify` compares a canonical *rendering* of each value, not its
 > serialized bytes. **TTL** is compared as presence only (has-TTL vs no-TTL) — the
 > exact remaining seconds legitimately differ by the replication delay.
+
+## Active-active (multi-master) load testing
+
+The same harness drives a Redis `clusters:` mesh. The model is **disjoint key
+namespaces**: each writer node gets `--node-id K`, which moves every key it writes
+into a private segment right after the prefix — `lg:n<K>:{<bucket>}:<type>:<n>` (and
+`lgskip:n<K>:…` for the source-only cohort). Node segments never overlap, so nodes
+never collide on a key and the mesh converges to the clean **union** of all segments.
+`--node-id 0` is the default and is byte-for-byte the single-writer layout above
+(`lg:{<bucket>}:…`, no segment), so active-passive is unaffected.
+
+The segment sits **after** the `lg:`/`lgskip:` prefix, so a replicare
+`include: ["lg:*"]` selection still matches every node's data keys and still excludes
+every node's `lgskip:*` keys — no per-node config change is needed.
+
+What `--node-id K` changes on `run`:
+- **Seed** writes only this node's namespace (`lg:n<K>:…`), and the seeded/empty check
+  scans that namespace alone, so a node re-seeds only when *its own* slice is empty —
+  peers' replicated-in keys don't count as "already seeded".
+- **Churn** sets/updates/deletes only keys in this node's namespace, and a `RENAME`
+  keeps the new key in the same segment (and hash-tag bucket), so a node only ever
+  mutates what it wrote — no accidental cross-node conflict (resolving concurrent
+  *same-key* writes is the separate, planned **conflict-storm** mode; see below).
+
+On `verify`, `--node-id K` is the **source's** node index: it scopes the skip-leak
+check to that source's own `lgskip:n<K>:*` namespace, so a mesh target — which is
+itself a source with its own `lgskip:*` — never false-positives on the peer's
+excluded cohort. The content comparison itself is a pure **equality** check over the
+whole `lg:*` keyspace, so it doubles as the convergence oracle: run it between any two
+mesh nodes and both must hold the identical union.
+
+Always pass the same `--node-id` for a given node's DB. Keep `--scale` modest per node
+(Redis holds everything in RAM, and the mesh target holds every node's union).
+
+### Three-node mesh example
+
+Assume a running replicare `clusters:` mesh over three Redis nodes `A`, `B`, `C`
+(config per [multi-master.md](../../docs/multi-master.md)), with `$A`/`$B`/`$C` their
+connection specs. There is **no `ddl` step** — Redis has no schema.
+
+```sh
+# 1. Seed each node into its own disjoint namespace.
+go run ./test/loadgen-redis run --dsn "$A" --node-id 0 --scale 0.1
+go run ./test/loadgen-redis run --dsn "$B" --node-id 1 --scale 0.1
+go run ./test/loadgen-redis run --dsn "$C" --node-id 2 --scale 0.1
+
+# 2. Churn every node concurrently (each in its own namespace).
+go run ./test/loadgen-redis run --dsn "$A" --node-id 0 --ops 800 --seed 1 &
+go run ./test/loadgen-redis run --dsn "$B" --node-id 1 --ops 800 --seed 2 &
+go run ./test/loadgen-redis run --dsn "$C" --node-id 2 --ops 800 --seed 3 &
+wait
+
+# 3. Convergence oracle: every pair must be identical (all hold the union).
+#    --node-id names the SOURCE so the skip-leak check scopes to its lgskip namespace.
+go run ./test/loadgen-redis verify --source "$A" --target "$B" --node-id 0 --wait 300s
+go run ./test/loadgen-redis verify --source "$A" --target "$C" --node-id 0 --wait 300s
+```
+
+Convergence is transitive, so `A==B` and `A==C` imply all three agree. A pass ending
+`CONVERGED: … no skip leak` on every pair — with the daemon logs clean of `HALTED` /
+`stream pass error` — is a passing active-active load test.
+
+> **Not yet: conflict-storm mode.** The disjoint model above never has two nodes write
+> the same key, so it tests convergence of the *union*. A follow-up `--overlap` mode
+> will deliberately overlap node namespaces to exercise HLC last-write-wins under
+> concurrent same-key writes; there `verify` still asserts convergence (all nodes
+> equal), but not *which* value wins (the LWW winner is nondeterministic).
+
+> **Reset the state store per node when re-seeding** (see [Gotchas](#gotchas)) — in a
+> mesh this applies per node: clear each node's state-store entries alongside
+> `loadgen-redis reset` (which already removes every node's `lg:`/`lgskip:` namespace).
 
 ## Running a full load test end-to-end
 

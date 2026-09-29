@@ -90,20 +90,25 @@ the source only and must be excluded by replicare's selection (include: ["lg:*"]
 type rdb struct {
 	uc      goredis.UniversalClient
 	cluster *goredis.ClusterClient
+	// node is this writer's index for active-active (0 = single-writer / active-passive).
+	// It namespaces the keys this client generates so several nodes write disjoint
+	// slices of the keyspace and the mesh converges to their union. See schema.go.
+	node int
 }
 
 // openRDB builds a client from a connection spec. With cluster=false, spec is a
 // redis:// URL (empty -> redis://localhost:6379/0). With cluster=true, spec is a
 // comma-separated host:port seed list (an optional redis:// prefix is stripped),
-// and password applies AUTH.
-func openRDB(ctx context.Context, spec string, cluster bool, password string) (*rdb, error) {
+// and password applies AUTH. node is the writer index for active-active (0 for the
+// default single-writer behaviour).
+func openRDB(ctx context.Context, spec string, cluster bool, password string, node int) (*rdb, error) {
 	if cluster {
 		addrs := parseAddrs(spec)
 		if len(addrs) == 0 {
 			return nil, fmt.Errorf("cluster mode needs a seed list (--dsn host:port,host:port)")
 		}
 		cc := goredis.NewClusterClient(&goredis.ClusterOptions{Addrs: addrs, Password: password})
-		r := &rdb{uc: cc, cluster: cc}
+		r := &rdb{uc: cc, cluster: cc, node: node}
 		if err := r.uc.Ping(ctx).Err(); err != nil {
 			_ = cc.Close()
 			return nil, fmt.Errorf("connect cluster %v: %w", addrs, err)
@@ -125,7 +130,7 @@ func openRDB(ctx context.Context, spec string, cluster bool, password string) (*
 		_ = cl.Close()
 		return nil, fmt.Errorf("connect %q: %w", spec, err)
 	}
-	return &rdb{uc: cl}, nil
+	return &rdb{uc: cl, node: node}, nil
 }
 
 // parseAddrs turns "redis://a:1,b:2" or "a:1, b:2" into ["a:1","b:2"].
@@ -175,16 +180,23 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	scaleF := fs.Float64("scale", 1.0, "multiply default key counts (e.g. 0.1 for a quick run, 2 for ~2x)")
 	ops := fs.Int("ops", 200, "number of churn statements when the keyspace is already seeded")
 	seedVal := fs.Int64("seed", 1, "RNG seed for reproducible op selection and generated values")
+	nodeID := fs.Int("node-id", 0, "ACTIVE-ACTIVE: this writer node's index (0 = the default single-writer / active-passive behaviour). Each node writes a disjoint key namespace (node 0: lg:{...}; node k>0: lg:nk:{...}), all under lg:* so replicare replicates them, so several nodes can seed/churn a mesh concurrently and converge to the union. Run the SAME node-id for every `run` against a given node.")
 	cf := addConnFlags(fs)
 	_ = fs.Parse(args)
 
-	r, err := openRDB(ctx, *dsn, cf.cluster, cf.password)
+	if *nodeID < 0 {
+		return fmt.Errorf("--node-id must be >= 0")
+	}
+
+	r, err := openRDB(ctx, *dsn, cf.cluster, cf.password, *nodeID)
 	if err != nil {
 		return err
 	}
 	defer r.close()
 
-	seeded, err := r.anyKey(ctx, keyPrefix+"*")
+	// Seeded iff THIS node's own key slice is populated — checking all of lg:* would
+	// wrongly report "seeded" once a peer's keys have replicated in.
+	seeded, err := r.anyKey(ctx, r.ownDataPattern())
 	if err != nil {
 		return fmt.Errorf("check seeded: %w", err)
 	}
@@ -192,7 +204,11 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 
 	if !seeded {
 		sc := defaultScale().mul(*scaleF)
-		log("empty source detected -> seeding (~%d keys, scale %.2f, seed %d)", sc.total(), *scaleF, *seedVal)
+		if *nodeID == 0 {
+			log("empty source detected -> seeding (~%d keys, scale %.2f, seed %d)", sc.total(), *scaleF, *seedVal)
+		} else {
+			log("empty node %d slice detected -> seeding (~%d keys, scale %.2f, seed %d, namespace lg:n%d:)", *nodeID, sc.total(), *scaleF, *seedVal, *nodeID)
+		}
 		start := time.Now()
 		if err := seed(ctx, r, sc, rng, log); err != nil {
 			return err
@@ -201,7 +217,7 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 		return nil
 	}
 
-	log("populated source detected -> churning %d ops (seed %d)", *ops, *seedVal)
+	log("populated node %d detected -> churning %d ops (seed %d)", *nodeID, *ops, *seedVal)
 	start := time.Now()
 	stats, err := churn(ctx, r, *ops, rng, log)
 	if err != nil {
@@ -220,18 +236,22 @@ func cmdVerify(ctx context.Context, args []string, log logf) error {
 	dst := fs.String("target", "", "target connection spec")
 	wait := fs.Duration("wait", 0, "keep re-checking until converged or this timeout elapses (0 = single pass)")
 	interval := fs.Duration("interval", 2*time.Second, "poll interval when --wait is set")
+	nodeID := fs.Int("node-id", 0, "ACTIVE-ACTIVE: the SOURCE's node index (0 for single-writer). Scopes the skip-leak check to the source's own lgskip:n<node>:* namespace, since in a mesh every node has its own source-only lgskip keys. Data (lg:*) is compared across the whole keyspace either way (a converged mesh holds the union on every node).")
 	cf := addConnFlags(fs)
 	_ = fs.Parse(args)
 
 	if *dst == "" {
 		return fmt.Errorf("--target is required")
 	}
-	srcR, err := openRDB(ctx, *src, cf.cluster, cf.password)
+	if *nodeID < 0 {
+		return fmt.Errorf("--node-id must be >= 0")
+	}
+	srcR, err := openRDB(ctx, *src, cf.cluster, cf.password, *nodeID)
 	if err != nil {
 		return fmt.Errorf("source: %w", err)
 	}
 	defer srcR.close()
-	dstR, err := openRDB(ctx, *dst, cf.cluster, cf.password)
+	dstR, err := openRDB(ctx, *dst, cf.cluster, cf.password, 0)
 	if err != nil {
 		return fmt.Errorf("target: %w", err)
 	}
@@ -273,7 +293,8 @@ func cmdReset(ctx context.Context, args []string, log logf) error {
 	if !*yes {
 		return fmt.Errorf("refusing to delete without --yes (this DELs every lg:* and lgskip:* key)")
 	}
-	r, err := openRDB(ctx, *dsn, cf.cluster, cf.password)
+	// reset clears the whole harness keyspace (all nodes' lg:*/lgskip:*), so node 0.
+	r, err := openRDB(ctx, *dsn, cf.cluster, cf.password, 0)
 	if err != nil {
 		return err
 	}

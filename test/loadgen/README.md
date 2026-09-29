@@ -58,24 +58,92 @@ or keyword string; empty uses the standard `PG*` environment variables.
 
 ### Commands & flags
 
-- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cyclic] [--duration D]` —
+- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cyclic] [--duration D] [--node-id K]` —
   ensure schema, then **seed if empty** or **churn** `N` statements. `--seed`
   makes a run reproducible. `--duration D` churns **continuously** for `D`
   (repeated `--ops` bursts) — run it **while replicare does its initial copy** to
   exercise the live-source cyclic-copy skew: parent rows (tenants/users) inserted
   mid-copy are referenced by children copied from a later snapshot, a transient FK
   the cyclic copy must recover from (§3.3/§4) rather than crash-loop on. Pair with
-  `--cyclic`.
-- `ddl --dsn <db> [--cyclic]` — apply the schema only (prep the target).
+  `--cyclic`. `--node-id K` (default 0) selects this writer's **key slice** for
+  active-active testing — see [Active-active](#active-active-multi-master-load-testing);
+  0 is the default single-writer (active-passive) behaviour, unchanged.
+- `ddl --dsn <db> [--cyclic]` — apply the schema only (prep the target). One shared
+  schema serves every node; `--node-id` is a `run`-only concept (it partitions the
+  *data*, not the schema).
 - `verify --source <src> --target <tgt> [--wait D] [--interval D]` — per-table
   row-count + ordered content-checksum comparison. Exits non-zero on drift.
   `--wait` polls until converged or the timeout. GUCs are pinned to match
-  replicare's transport so `row::text` renders identically on both ends.
+  replicare's transport so `row::text` renders identically on both ends. It is a
+  pure **equality** check, so it doubles as the active-active convergence oracle —
+  run it between any two mesh nodes (they must hold the identical union).
 - `reset --dsn <db> --yes` — `DROP SCHEMA loadgen CASCADE`.
 
 `verify` compares only the 9 keyed tables (it skips `audit_log`, which replicare
 skips). The `GENERATED … STORED` column is included and matches because both
 servers recompute it.
+
+## Active-active (multi-master) load testing
+
+The same harness drives a `clusters:` mesh. The model is **disjoint partitioning**:
+each writer node gets `--node-id K`, which shifts every generated key and every FK
+reference into a private slice `[K·1e9+1, K·1e9+1e9)`, so nodes never collide on a
+key and the mesh converges to the clean **union** of all slices (predictable counts,
+matching checksums). `--node-id 0` is the default and is byte-for-byte the
+single-writer behaviour above, so active-passive is unaffected.
+
+What `--node-id K` changes on `run`:
+- **Seed** writes ids `base+g`, order UUIDs `md5('order:'||(base+g))`, SKUs
+  `SKU-(base+g)`, and offsets every FK reference by `base`, so a node's children point
+  only at that node's own parents. Identity sequences are then restarted past the
+  node's seeded rows so churn inserts stay in the slice.
+- **Churn** inserts into the node's slice and scopes every UPDATE/DELETE to
+  node-owned rows, so a node only ever mutates what it wrote — no accidental
+  cross-node conflict (resolving concurrent *same-key* writes is the separate,
+  planned **conflict-storm** mode; see below).
+
+`--node-id 0` and any `--node-id K` seeded/churned against the **same** node's DB must
+be consistent — always pass the same `--node-id` for a given node. Keep `--scale`
+well under ~500M rows per node (the harness refuses a scale that approaches the slice).
+
+### Three-node mesh example
+
+Assume a running replicare `clusters:` mesh over three Postgres nodes `A`, `B`, `C`
+(config per [multi-master.md](../../docs/multi-master.md)), with `$A`/`$B`/`$C` their DSNs.
+
+```sh
+# 1. Schema on every node (data-only replication; targets must pre-exist).
+for n in "$A" "$B" "$C"; do go run ./test/loadgen ddl --dsn "$n"; done
+
+# 2. Seed each node into its own disjoint slice.
+go run ./test/loadgen run --dsn "$A" --node-id 0
+go run ./test/loadgen run --dsn "$B" --node-id 1
+go run ./test/loadgen run --dsn "$C" --node-id 2
+
+# 3. Churn every node concurrently (each in its own slice).
+go run ./test/loadgen run --dsn "$A" --node-id 0 --ops 800 --seed 1 &
+go run ./test/loadgen run --dsn "$B" --node-id 1 --ops 800 --seed 2 &
+go run ./test/loadgen run --dsn "$C" --node-id 2 --ops 800 --seed 3 &
+wait
+
+# 4. Convergence oracle: every pair must be identical (all hold the union).
+go run ./test/loadgen verify --source "$A" --target "$B" --wait 300s
+go run ./test/loadgen verify --source "$A" --target "$C" --wait 300s
+```
+
+Convergence is transitive, so `A==B` and `A==C` imply all three agree. A pass ending
+`CONVERGED: all 9 replicated tables match` on every pair — with the daemon logs clean
+of `HALTED` / `stream pass error` — is a passing active-active load test.
+
+> **Not yet: conflict-storm mode.** The disjoint model above never has two nodes write
+> the same key, so it tests convergence of the *union*. A follow-up `--overlap` mode
+> will deliberately overlap node slices to exercise HLC last-write-wins under
+> concurrent same-key writes; there `verify` still asserts convergence (all nodes
+> equal), but not *which* value wins (the LWW winner is nondeterministic).
+
+> **Reset the state store per node when re-seeding** (see [Gotchas](#gotchas)) — this
+> applies per node in a mesh: clear each node's `replicare` schema and its state-store
+> entries alongside `loadgen reset`.
 
 ## Running a full load test end-to-end
 

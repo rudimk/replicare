@@ -32,15 +32,39 @@ var keyTypes = []string{"str", "hash", "list", "set", "zset", "stream", "big"}
 // bucketOf spreads index i deterministically across the hash-tag buckets.
 func bucketOf(i int) int { return i % buckets }
 
-// dataKey builds a replicated key: lg:{<bucket>}:<type>:<n>.
-func dataKey(typ string, i int) string {
-	return fmt.Sprintf("%s{%d}:%s:%d", keyPrefix, bucketOf(i), typ, i)
+// seg is this node's key-namespace segment for active-active: "" for node 0 (the
+// single-writer / active-passive case → keys are byte-for-byte the original layout)
+// and "n<node>:" for node > 0, so each writer node produces a DISJOINT slice of the
+// keyspace. It sits after the "lg:"/"lgskip:" prefix so replicare's include: ["lg:*"]
+// selection still matches every node's data keys and still excludes every node's
+// lgskip:* keys.
+func (r *rdb) seg() string {
+	if r.node == 0 {
+		return ""
+	}
+	return fmt.Sprintf("n%d:", r.node)
 }
 
-// skipKey builds a source-only key: lgskip:{<bucket>}:<n>.
-func skipKey(i int) string {
-	return fmt.Sprintf("%s{%d}:%d", skipPrefix, bucketOf(i), i)
+// dataKey builds a replicated key owned by this node: lg:[n<node>:]{<bucket>}:<type>:<n>.
+func (r *rdb) dataKey(typ string, i int) string {
+	return fmt.Sprintf("%s%s{%d}:%s:%d", keyPrefix, r.seg(), bucketOf(i), typ, i)
 }
+
+// skipKey builds a source-only key owned by this node: lgskip:[n<node>:]{<bucket>}:<n>.
+func (r *rdb) skipKey(i int) string {
+	return fmt.Sprintf("%s%s{%d}:%d", skipPrefix, r.seg(), bucketOf(i), i)
+}
+
+// ownDataPattern is the SCAN MATCH selecting only THIS node's data keys (not peers'
+// replicated-in keys), used for the seeded/empty check so a node re-seeds only when
+// its own slice is empty. For node 0 it is "lg:{*" (the "{" is a literal glob byte),
+// which excludes "lg:n<k>:..."; for node k it is "lg:nk:*".
+func (r *rdb) ownDataPattern() string { return keyPrefix + r.seg() + "{*" }
+
+// skipPattern is the SCAN MATCH for THIS node's source-only keys, used by verify to
+// confirm none of the SOURCE's lgskip:* keys leaked onto the target (each node has its
+// own lgskip:* as a source, so the check must be scoped to the source's namespace).
+func (r *rdb) skipPattern() string { return skipPrefix + r.seg() + "{*" }
 
 // scale controls how many keys of each type the initial seed writes. Kept small
 // per-type-relative so the default lands near a few hundred thousand keys (Redis

@@ -30,22 +30,22 @@ func seed(ctx context.Context, r *rdb, s scale, rng *rand.Rand, log logf) error 
 			if rng.Float64() < 0.2 { // ~20% volatile
 				ttl = time.Duration(1+rng.Intn(24)) * time.Hour
 			}
-			p.Set(ctx, dataKey("str", i), randVal(rng, 8, 64), ttl)
+			p.Set(ctx, r.dataKey("str", i), randVal(rng, 8, 64), ttl)
 		}},
 		{"hash", s.hash, func(p goredis.Pipeliner, i int) {
-			p.HSet(ctx, dataKey("hash", i), hashFields(rng, 3+rng.Intn(5)))
+			p.HSet(ctx, r.dataKey("hash", i), hashFields(rng, 3+rng.Intn(5)))
 		}},
 		{"list", s.list, func(p goredis.Pipeliner, i int) {
-			p.RPush(ctx, dataKey("list", i), elems(rng, 2+rng.Intn(6))...)
+			p.RPush(ctx, r.dataKey("list", i), elems(rng, 2+rng.Intn(6))...)
 		}},
 		{"set", s.set, func(p goredis.Pipeliner, i int) {
-			p.SAdd(ctx, dataKey("set", i), elems(rng, 2+rng.Intn(6))...)
+			p.SAdd(ctx, r.dataKey("set", i), elems(rng, 2+rng.Intn(6))...)
 		}},
 		{"zset", s.zset, func(p goredis.Pipeliner, i int) {
-			p.ZAdd(ctx, dataKey("zset", i), zmembers(rng, 2+rng.Intn(6))...)
+			p.ZAdd(ctx, r.dataKey("zset", i), zmembers(rng, 2+rng.Intn(6))...)
 		}},
 		{"skip", s.skip, func(p goredis.Pipeliner, i int) {
-			p.Set(ctx, skipKey(i), randVal(rng, 8, 32), 0)
+			p.Set(ctx, r.skipKey(i), randVal(rng, 8, 32), 0)
 		}},
 	}
 
@@ -118,7 +118,7 @@ func pipelineN(ctx context.Context, r *rdb, n int, fn func(p goredis.Pipeliner, 
 
 func seedStreams(ctx context.Context, r *rdb, n int, rng *rand.Rand, log logf) error {
 	if err := pipelineN(ctx, r, n, func(p goredis.Pipeliner, i int) {
-		key := dataKey("stream", i)
+		key := r.dataKey("stream", i)
 		for j := 0; j < 2+rng.Intn(4); j++ {
 			p.XAdd(ctx, &goredis.XAddArgs{
 				Stream: key,
@@ -142,7 +142,7 @@ func seedBig(ctx context.Context, r *rdb, n int, rng *rand.Rand, log logf) error
 		for f := 0; f < 20; f++ {
 			vals = append(vals, "f"+strconv.Itoa(f), randVal(rng, 5000, 5000))
 		}
-		p.HSet(ctx, dataKey("big", i), vals...)
+		p.HSet(ctx, r.dataKey("big", i), vals...)
 	}); err != nil {
 		return fmt.Errorf("seed big: %w", err)
 	}

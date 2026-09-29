@@ -77,8 +77,12 @@ func verifyOnce(ctx context.Context, srcR, dstR *rdb, log logf) (verifyResult, e
 		}
 	}
 
-	// The excluded cohort must never reach the target.
-	skip, err := scanKeys(ctx, dstR, skipPrefix+"*")
+	// The excluded cohort must never reach the target. Scope to the SOURCE's own
+	// lgskip namespace: in an active-active mesh the target is itself a source with its
+	// own lgskip:* keys, so a whole-lgskip:* scan would false-positive on those. For
+	// node 0 (single-writer) srcR.skipPattern() is "lgskip:{*", matching the classic
+	// layout — and a one-way target has no lgskip:* at all, so the check is unchanged.
+	skip, err := scanKeys(ctx, dstR, srcR.skipPattern())
 	if err != nil {
 		return verifyResult{}, fmt.Errorf("target skip scan: %w", err)
 	}

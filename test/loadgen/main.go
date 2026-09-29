@@ -126,7 +126,13 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 	seedVal := fs.Int64("seed", 1, "RNG seed (server setseed + client op selection) for reproducibility")
 	cyclic := fs.Bool("cyclic", false, "also add the optional FK cycles (exercises the cyclic-copy null-then-fill path; streaming under churn is limited for non-DEFERRABLE FKs)")
 	duration := fs.Duration("duration", 0, "run churn CONTINUOUSLY for this long (repeated --ops bursts). Run this WHILE replicare does its initial copy to exercise the live-source skew path — new parent rows (tenants/users) inserted mid-copy are referenced by children copied from a later snapshot (transient FK, §3.3/§4).")
+	nodeID := fs.Int("node-id", 0, "ACTIVE-ACTIVE: this writer node's index (0 = the default single-writer / active-passive behaviour). Each node claims a disjoint key slice [node-id*1e9+1, +1e9), so several nodes can seed/churn concurrently against a mesh and converge to the clean union. Run the SAME node-id for every `run` against a given node's DB.")
 	_ = fs.Parse(args)
+
+	if *nodeID < 0 {
+		return fmt.Errorf("--node-id must be >= 0")
+	}
+	base := baseFor(*nodeID)
 
 	conn, err := connect(ctx, *dsn)
 	if err != nil {
@@ -141,16 +147,28 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 		return err
 	}
 
+	// This node is seeded iff ITS slice holds tenants — checking the whole table would
+	// wrongly report "seeded" once a peer's rows have replicated in.
 	var seeded int64
-	if err := conn.QueryRow(ctx, "SELECT count(*) FROM loadgen.tenants").Scan(&seeded); err != nil {
+	if err := conn.QueryRow(ctx,
+		fmt.Sprintf("SELECT count(*) FROM loadgen.tenants WHERE %s", partition("id", base))).Scan(&seeded); err != nil {
 		return fmt.Errorf("check seeded: %w", err)
 	}
 
 	if seeded == 0 {
 		sc := defaultScale().mul(*scaleF)
-		log("empty source detected -> seeding (~%d rows, scale %.2f, seed %d)", sc.total(), *scaleF, *seedVal)
+		// A node's seeded row count must stay well inside its 1e9 slice so churn ids and
+		// the next node's base never collide.
+		if int64(sc.total()) >= nodeStride/2 {
+			return fmt.Errorf("--scale too large for active-active partitioning (%d rows approaches the %d per-node key slice); lower --scale", sc.total(), nodeStride)
+		}
+		if *nodeID == 0 {
+			log("empty source detected -> seeding (~%d rows, scale %.2f, seed %d)", sc.total(), *scaleF, *seedVal)
+		} else {
+			log("empty node %d slice detected -> seeding (~%d rows, scale %.2f, seed %d, key base %d)", *nodeID, sc.total(), *scaleF, *seedVal, base)
+		}
 		start := time.Now()
-		if err := seed(ctx, conn, sc, log); err != nil {
+		if err := seed(ctx, conn, sc, base, log); err != nil {
 			return err
 		}
 		log("seed complete in %s", time.Since(start).Round(time.Millisecond))
@@ -159,12 +177,12 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 
 	rng := rand.New(rand.NewSource(*seedVal))
 	if *duration > 0 {
-		return churnFor(ctx, conn, *ops, *duration, rng, log)
+		return churnFor(ctx, conn, *ops, base, *duration, rng, log)
 	}
 
-	log("populated source detected (%d tenants) -> churning %d ops (seed %d)", seeded, *ops, *seedVal)
+	log("populated node %d detected (%d owned tenants) -> churning %d ops (seed %d)", *nodeID, seeded, *ops, *seedVal)
 	start := time.Now()
-	stats, err := churn(ctx, conn, *ops, rng, log)
+	stats, err := churn(ctx, conn, *ops, base, rng, log)
 	if err != nil {
 		return err
 	}
@@ -181,7 +199,7 @@ func cmdRun(ctx context.Context, args []string, log logf) error {
 // mid-copy are referenced by children copied from a later snapshot, which the cyclic copy
 // must recover from instead of crash-looping. Run it in parallel with the daemon's
 // initial copy, e.g. `task loadgen:churn OPS=200 -- --duration 60s`.
-func churnFor(ctx context.Context, conn *pgx.Conn, ops int, d time.Duration, rng *rand.Rand, log logf) error {
+func churnFor(ctx context.Context, conn *pgx.Conn, ops int, base int64, d time.Duration, rng *rand.Rand, log logf) error {
 	log("continuous churn for %s (%d ops/burst) -> run this WHILE replicare does its initial copy", d, ops)
 	deadline := time.Now().Add(d)
 	bursts, total := 0, map[string]churnStat{}
@@ -189,7 +207,7 @@ func churnFor(ctx context.Context, conn *pgx.Conn, ops int, d time.Duration, rng
 		if ctx.Err() != nil {
 			break
 		}
-		stats, err := churn(ctx, conn, ops, rng, log)
+		stats, err := churn(ctx, conn, ops, base, rng, log)
 		if err != nil {
 			return err
 		}
