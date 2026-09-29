@@ -36,3 +36,21 @@ ACL SETUSER replicare on >CHANGE-ME ~* resetchannels \
 # the delete sweep SCANs each master. Also allow topology discovery:
 #
 # ACL SETUSER replicare +cluster|shards +cluster|slots +cluster|nodes
+
+# --- OPTIONAL: active-active mesh (MM6, a `clusters:` member) ---
+# In active-active mode EVERY node is BOTH a source and a target (union this file
+# with acl-source-redis.txt). Apply is a single atomic Lua that version-guards each
+# RESTORE/DEL against the per-key metadata register, so the target user additionally
+# needs:
+#   - +eval +evalsha            run the version-guarded apply script
+#   - +hmget +hset              read/write the metadata register inside the script
+#   - +del +restore             already granted above; the script calls both
+# The script touches a data key and its metadata sibling (same slot, hash-tagged),
+# so scope the key pattern to cover `\x00rc:m:*` as well (or use `~*`). Redis checks
+# every command a script runs against this ACL. Still NO admin, NO FLUSH*.
+#
+# ACL SETUSER replicare ~* +eval +evalsha +hmget +hset
+#
+# Correctness note: the mesh NEVER blind-DELs on the target (that would destroy a
+# peer's write); deletes arrive only as version-guarded tombstones. The stateless
+# "missing at source => DEL" sweep is disabled in cluster mode.

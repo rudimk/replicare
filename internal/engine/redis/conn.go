@@ -39,6 +39,7 @@ const (
 	paramBigKeyRefuse        = "rc_big_key_refuse"
 	paramTTLMode             = "rc_ttl_mode"
 	paramTypes               = "rc_types"
+	paramTombstoneRetention  = "rc_tombstone_retention" // MM6 mesh: tombstone GC age
 )
 
 // doer is the minimal command surface used by version/INFO probes, satisfied by

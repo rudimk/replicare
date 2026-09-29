@@ -1,6 +1,10 @@
 package redis
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/rudimk/replicare/internal/engine"
+)
 
 // TestSlotTag reproduces Redis's cluster hash-tag rule exactly: content between the
 // first '{' and the first '}' after it, when non-empty; otherwise the whole key.
@@ -60,6 +64,42 @@ func TestMetaKeyCoLocates(t *testing.T) {
 		if isMetaKey(k) && k != "" && k[0] != 0x00 {
 			t.Errorf("isMetaKey(%q) true for a plain user key", k)
 		}
+	}
+}
+
+// TestDataKeyFromMeta is the inverse of metaKey: every data key round-trips through its
+// metadata key, and a non-metadata string is rejected.
+func TestDataKeyFromMeta(t *testing.T) {
+	keys := []string{"foo", "user:{42}:name", "a}b", "{a{b}c", "{}.x", "", "x:y:z", "pre{t}post{u}"}
+	for _, k := range keys {
+		mk := metaKey(k)
+		got, ok := dataKeyFromMeta(mk)
+		if !ok {
+			t.Errorf("dataKeyFromMeta(%q) not recognized as a meta key", mk)
+			continue
+		}
+		if got != k {
+			t.Errorf("round-trip: dataKeyFromMeta(metaKey(%q)) = %q", k, got)
+		}
+	}
+	if _, ok := dataKeyFromMeta("plain-user-key"); ok {
+		t.Error("dataKeyFromMeta accepted a non-meta key")
+	}
+}
+
+// TestSelectionExcludesMeta: the reserved metadata namespace is never selected, so the
+// version register is invisible to copy/verify/reconcile even under a match-all glob.
+func TestSelectionExcludesMeta(t *testing.T) {
+	sel := compileSelection(engine.Selection{}) // match-all
+	if sel.match(metaKey("anything")) {
+		t.Error("selection matched a metadata key under match-all")
+	}
+	if !sel.match("anything") {
+		t.Error("selection should match an ordinary key under match-all")
+	}
+	star := compileSelection(engine.Selection{Include: []string{"*"}})
+	if star.match(metaKey("k")) {
+		t.Error(`selection "*" matched a metadata key`)
 	}
 }
 

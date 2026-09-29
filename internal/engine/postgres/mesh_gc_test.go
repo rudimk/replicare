@@ -17,7 +17,7 @@ func TestGCTombstonesReclaimsConsumed(t *testing.T) {
 	defer cancel()
 
 	src := captureSource(t, ctx)
-	src.EnableClusterReads() // mark as a cluster source so GC engages
+	src.EnableClusterReads("n1") // mark as a cluster source so GC engages
 	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)")
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
 	if err := src.InstallOriginCapture(ctx, []engine.TableRef{ref}, "n1"); err != nil {

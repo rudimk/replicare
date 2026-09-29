@@ -31,8 +31,10 @@ type Source struct {
 
 // EnableClusterReads implements engine.ClusterReadSource: it switches this Source's
 // re-read to the version-aware variant for a cluster edge. Called at build time for
-// the primary source and every copy-pool source.
-func (s *Source) EnableClusterReads() { s.cluster = true }
+// the primary source and every copy-pool source. nodeID is accepted for interface
+// symmetry and ignored: the Postgres version register already records each row's
+// origin, stamped by the capture trigger.
+func (s *Source) EnableClusterReads(string) { s.cluster = true }
 
 var _ engine.ClusterReadSource = (*Source)(nil)
 

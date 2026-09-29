@@ -51,12 +51,15 @@ func (r *reconState) reset() {
 // ReadDirtyKeys returns the next bounded batch of present keys for the unit as
 // upserts (Op=U). It advances the held SCAN cursor; when a full rolling pass
 // completes it resets and returns empty so the caller idles before the next pass.
-func (s *Source) ReadDirtyKeys(ctx context.Context, _ engine.TableRef, _ engine.TargetID, max int) ([]engine.DirtyKey, error) {
+func (s *Source) ReadDirtyKeys(ctx context.Context, ref engine.TableRef, target engine.TargetID, max int) ([]engine.DirtyKey, error) {
 	if s.db == nil {
 		return nil, errNotConnected
 	}
 	if max <= 0 {
 		max = defaultScanCount
+	}
+	if s.cluster {
+		return s.readDirtyKeysCluster(ctx, ref, target, max)
 	}
 	if s.recon == nil {
 		sc, err := s.db.shardScanners(ctx, s.cfg)
@@ -109,11 +112,18 @@ func (s *Source) ReadDirtyKeys(ctx context.Context, _ engine.TableRef, _ engine.
 }
 
 // scanBatch collects up to ~max selected keys from the held per-shard SCAN state,
-// advancing the cursors. It is the shared bounded-pass primitive behind both the
-// source reconciliation (ReadDirtyKeys) and the target sweep (ScanTargetKeys).
-// passComplete is true when THIS call finished the rolling pass (the state was
-// reset for the next one); the empty batch it returns signals the caller to idle.
+// advancing the cursors. It is the shared bounded-pass primitive behind the source
+// reconciliation (ReadDirtyKeys), the target sweep (ScanTargetKeys), and the mesh
+// metadata-keyspace scan. passComplete is true when THIS call finished the rolling
+// pass (the state was reset for the next one); the empty batch it returns signals the
+// caller to idle. A one-way caller passes match="" and exclude=nil for the original
+// behaviour; the mesh passes a MATCH pattern (metadata keyspace) or an exclude
+// predicate (skip metadata keys in the data scan).
 func scanBatch(ctx context.Context, r *reconState, scanCount int64, max int, sel *selection) (keys []string, passComplete bool, err error) {
+	return scanBatchFiltered(ctx, r, scanCount, max, sel, "", nil)
+}
+
+func scanBatchFiltered(ctx context.Context, r *reconState, scanCount int64, max int, sel *selection, match string, exclude func(string) bool) (keys []string, passComplete bool, err error) {
 	for len(keys) < max {
 		if r.allDone() {
 			r.reset()
@@ -123,12 +133,15 @@ func scanBatch(ctx context.Context, r *reconState, scanCount int64, max int, sel
 			r.idx = (r.idx + 1) % len(r.scanners)
 			continue
 		}
-		ks, cur, err := r.scanners[r.idx].Scan(ctx, r.cursors[r.idx], "", scanCount).Result()
+		ks, cur, err := r.scanners[r.idx].Scan(ctx, r.cursors[r.idx], match, scanCount).Result()
 		if err != nil {
 			return nil, false, fmt.Errorf("redis: SCAN: %w", err)
 		}
 		r.cursors[r.idx] = cur
 		for _, k := range ks {
+			if exclude != nil && exclude(k) {
+				continue
+			}
 			if sel == nil || sel.match(k) {
 				keys = append(keys, k)
 			}
@@ -178,9 +191,12 @@ func (s *Source) MissingAtSource(ctx context.Context, _ engine.TableRef, keys []
 // RereadCurrent DUMPs the current value+TTL of each dirty key into the framing —
 // the faithful re-read the apply layer pipes into RESTORE REPLACE. Reuses the RM4
 // framing (big-key handling included); keys are routed per shard by the client.
-func (s *Source) RereadCurrent(ctx context.Context, _ engine.TableRef, keys []engine.KeyValues, w io.Writer) error {
+func (s *Source) RereadCurrent(ctx context.Context, ref engine.TableRef, keys []engine.KeyValues, w io.Writer) error {
 	if s.db == nil {
 		return errNotConnected
+	}
+	if s.cluster {
+		return s.rereadCurrentCluster(ctx, ref, keys, w)
 	}
 	tun := tuningFromParams(s.cfg.Params)
 	var nowMillis int64

@@ -440,12 +440,17 @@ Replication topology is **configured by the user**, never hardcoded:
 - **Default / common case: single source → single target.**
 - **Supported: fan-out — one source → multiple targets** (per-target cursor tracking in the
   track/cursor mechanism).
-- **Roadmap: multi-master / bidirectional** (Bucardo-like) with pluggable conflict resolution.
-  Design interfaces so this is addable, but it is not a v1 requirement.
+- **Shipped: multi-master / active-active** (bidirectional full mesh) for **Postgres, MySQL,
+  and Redis** — a `clusters:` block of peer `nodes:`, zero-config **HLC last-write-wins**
+  conflict resolution over a hidden `(hlc, node_id)` version register (a `replicare`-schema
+  side table on PG/MySQL; a parallel metadata keyspace on Redis, since Redis is
+  capture-less), loop suppression, and GC'd tombstones. See `docs/multi-master.md`
+  (MM3–MM6). HA leader election (MM8) is still deferred.
 
 For one-way replication the source is authoritative (target rows are overwritten/deleted to
-match). Multi-master conflict resolution (e.g. latest-timestamp-wins, source-priority,
-custom) is **deferred** but the apply/cursor layer should not preclude it.
+match). Active-active resolves concurrent same-key writes by HLC last-write-wins (no user
+schema change, no priority-fencing in v1); the policy interface stays open for a future
+custom resolver.
 
 **Single-engine syncs — never cross-engine (decision, permanent).** A sync replicates within one
 engine only: a Postgres source goes to Postgres target(s), MySQL→MySQL, Redis→Redis. **We never do
@@ -764,7 +769,7 @@ invasive.
 | Tables without PK/unique | **Skip + loud warning** (telemetry-surfaced). |
 | Initial copy vs deltas | **Enable capture first**, then chunked parallel copy; idempotent apply reconciles overlap → **no frozen snapshot needed** (handles huge DBs). |
 | Delivery | **At-least-once + idempotent upserts**, checkpointed cursors. |
-| Topology | **User choice**: default single→single; **fan-out supported**; **multi-master on roadmap**. |
+| Topology | **User choice**: default single→single; **fan-out supported**; **active-active mesh shipped** (PG/MySQL/Redis, `clusters:`, HLC-LWW; docs/multi-master.md). |
 | Engine scope | **Never cross-engine.** A sync is **single-engine** (source + all targets share one engine: PG→PG, MySQL→MySQL, Redis→Redis). Follows from faithful transport (§1.7); enforced in config validation. |
 | Config model | **Neutral envelope + typed per-engine block, registry-dispatched** (§11). Each engine owns/validates its connection, selection, and CDC tuning. v1: Postgres block only; MySQL/Redis are extension points. |
 | Per-pipeline pause | Optional neutral **`enabled: true\|false`** on each `sync`/`cluster` (unset = enabled, pure opt-out). `false` = daemon skips it at startup (no ownership lock); source capture left installed so unpause+restart drains the backlog (data-loss-free), but source deltas grow + retention is paused while off. Start-time only (config change + restart). **Zero active syncs → daemon idles (does NOT exit), so a fully-paused config never CrashLoops; `status` shows `[PAUSED]`.** See §11. |
@@ -787,7 +792,8 @@ invasive.
 | Redis state store | **Reused Postgres, no new code**; nothing on the source. **A Redis→Redis sync still requires a Postgres state store** (documented wart). |
 | Redis cluster | Per-master `SCAN` + subscription + delete-sweep; topology via `CLUSTER SHARDS`/`SLOTS`; parallelism unit = shard; per-key ops sidestep cross-slot; **delete detection master-pinned** (replica lag → false deletes); DB 0 only. |
 | Redis privileges | Redis 6+ ACL, no admin; **`+restore` granted explicitly** (`@dangerous`); notification-enable/`PSUBSCRIBE` are privilege-gated extras (`deploy/acl-*-redis.txt`). |
-| Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine, multi-master — all deferred. |
+| Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine — deferred. **Redis active-active IS shipped** (MM6: metadata-keyspace version register, version-guarded Lua apply, tombstone deletes; docs/multi-master.md §5.4). |
+| Redis multi-master (MM6) | **Shipped.** Capture-less, so the `(hlc,node,deleted,vhash)` register lives in a **parallel metadata keyspace** (`\x00rc:m:{slot}K`, co-located in K's slot for atomic value+register Lua). Local writes detected by a **logical-value fingerprint** (version-gap-stable, not DUMP bytes); apply is **version-guarded** (loop suppression + LWW in one compare); deletes are **tombstones** (stateless sweep disabled in mesh); tombstone **GC by age**. Metadata excluded from all data ops at `selection.match`. One-way Redis unchanged. Correctness on the local gate (`REPLICARE_REDIS=1`); pure logic in CI. |
 | CI vs local (Redis) | **CI = compile/unit/PG-regression only**; Redis correctness is a **LOCAL** gate (`REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1`, or `REPLICARE_REDIS_CLUSTER=1`; the tri-engine daemon test via `task test:integration:tri`). |
 
 ---
@@ -804,7 +810,8 @@ invasive.
   close enough to safely enable binary format instead of text.
 - HA / active-standby leader election (`pg_advisory_lock` + cursor fencing) — design when HA
   becomes a goal; keep the ownership interface ready for it.
-- Multi-master conflict-resolution model (latest-wins / priority / custom) — design later.
+- Multi-master conflict resolution: **HLC last-write-wins shipped** (PG/MySQL/Redis, zero-config);
+  a pluggable priority/custom resolver on the open policy interface — design later.
 - **Partition+DROP as default on PG≥10** — **RESOLVED (M5c, `docs/reseed-state-machine.md` §5):**
   **no** — batched-DELETE + aggressive autovacuum is the universal v1 default on every version;
   partition+DROP stays an opt-in, documented optimization for high-churn PG≥10. **M9 kept it

@@ -29,9 +29,25 @@ type Source struct {
 
 	// notify is the optional keyspace-notification accelerator (RM7); nil when off.
 	notify *notifier
+
+	// cluster and nodeID enable active-active mesh mode (MM6). When cluster is
+	// true the source drives from the metadata keyspace (version register), stamps
+	// detected local writes with (hlc, nodeID), and surfaces tombstones — see
+	// mesh_source.go. nodeID is this member's stable replication-origin identity.
+	// A one-way source leaves both zero and behaves exactly as before.
+	cluster bool
+	nodeID  string
+	// metaRecon is the cluster metadata-keyspace rolling SCAN state (deletes /
+	// tombstones), held across ReadDirtyKeys calls alongside recon (data keyspace).
+	metaRecon *reconState
 }
 
-var _ engine.Source = (*Source)(nil)
+var (
+	_ engine.Source              = (*Source)(nil)
+	_ engine.ClusterReadSource   = (*Source)(nil)
+	_ engine.OriginAwareCapturer = (*Source)(nil)
+	_ engine.TombstoneGC         = (*Source)(nil)
+)
 
 // Connect opens the (standalone, RM0) Redis client and pings it.
 func (s *Source) Connect(ctx context.Context) error {

@@ -258,8 +258,15 @@ type OriginMarkingSink interface {
 // (CLAUDE.md §5.3). It is enabled for every cluster-edge source (the primary and the
 // copy pool, since concurrent apply re-reads through the pool). A one-way Source is
 // never enabled, so its re-read carries only values and behaves exactly as before.
+//
+// nodeID is this member's stable replication-origin identity. Engines whose version
+// register already records the origin per row (Postgres/MySQL, stamped by the capture
+// trigger) accept it for symmetry and ignore it. A capture-less engine (Redis) has no
+// trigger to stamp the origin, so its re-read STAMPS a detected local write with
+// (hlc, nodeID) at read time — it needs nodeID on every re-reading source, including
+// the copy pool, which is why it travels here rather than only via InstallOriginCapture.
 type ClusterReadSource interface {
-	EnableClusterReads()
+	EnableClusterReads(nodeID string)
 }
 
 // TombstoneGC is an OPTIONAL Source capability for cluster (multi-master) members: it

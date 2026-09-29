@@ -1,17 +1,18 @@
 # Multi-master replication — design note
 
 > **Status: IN PROGRESS.** This document is the design; milestones are landing against
-> it. **Shipped for Postgres AND MySQL:** the `nodes:`/`clusters:` config surface
+> it. **Shipped for Postgres, MySQL, AND Redis:** the `nodes:`/`clusters:` config surface
 > (MM0–MM1), **loop suppression** (MM3), and **HLC last-write-wins conflict resolution +
-> tombstones + GC** (MM4 for Postgres, MM5 mirrors it for MySQL) — a full active-active
-> mesh runs on both engines today: writes accepted on any node converge on all,
+> tombstones + GC** (MM4 Postgres, MM5 MySQL, **MM6 Redis**) — a full active-active mesh
+> runs on all three engines today: writes accepted on any node converge on all,
 > replicare's own applies are not re-captured and echoed, and **concurrent writes to the
 > same key converge to the same value on every node**, resolved by a hidden
 > `(hlc, node_id)` version (no user schema change), with deletes handled by GC'd
-> tombstones (§5.2, §5.3, §6.2, [§8 status](#8-implementation-status)). **Not yet
-> shipped:** the Redis mesh (MM6) and HA leader election (MM8). The **hard constraint**
-> on all of this work is that the existing one-way path (source → target(s), changes
-> never flow back) keeps behaving **exactly** as it does today — see
+> tombstones (§5.2, §5.3, §5.4, §6.2, [§8 status](#8-implementation-status)). On Redis the
+> register is a **parallel metadata keyspace** rather than a side table, since Redis is
+> capture-less (§5.4). **Not yet shipped:** HA leader election (MM8). The **hard
+> constraint** on all of this work is that the existing one-way path (source →
+> target(s), changes never flow back) keeps behaving **exactly** as it does today — see
 > [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
 
 This note covers **Postgres, MySQL, and Redis**. It records what exists now, why
@@ -307,33 +308,49 @@ version records for deleted keys are **GC'd** once every peer has observed a ver
 them (a per-cluster min-observed watermark across peers' cursors), keeping the source
 footprint bounded (§3.4).
 
-### 5.4 Redis specifics (the hardest engine)
+### 5.4 Redis specifics (the hardest engine) — SHIPPED (MM6)
 
-Redis needs the most new machinery because it is capture-less and value-opaque:
+Redis needed the most new machinery because it is capture-less and value-opaque. As
+implemented (`internal/engine/redis/mesh*.go`), gated entirely on cluster mode so one-way
+Redis is byte-for-byte unchanged:
 
-- **Metadata keyspace.** For each replicated data key `K`, maintain a sibling metadata
-  entry (e.g. a hash under a reserved prefix or a separate logical DB) holding
-  `{origin_node, version, deleted_at?}`. This preserves the value-faithful `DUMP`/
-  `RESTORE` promise (the value key is never wrapped) while giving reconcile passes
-  something to reason about. It is written **atomically with** the value via a Lua
-  script / `MULTI` so the pair cannot diverge.
-- **Delete-diff redesign.** The current "present on target, missing at source ⇒ DEL"
-  logic must become "present on target, missing at source **and** the target's
-  metadata shows no newer local write, **and** a real tombstone exists at the origin".
-  Without this, a peer's new write is still destroyed. This is effectively **tombstone-
-  based deletion** replacing the stateless diff — a fundamental change to
-  `internal/pipeline/delete.go` + `MissingAtSource`.
-- **Conflict resolution on opaque bytes.** LWW uses the metadata `version`; the value
-  itself is never merged (Redis values are opaque to us). Sub-key merges (e.g.
-  hash-field-level) are out of scope — that is what Redis Enterprise Active-Active
-  (CRDB) does with CRDTs, a different architecture we are not rebuilding.
+- **Metadata keyspace (the version register).** For each replicated data key `K` a sibling
+  metadata hash `\x00rc:m:{<K's slot tag>}K` holds `{p, l, n, d, v}` = `(hlc phys, hlc
+  log, origin node, deleted flag, vhash)`. The reserved control-char prefix keeps it out
+  of the user keyspace and it is **excluded from every data operation** (copy, verify,
+  reconcile) at one choke point (`selection.match`). The value key is **never wrapped**
+  (faithful transport holds); the metadata co-locates in `K`'s cluster **slot** (a
+  CRC16-derived hash tag) so value + register are written together in **one atomic Lua**.
+- **Capture-less "capture" (loop suppression + LWW in one comparison).** There is no
+  trigger. The version-aware re-read (`ClusterReadSource`) detects a local write by
+  comparing each key's current **logical-value fingerprint** (`vhash`, type-aware reads —
+  never DUMP bytes, so it is version-gap-stable) against the stored register; a change
+  stamps a fresh `(hlc, node)` off the key's own stored version (per-key monotonic, so no
+  shared clock is needed). Apply (`OriginMarkingSink`) RESTOREs/DELs **only when the
+  incoming `(hlc, node)` strictly beats the local register** — the same comparison is both
+  loop suppression (an echoed write already has a version the peer holds → loses) and
+  HLC-LWW.
+- **Tombstone-based deletion replaces the stateless diff.** The one-way "missing at source
+  ⇒ DEL" sweep is **disabled in cluster mode** (a key absent at one source but present
+  here is a legitimate peer write, not an orphan). A local delete is detected by scanning
+  the metadata keyspace for a live entry whose data key is gone; it stamps a tombstone that
+  propagates and version-guard-deletes on peers. Tombstones are **GC'd by age**
+  (`TombstoneGC`, default 24h — a peer lagged beyond that is a reseed case, MM7).
+- **Conflict resolution on opaque bytes.** LWW uses the register `(hlc, node)`; the value
+  is never merged. Sub-key merges (hash-field CRDTs, à la Redis Enterprise Active-Active)
+  are out of scope.
 
-Honest assessment: full active-active Redis is a **near-rewrite** of the Redis CDC model
-and carries the most risk of the three engines. It is nonetheless **in scope and
-co-equal — not deferred** (a hard requirement): Redis gets the same `(hlc, node_id)`
-version register as Postgres/MySQL, here realized as the metadata keyspace, and the same
-HLC-LWW resolution. It sequences *after* the Postgres milestones only because it reuses
-their neutral version-register/tombstone abstractions, not because it can be dropped.
+**Bootstrap.** No separate protocol: capture-first + idempotent versioned apply reconciles
+the mesh, so the first streaming pass lazily seeds the register (a key with no metadata is
+treated as a fresh local write) **without spurious tombstones** (no pre-existing register
+to misread), mirroring Postgres's deferred copy-time seeding. A consequence, documented:
+mesh formation over two nodes that already hold divergent data converges each key to one
+value under LWW, and a delete made **before** a node joined the mesh is not preserved
+(there is no pre-mesh history to tombstone from).
+
+**Cost, honestly:** the metadata keyspace ~doubles key count, and the change-detector adds
+a logical value read per key per reconcile pass (big keys are already DUMP-and-warn). A
+same-version DUMP-hash fast path is a documented future optimization.
 
 ### 5.5 Ownership, cursors, topology expansion
 
@@ -422,12 +439,11 @@ Notes:
 1. **Cluster validation** — single-engine members; every member has a `node_id`;
    `topology: mesh` only (v1); no member endpoint reused in a conflicting plain sync.
    (No conflict-policy validation — there is no policy to configure.)
-   **Engine-capability guard (shipped):** `validateCluster` (`internal/config/config.go`)
-   rejects a cluster on an engine that can't do active-active — today **Redis** — at
-   config-load time with an actionable error (*"engine \"redis\" does not support
-   active-active replication … use a one-way `syncs:` entry for this engine instead"*),
-   rather than letting it fail opaquely later at capture install. This is a temporary
-   floor: it is lifted for Redis when the Redis mesh (MM6) lands.
+   **Engine-capability guard:** `validateCluster` (`internal/config/config.go`) rejects a
+   cluster on any engine that can't do active-active, at config-load time with an
+   actionable error, rather than letting it fail opaquely later at capture install. All
+   three shipped engines (Postgres, MySQL, Redis) now qualify, so the blocklist is empty;
+   the guard is retained for a future engine that cannot do active-active.
 2. **Cycle detection for plain `syncs`** — refuse an *un-declared* cycle among one-way
    syncs (`A→B` + `B→A`, or a ring) not part of a `clusters:` block. Closes the
    silent-corruption footgun in §4, worth doing **independently**. It only *adds* a
@@ -494,20 +510,23 @@ compiles and runs exactly as before.
 | MM3 | **Postgres loop suppression** — origin-aware capture, marked apply/copy, cluster→edge wiring, idempotent mesh copy | **Shipped** |
 | MM4 | **Postgres HLC-LWW** — version register + HLC, version-guarded apply, tombstones, GC | **Shipped** |
 | MM5 | **MySQL mesh** — mirror of MM3+MM4 for MySQL (`@replicare_apply` guard, inline HLC, version-guarded apply, GC) | **Shipped** |
-| MM6 | Redis mesh | Not started — a Redis `clusters:` entry is **rejected at config load** until this lands (§6.3) |
+| MM6 | **Redis mesh** — metadata-keyspace version register, version-guarded Lua apply, tombstone deletes, age-based GC, slot co-location, config guard lifted (§5.4) | **Shipped** |
 | MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
 
-**What works today (Postgres AND MySQL):** define members under `nodes:`, group them in a
-`clusters:` block, and the daemon runs a full-mesh active-active cluster — writes accepted
-on any node converge on all, initial copy is bidirectional and idempotent, replicare's own
-applies are **not** re-captured and echoed (loop suppression), and **concurrent writes to
-the same key converge to the same value on every node** under HLC last-write-wins, with
-deletes resolved by GC'd tombstones. Proven end-to-end for Postgres by
+**What works today (Postgres, MySQL, AND Redis):** define members under `nodes:`, group them
+in a `clusters:` block, and the daemon runs a full-mesh active-active cluster — writes
+accepted on any node converge on all, initial copy is bidirectional and idempotent,
+replicare's own applies are **not** re-captured and echoed (loop suppression), and
+**concurrent writes to the same key converge to the same value on every node** under HLC
+last-write-wins, with deletes resolved by GC'd tombstones. Proven end-to-end for Postgres by
 `internal/daemon.TestDaemonTwoNodeMeshConverges` + `TestDaemonMeshSameKeyConflictConverges`,
-and for MySQL by `internal/daemon.TestDaemonMySQLMeshSameKeyConflictConverges` (concurrent
-same-key + delete-vs-update convergence on a 2-node MySQL mesh), plus engine-level tests for
-each engine's version-guarded apply (`TestClusterApplyLWWResolvesByVersion` — out-of-order
-safety, node-id tiebreak, tombstone-vs-update) and GC (`TestGCTombstonesReclaimsConsumed`).
+for MySQL by `internal/daemon.TestDaemonMySQLMeshSameKeyConflictConverges`, and for Redis by
+the engine-level mesh suite `internal/engine/redis.TestMesh*` (disjoint-key + same-key
+conflict convergence, delete propagation, and the peer-write-not-destroyed safety property),
+which drive the exact neutral apply path (`DrainComponent`); Redis correctness runs on the
+local gate (`REPLICARE_REDIS=1`), not the Postgres-only CI. Pure mesh logic (slot hashing,
+version codec, LWW order, HLC) is unit-tested in CI (`internal/engine/redis.TestSlotTag`,
+`TestCRC16KeySlot`, `TestVersionBeats`, `TestHLC*`, `TestFramingMesh*`).
 
 **MySQL specifics (MM5).** The design mirrors Postgres; three things differ because the
 engine forces them:

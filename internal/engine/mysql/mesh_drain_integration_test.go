@@ -24,7 +24,7 @@ func TestClusterCrossNodeDrain(t *testing.T) {
 	if err := a.Connect(ctx); err != nil {
 		t.Fatalf("connect a: %v", err)
 	}
-	a.EnableClusterReads()
+	a.EnableClusterReads("a")
 	t.Cleanup(func() { _ = a.Close(context.Background()) })
 
 	bSink := &Sink{cfg: tgtCfg()}
@@ -37,7 +37,7 @@ func TestClusterCrossNodeDrain(t *testing.T) {
 	if err := bSrc.Connect(ctx); err != nil {
 		t.Fatalf("connect b src: %v", err)
 	}
-	bSrc.EnableClusterReads()
+	bSrc.EnableClusterReads("b")
 	t.Cleanup(func() { _ = bSrc.Close(context.Background()) })
 
 	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}

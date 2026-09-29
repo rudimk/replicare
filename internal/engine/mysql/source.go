@@ -28,8 +28,10 @@ type Source struct {
 var _ engine.Source = (*Source)(nil)
 
 // EnableClusterReads implements engine.ClusterReadSource: it switches this Source's
-// re-read to the version-aware variant for a cluster edge.
-func (s *Source) EnableClusterReads() { s.cluster = true }
+// re-read to the version-aware variant for a cluster edge. nodeID is accepted for
+// interface symmetry and ignored: the MySQL version register records each row's origin
+// inline, stamped by the capture trigger.
+func (s *Source) EnableClusterReads(string) { s.cluster = true }
 
 var _ engine.ClusterReadSource = (*Source)(nil)
 

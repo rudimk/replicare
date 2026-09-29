@@ -16,8 +16,15 @@ func compileSelection(sel engine.Selection) *selection {
 }
 
 // match reports whether a key is selected: it matches some include (or include is
-// empty) and matches no exclude.
+// empty) and matches no exclude. The reserved metadata namespace (metaPrefix, MM6) is
+// NEVER selected, so the mesh version register is invisible to every data operation —
+// initial copy, verify/status counts and fingerprints, reconciliation, and the delete
+// sweep — in one place. The prefix is a control-char namespace no ordinary user key
+// uses, so this is a no-op for one-way syncs.
 func (s *selection) match(key string) bool {
+	if isMetaKey(key) {
+		return false
+	}
 	for _, ex := range s.exclude {
 		if globMatch(ex, key) {
 			return false
