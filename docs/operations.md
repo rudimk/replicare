@@ -415,7 +415,7 @@ explicitly with `+restore`, or every apply fails loud. See [the Redis engine pag
 
 ## Load & convergence testing
 
-Two manual load-and-verify harnesses drive replicare against broad, high-volume, realistic data and
+Three manual load-and-verify harnesses drive replicare against broad, high-volume, realistic data and
 assert the target **converges** with the source under continuous churn. They are developer/test
 tools, run from a checkout (`go run ./test/…`), **not** part of the shipped binary:
 
@@ -423,12 +423,20 @@ tools, run from a checkout (`go run ./test/…`), **not** part of the shipped bi
   exercise the hard paths (FK components, composite/UUID/text PKs, PK-changing `SKU` renames,
   `GENERATED` columns, a keyless table it must skip; optional FK cycles under `--cyclic`), churns
   random inserts/updates/deletes, and `verify`s per-table row-count + ordered content checksum.
+- **MySQL** — [`test/loadgen-mysql`](../test/loadgen-mysql/README.md). The MySQL sibling of the
+  Postgres harness: the same 10-table schema in MySQL types (`AUTO_INCREMENT`, `JSON`, composite
+  `VARCHAR` PK, `GENERATED … STORED`, a keyless table), generated with **MySQL-5.7-safe** SQL (no
+  `generate_series`/CTE/window functions), churned the same way, and `verify`d with a cross-version,
+  order-independent content checksum (`BIT_XOR`-folded per-row hashes).
 - **Redis** — [`test/loadgen-redis`](../test/loadgen-redis/README.md). Seeds every value type
   (string/hash/list/set/zset/stream + big/TTL'd keys) plus a source-only `lgskip:*` cohort the sync
   must exclude, churns value mutations, `RENAME`s, and heavy `DEL`s (the delete-reconciliation
   stress), and `verify`s a version-independent, type-aware content hash + TTL presence. Standalone,
   sentinel, and cluster.
 
-Each README documents the full end-to-end rig (two databases, a Postgres state store, a config, the
-daemon, and a churn-and-verify loop). `task loadgen:*` and `task loadgen-redis:*` are the shortcuts.
-These are distinct from the automated Go suite (`task test:integration`).
+All three support **active-active** load testing via `--node-id` (each writer node claims a disjoint
+key slice so a mesh converges to the clean union); `--node-id 0` is the default single-writer
+(active-passive) behaviour. Each README documents the full end-to-end rig (two databases, a Postgres
+state store, a config, the daemon, and a churn-and-verify loop) and the active-active workflow.
+`task loadgen:*`, `task loadgen-mysql:*`, and `task loadgen-redis:*` are the shortcuts. These are
+distinct from the automated Go suite (`task test:integration`).

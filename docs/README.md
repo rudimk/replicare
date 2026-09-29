@@ -43,7 +43,8 @@ runs a Postgres and a Redis pipeline together is
 [`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
 
 Load-and-verify harnesses that drive high-volume churn and assert the target
-converges live in [`../test/loadgen`](../test/loadgen/README.md) (Postgres) and
+converges live in [`../test/loadgen`](../test/loadgen/README.md) (Postgres),
+[`../test/loadgen-mysql`](../test/loadgen-mysql/README.md) (MySQL), and
 [`../test/loadgen-redis`](../test/loadgen-redis/README.md) (Redis); see
 [Operations → Load & convergence testing](operations.md#load--convergence-testing).
 
