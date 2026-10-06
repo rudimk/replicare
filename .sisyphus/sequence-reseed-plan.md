@@ -5,7 +5,9 @@
 > transport: the **sequence / identity counter** (`last_value` / `AUTO_INCREMENT`) is not
 > replicated, only the column *values* are. This plan scopes the fix for **passive
 > (one-way / DR)** replication, documents **why the same fix is unsafe for active-active**,
-> and records the active-active problem as explicitly unsolved (to be designed later).
+> and records the **decided** active-active direction: **globally-unique keys (UUID v7 /
+> ULID) are the blessed id strategy** (documented in the repo docs), with replicare's mesh
+> obligation limited to **pre-flight policing** — not counter-syncing, not allocation (§6).
 >
 > Companion reading: `CLAUDE.md` §7 (data-only), §4.2 (identity columns / `OVERRIDING
 > SYSTEM VALUE`), §12 (privileges); `docs/multi-master.md` (the mesh);
@@ -48,8 +50,12 @@ low-privilege, read-only until invoked.
 
 **Explicitly out of scope — active-active:** the same operation is **silently
 destructive** in a mesh (§5). The command therefore **must refuse to run against a
-cluster-member node**, and the active-active sequence problem is left **unsolved and
-documented** (§6), to be designed in a later plan.
+cluster-member node**. The active-active id-allocation problem is **decided, not built
+here**: the blessed strategy is **globally-unique keys (UUID v7 / ULID)**, documented in
+the repo docs (§6); replicare's only mesh-side code obligation is **pre-flight policing**
+(refuse/warn on locally-allocated unique keys in a mesh). Transparent integer-PK
+auto-config is an optional, lower-priority fallback for owners who can't change their
+schema, deferred to a later plan.
 
 **Non-goal:** replicare does **not** become an id allocator, and does **not** replicate
 DDL. Reseed only advances an existing counter.
@@ -155,6 +161,17 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
   a loud "active-active: NOT this command — see below" cross-link.
 - **M5 (fast-follow, optional) — continuous `sync_sequences`.** The lazy-interval sync knob,
   one-way only, same refusal on a mesh.
+- **M6 (active-active docs — near-term, after the owner's chat with the consuming team) —**
+  repo docs (`docs/multi-master.md`, cross-linked from `docs/operations.md`): **UUID v7 / ULID
+  (stored binary) is the blessed active-active id strategy**, with the §6.0 fine print
+  (allocation-not-conflict-resolution, the migration cost, v7/ULID-over-v4, and *all* unique
+  keys not just the PK). This is the active-active deliverable the owner asked to document;
+  no code.
+- **M7 (active-active guardrail — code, follows M6) —** mesh **pre-flight policing** (§6.1):
+  refuse/warn when a `clusters:` mesh has a replicated table with a locally-allocated integer
+  PK **or secondary unique key** and no declared collision-free scheme; flag `int4`.
+  Introspection-only, low-privilege; the refusal logic is pure + CI-testable. The transparent
+  integer-PK auto-config (§6.3) stays a **separate later plan**.
 
 CI stays Postgres-only; the write path's end-to-end check is a **local gate** (PG + MySQL
 harnesses), matching the repo's existing posture. M3's refusal logic is pure and CI-tested.
@@ -180,7 +197,50 @@ This is why M3's refusal is not optional hardening — it is a correctness requi
 
 ---
 
-## 6. The active-active gap (unsolved — to be designed later)
+## 6. Active-active — the decided strategy: globally-unique keys
+
+**Decision (owner-set): the blessed active-active id strategy is globally-unique keys —
+UUID v7 / ULID — documented in the repo docs; replicare builds only the pre-flight
+guardrail, not an allocator.** Rationale below. The transparent integer-PK auto-config
+(§6.3) is an optional fallback for schemas that can't move to UUIDs, deferred to a later
+plan.
+
+### 6.0 Why UUID/ULID is the answer, and its fine print
+
+UUID/ULID PKs dissolve the id-allocation problem in one move: every node mints its own
+globally-unique keys with **zero coordination** — no sequence to sync, no windows, no
+interleave, no engine asymmetry (§6.3), and **nothing for replicare to build** (faithful
+transport already moves a UUID verbatim). Id allocation is upstream of replication, and
+UUIDs put the fix exactly there, keeping replicare a pure replicator.
+
+Fine print to carry into the docs so we don't oversell:
+- **It solves *allocation*, not *conflict resolution*.** UUIDs guarantee two nodes never
+  mint the same key for *different* rows; concurrent updates to the *same* row are still
+  HLC-LWW's job. UUIDs retire one of the two mesh hazards, not both.
+- **It's a schema migration** — "one go" conceptually, but on a live system it means every
+  surrogate-int PK → UUID, every referencing FK, reindex, and app code that assumes integer
+  ids. Greenfield: trivial. Production: a real project.
+- **Use time-ordered UUID v7 / ULID, stored binary** (`uuid` on PG; `BINARY(16)` via
+  `UUID_TO_BIN(…,1)` on MySQL) — random v4 as a PK scatters inserts (on MySQL InnoDB the PK
+  *is* the clustered index → page splits / write amplification); v7/ULID restore insert
+  locality and binary storage halves the width of the text form.
+- **It must cover *every* locally-allocated unique value, not just the PK.** A secondary
+  `UNIQUE` column fed by a sequence (e.g. a human-facing `order_number`) still collides
+  across nodes even with a UUID PK — so the pre-flight guardrail checks **all unique keys**,
+  and "we use UUIDs" has to mean every locally-allocated unique value.
+
+### 6.1 replicare's mesh obligation: pre-flight policing (the only thing we build)
+
+At mesh start, introspect every replicated table's **primary key and every unique key**.
+Classify each locally-allocated integer key (serial / identity / `AUTO_INCREMENT`):
+- With a declared/validated collision-free scheme in place → allow.
+- Otherwise → **refuse to start, loudly**, naming the offending table/column and pointing at
+  the UUID guidance (narrow `int4` keys flagged especially). This converts the silent
+  data-loss setup (§5) into a loud startup refusal — the §4.2 "block-on-incompatible"
+  philosophy. Pure introspection, low-privilege. **This is the whole active-active code
+  deliverable for now.**
+
+### 6.2 Background — why counter-syncing can't work, and what real DBs do
 
 **Counter-syncing is fundamentally the wrong tool for a mesh.** Concurrent multi-writer + a
 single shared contiguous integer sequence + no coordination is impossible — pick two. Every
@@ -202,26 +262,34 @@ syncs counters. The three real families:
 **The architectural truth:** replicare cannot solve this in the replication layer, because
 **id allocation happens upstream** — the source DB assigns the PK before capture ever sees
 the row. replicare can replicate it, LWW-resolve a *value* conflict on it, and police the
-chosen strategy; it cannot retroactively de-collide two independently-minted ids.
+chosen strategy; it cannot retroactively de-collide two independently-minted ids. That is
+exactly why the blessed answer (§6.0) pushes allocation to the schema layer (UUIDs), where
+it belongs.
 
-**What replicare will likely offer (future plan, not this one):**
-- **Mesh pre-flight verify/police:** refuse to start a mesh whose replicated tables have
-  locally-allocated integer PKs with no collision-free scheme in place (and flag narrow
-  `int4` PKs, which exhaust a range-partitioned window). Fits the §4.2 pre-flight
-  "block-on-incompatible" philosophy.
-- **Opt-in window assignment** at capture-install: set each node's sequence /
-  `AUTO_INCREMENT` base to a disjoint window from the `clusters:` node index (range
-  partitioning — the scheme our own `test/loadgen*` `--node-id` already uses). Range over
-  residue because it needs only per-sequence `ALTER` on both engines (no MySQL global
-  `auto_increment_*` / `SYSTEM_VARIABLES_ADMIN`) and is add-a-node-friendly.
-- **Documented zero-config escape hatch:** UUID/ULID/snowflake PKs need none of the above.
-- A mesh-aware "next free slot in *this node's* window" repair would be a **different**
-  tool from the DR reseed (per-partition, never global `max(id)+1`).
+### 6.3 Deferred fallback — transparent integer-PK auto-config (later plan, lower priority)
 
-**Open questions deferred to that plan:** window stride sizing vs `bigint` headroom vs node
-count/throughput; verify-refuse vs warn; whether to auto-configure or only police;
-`int4`-PK handling; and whether coordinated block allocation ("replicare as id authority")
-is ever in scope.
+For owners who genuinely cannot move to UUIDs, a later plan may add opt-in window assignment
+— with a stark engine asymmetry that makes it PG-only in practice:
+- **Postgres — works.** A sequence is a separate object from the table; peer rows arrive via
+  explicit-id inserts (`OVERRIDING SYSTEM VALUE`) that **do not advance the sequence**, so
+  setting node *n*'s sequence to `RESTART WITH n·stride` holds and `nextval` stays
+  node-disjoint, transparently to the app. Needs only per-sequence `ALTER` (grantable, no
+  superuser). Range over residue because it's add-a-node-friendly.
+- **MySQL — doesn't.** `AUTO_INCREMENT` is per-table and monotonic-only, and every node holds
+  the union, so the counter **floats up to the global max** and can't be pinned to a low
+  window; `ALTER TABLE … AUTO_INCREMENT = <low>` is clamped. The only scheme that survives is
+  **residue** (`auto_increment_increment`/`offset`) — session/global server vars set on the
+  *app's* connections or globally (`SYSTEM_VARIABLES_ADMIN`, server-wide), neither of which
+  replicare controls. So MySQL is **police-only**: verify the vars are set disjointly for
+  this node, else refuse/warn; the operator (or app) sets them.
+- A mesh-aware "next free slot in *this node's* window" repair would be a **different** tool
+  from the DR reseed (per-partition, never global `max(id)+1`).
+
+**Open questions for that deferred plan:** window stride sizing vs `bigint` headroom vs node
+count/throughput; verify-refuse vs warn; whether replicare may `ALTER` user sequences on PG
+(it touches user-owned objects — explicit opt-in + documented grant); `int4`-PK handling;
+and whether coordinated block allocation ("replicare as id authority," which would put it in
+the app's write path) is ever in scope (tentatively: no).
 
 ---
 
@@ -237,5 +305,6 @@ is ever in scope.
 | Runbook | Reseed **before** opening the promoted node to writes. |
 | **Mesh guard** | `reseed-sequences` **refuses on a cluster-member node**, loudly (M3). No override in v1. The same `max(id)+1` is silent data loss in a mesh (§5). |
 | Continuous sync | Optional one-way `sync_sequences: true` fast-follow; promotion-time reseed remains the guarantee. |
-| Active-active | **Unsolved here.** Counter-syncing is unsound; the answer is disjoint allocation (interleave/range) or globally-unique keys (snowflake/UUID), designed in a later plan. replicare polices/assigns windows; never allocates. |
+| Active-active | **Decided: globally-unique keys (UUID v7 / ULID, stored binary) are the blessed strategy**, documented in the repo docs (M6). replicare's only near-term code is **pre-flight policing** of all locally-allocated unique keys (M7); it never allocates or syncs counters. Counter-syncing is unsound (§6.2); transparent integer-PK auto-config is a PG-only, deferred fallback (§6.3 — MySQL `AUTO_INCREMENT` can't be pinned, so police-only there). |
+| UUID fine print | Solves *allocation*, not conflict resolution (HLC-LWW still runs); it's a schema migration; prefer v7/ULID stored binary over random v4; must cover **every** locally-allocated unique value, not just the PK. |
 | CI vs local | M3 refusal logic is pure + CI-tested; the write path is a **local gate** (PG+MySQL harnesses). CI stays Postgres-only. |
