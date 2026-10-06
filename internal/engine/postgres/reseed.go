@@ -30,16 +30,21 @@ func (s *Sink) ReseedSequences(ctx context.Context, t engine.TableRef, dryRun bo
 	// Owned sequences for the table, covering BOTH `serial` defaults and
 	// `GENERATED … AS IDENTITY` (pg_get_serial_sequence resolves both; a column with no
 	// owned sequence — UUID/natural/composite PK — returns NULL and is excluded).
+	// $1 is the already-quoted schema.table (pg_get_serial_sequence parses it as a
+	// regclass-like name); the ::text casts pin every parameter's type so Postgres never
+	// fails with "could not determine data type of parameter" (SQLSTATE 42P08) — the
+	// params feed only functions/comparisons whose argument type it won't infer alone.
+	qualified := quoteIdentifier(schema) + "." + quoteIdentifier(t.Name)
 	rows, err := s.conn.Query(ctx, `
 		SELECT a.attname,
-		       pg_get_serial_sequence(format('%I.%I', $1, $2), a.attname)
+		       pg_get_serial_sequence($1::text, a.attname)
 		FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2
+		WHERE n.nspname = $2::text AND c.relname = $3::text
 		  AND a.attnum > 0 AND NOT a.attisdropped
-		  AND pg_get_serial_sequence(format('%I.%I', $1, $2), a.attname) IS NOT NULL
-		ORDER BY a.attnum`, schema, t.Name)
+		  AND pg_get_serial_sequence($1::text, a.attname) IS NOT NULL
+		ORDER BY a.attnum`, qualified, schema, t.Name)
 	if err != nil {
 		return res, fmt.Errorf("postgres: discover sequences for %s: %w", t, err)
 	}
