@@ -352,6 +352,42 @@ This flags the target in the state store; the running daemon re-copies it on its
 resumes streaming. It signals the owning daemon rather than acting directly, honoring single-active
 ownership.
 
+## Sequences & identity counters (DR / promotion)
+
+replicare replicates row **values** faithfully — the integer `id` a sequence produced lands on the
+target verbatim (`OVERRIDING SYSTEM VALUE` on Postgres, the explicit value on MySQL). What it does
+**not** replicate is the sequence *object's counter* — Postgres `last_value`, MySQL's per-table
+`AUTO_INCREMENT` — because that is schema-object state and replicare is data-only (`CLAUDE.md` §7).
+
+For a **passive replica this is harmless**: the target never calls `nextval()` for a replicated
+table (the applier always supplies explicit ids), so the stale counter just sits unused. It bites
+only when the target starts **generating** ids — i.e. a **DR promotion / failover**: the app inserts,
+`nextval()` returns a value at or near 1, and it collides with the replicated rows at id `1..N`.
+
+Before you open a promoted node to application writes, advance its counters past the data:
+
+```sh
+replicare reseed-sequences <config> --sync <name> [--target <name>] [--dry-run]
+```
+
+For every replicated table it sets the owned identity/serial/`AUTO_INCREMENT` counter to `max(id)+1`
+on that target (`--dry-run` reports what it *would* set, writing nothing). Tables with no
+locally-allocated counter (UUID / natural / composite PK) are skipped.
+
+- **Order matters:** run it **after** replication into the node has stopped and **before** the app
+  can write — a write in that gap could still grab a colliding id.
+- **Why `max(id)+1`, not the source's `last_value`:** the promoted node's data *is* the replicated
+  rows, so `max(id)+1` can't collide; any ids the source allocated beyond its max (gaps, or rows lost
+  in the DR window) belong to rows that aren't present, so re-issuing them is harmless.
+- **Privilege:** this needs a grant beyond the DML set — Postgres `UPDATE` on the sequence, MySQL
+  `ALTER` on the table (see [Least-privilege grants](#least-privilege-grants)). A missing grant fails
+  loudly; the command reads only the target's own `max(id)` and never touches the source.
+- **PASSIVE / one-way / DR ONLY.** `reseed-sequences` **refuses** a target that is an active-active
+  cluster member: there the same `max(id)+1` would collapse every node onto the same counter and
+  silently drop rows via last-write-wins. Active-active id allocation is a schema concern — use
+  **globally-unique keys (UUID v7 / ULID)**; see [multi-master](multi-master.md). (Not the same as
+  `reseed`, which re-copies a target's *data*.)
+
 ## Runtime type errors
 
 If the target rejects a value (type/constraint), replicare **halts the affected component loudly**
@@ -412,6 +448,11 @@ and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The sour
 server`), and in **cluster** mode both also need `+cluster|shards +cluster|slots` and the same user
 granted on **every master**. Watch the foot-gun: `RESTORE` is `@dangerous` and must be granted
 explicitly with `+restore`, or every apply fails loud. See [the Redis engine page](redis.md).
+
+**`reseed-sequences` needs one extra target grant** beyond the DML set, and only on the node you run
+it against (a DR promotion step): Postgres `UPDATE` on each replicated table's owned sequence (or
+ownership of it); MySQL `ALTER` on each replicated table. It reads only the target's own `max(id)` —
+no source privilege. Grant it as part of the failover runbook, not the steady-state role.
 
 ## Load & convergence testing
 

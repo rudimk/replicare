@@ -332,6 +332,45 @@ type Verifier interface {
 	Fingerprint(ctx context.Context, t TableRef, cols []string) (Fingerprint, error)
 }
 
+// SequenceColumnReseed is one owned identity/serial/AUTO_INCREMENT column's reseed
+// outcome: the current max value present on the endpoint and the next value the counter
+// was (or, in dry-run, would be) set to issue — always Max+1 (or 1 for an empty table).
+type SequenceColumnReseed struct {
+	Column string
+	Max    int64 // current MAX(column) on this endpoint; 0 when the table is empty
+	SetTo  int64 // the NEXT value the counter will issue after the reseed (Max+1, or 1)
+}
+
+// SequenceReseedResult is one table's reseed outcome. Columns is empty when the table
+// has no locally-allocated counter to advance (a UUID / natural / composite PK, or no
+// identity/AUTO_INCREMENT column) — i.e. nothing to do, not an error.
+type SequenceReseedResult struct {
+	Table   TableRef
+	Columns []SequenceColumnReseed
+}
+
+// SequenceReseeder is an OPTIONAL Sink capability powering `replicare reseed-sequences`:
+// it advances each replicated table's identity/serial/AUTO_INCREMENT counter on a
+// PROMOTED one-way target to MAX(id)+1, so after a DR cutover the node never re-issues an
+// id that already exists in the replicated data (the counter itself is schema-object
+// state the data-only path never carries — CLAUDE.md §7). An engine that does not
+// implement it reports reseed as unsupported.
+//
+// It is for PASSIVE / one-way / DR targets ONLY. Running it against an active-active mesh
+// member is silent data loss (every node collapses onto the same counter → concurrent
+// nextval collides → HLC-LWW drops rows); the CLI therefore REFUSES to invoke it when the
+// target is a cluster member (`.sisyphus/sequence-reseed-plan.md` §5). The capability
+// trusts the caller to have made that check.
+type SequenceReseeder interface {
+	// ReseedSequences advances every owned identity/serial/AUTO_INCREMENT counter on
+	// table t to MAX(col)+1 on THIS endpoint (next issued value = Max+1, or 1 when
+	// empty). With dryRun true it reads MAX and reports the target value but writes
+	// nothing. A table with no locally-allocated counter returns an empty Columns slice.
+	// Needs a write grant the DML set lacks (PG UPDATE on the sequence / MySQL ALTER on
+	// the table); a missing grant surfaces as a loud error.
+	ReseedSequences(ctx context.Context, t TableRef, dryRun bool) (SequenceReseedResult, error)
+}
+
 // CyclicComponentCopier is an OPTIONAL Sink capability: an engine that needs an
 // engine-specific strategy to INITIALLY COPY an FK component containing a cycle or
 // self-reference (Postgres/MySQL trigger CDC — the plain parents-first chunked copy

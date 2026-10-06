@@ -39,6 +39,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return runCapture(args[1:], stdout, stderr)
 	case "reseed":
 		return runReseed(args[1:], stdout, stderr)
+	case "reseed-sequences":
+		return runReseedSequences(args[1:], stdout, stderr)
 	case "help", "--help", "-h":
 		usage(stdout)
 		return 0
@@ -63,6 +65,7 @@ Commands:
   verify <config>       Read-only source<->target convergence spot-check
   capture ... <config>  Install or remove source-side CDC capture
   reseed <config>       Flag a target for re-copy (--sync, --target)
+  reseed-sequences <config>  Advance a PASSIVE/DR target's identity/sequence counters to max(id)+1 (--sync, --target, --dry-run)
   help                  Show this help
 `)
 }
