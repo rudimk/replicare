@@ -151,6 +151,38 @@ If the target has **no cursors yet** (you ran `reseed` before the sync's first
 run), there is nothing to flag: replicare reports that the target will full-copy on
 its first run anyway and exits `0`. That is expected, not a failure.
 
+## `reseed-sequences <config> --sync <name> [--target <name>] [--dry-run]`
+
+```sh
+replicare reseed-sequences config.yml --sync app-to-warehouse            # all targets of the sync
+replicare reseed-sequences config.yml --sync app-to-warehouse --target warehouse
+replicare reseed-sequences config.yml --sync app-to-warehouse --dry-run  # report, write nothing
+```
+
+Advances each replicated table's owned identity/serial/`AUTO_INCREMENT` counter on a
+**promoted one-way (DR) target** to `max(id)+1`, so after a failover cutover the node
+never re-issues an id already present in the replicated data. replicare replicates row
+*values* faithfully but not the sequence *object's* counter (data-only, `CLAUDE.md`
+§7); for a passive replica that is harmless, but a promoted node's `nextval()` would
+collide with the copied rows. Postgres uses `setval`, MySQL `ALTER TABLE …
+AUTO_INCREMENT`. Tables with no owned counter (UUID / natural / composite PK) are
+skipped; `--dry-run` reports the target values and writes nothing.
+
+- **Not the same as `reseed`.** `reseed` re-copies a target's *data*; `reseed-sequences`
+  only bumps its sequence counters.
+- **Run order:** stop replication into the node, run this, *then* open it to writes — a
+  write in the gap could still grab a colliding id.
+- **Passive / one-way / DR only.** It **refuses** a target that is an active-active
+  cluster member: there the same `max(id)+1` collapses every node onto one counter and
+  silently drops rows via last-write-wins. Active-active id allocation is a schema
+  concern — use globally-unique keys (UUID v7 / ULID); see
+  [multi-master](multi-master.md).
+- **Privilege:** a DR-only grant beyond the DML set — Postgres `UPDATE` on each
+  sequence, MySQL `ALTER` on each table (reads only the target's own `max(id)`; no
+  source privilege). See [operations → Sequences & identity counters](operations.md#sequences--identity-counters-dr--promotion).
+- **Exit codes:** `0` done; `1` runtime error (unreachable / missing grant / engine
+  without the capability); `2` usage/config, or a refused mesh target.
+
 ## Signals
 
 `run` responds to:

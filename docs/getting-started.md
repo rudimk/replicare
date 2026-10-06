@@ -152,10 +152,13 @@ replicare run config.yml               # start replicating (Ctrl-C / SIGTERM to 
 findings (incompatible/missing types) before running. Once running, check
 progress any time with `replicare status config.yml`.
 
-Two more commands you'll reach for later: **`replicare capture install|remove`** to
-pre-provision (or tear down) the source-side trigger capture out of band, and
+A few more commands you'll reach for later: **`replicare capture install|remove`** to
+pre-provision (or tear down) the source-side trigger capture out of band,
 **`replicare reseed --sync <s> --target <t>`** to force a laggard or diverged target
-to re-copy. See the [CLI reference](cli.md).
+to re-copy its *data*, and — when you **promote a one-way (DR) target** —
+**`replicare reseed-sequences --sync <s>`** to advance its identity/sequence counters to
+`max(id)+1` before it takes writes (otherwise `nextval()` collides with the copied rows;
+passive/DR only — it refuses an active-active mesh). See the [CLI reference](cli.md).
 
 ### 5. Deploy
 
