@@ -696,6 +696,14 @@ without changing the single-static-binary distribution.
 
 **Target (Postgres):**
 - `SELECT, INSERT, UPDATE, DELETE` on the (pre-existing) target tables.
+- **DR extra (only for `reseed-sequences`, not steady-state):** `UPDATE` on each replicated table's
+  owned sequence (or ownership). The counter (sequence `last_value` / MySQL `AUTO_INCREMENT`) is
+  schema-object state the data-only path does not replicate (§7), so a promoted one-way target must
+  reseed its counters to `max(id)+1` before taking writes or `nextval()` collides with replicated
+  rows. `reseed-sequences` is **passive/DR only** and refuses an active-active cluster member (there
+  the fix is globally-unique keys, UUID v7 / ULID, not reseeding). MySQL target equivalent: `ALTER`
+  on each replicated table. Reads only the target's own `max(id)`; needs no source privilege. See
+  `.sisyphus/sequence-reseed-plan.md` and `docs/operations.md` → "Sequences & identity counters".
 
 **Redis (6+ ACL, no admin — presets in `deploy/acl-source-redis.txt` / `acl-target-redis.txt`):**
 - **Source:** `SCAN`, `DUMP`, `PTTL`, `EXISTS`, `TYPE`, `MEMORY USAGE`, `INFO` (+ `CLUSTER SHARDS/SLOTS`
@@ -774,6 +782,7 @@ invasive.
 | Config model | **Neutral envelope + typed per-engine block, registry-dispatched** (§11). Each engine owns/validates its connection, selection, and CDC tuning. v1: Postgres block only; MySQL/Redis are extension points. |
 | Per-pipeline pause | Optional neutral **`enabled: true\|false`** on each `sync`/`cluster` (unset = enabled, pure opt-out). `false` = daemon skips it at startup (no ownership lock); source capture left installed so unpause+restart drains the backlog (data-loss-free), but source deltas grow + retention is paused while off. Start-time only (config change + restart). **Zero active syncs → daemon idles (does NOT exit), so a fully-paused config never CrashLoops; `status` shows `[PAUSED]`.** See §11. |
 | Schema | **Target pre-exists; data-only; no live DDL** (v1). |
+| Sequence/identity counters | Row **values** (incl. identity ids) replicate faithfully; the sequence **counter** (`last_value` / `AUTO_INCREMENT`) does **not** (data-only, §7). Harmless for a passive replica; on **DR promotion** `nextval()` would collide, so **`replicare reseed-sequences`** advances each replicated table's counter to `max(id)+1` on the promoted target (PG `setval`, MySQL `ALTER … AUTO_INCREMENT`; needs a DR-only sequence `UPDATE`/table `ALTER` grant). **Passive/one-way/DR ONLY** — it refuses an active-active mesh member (same op there = silent LWW data loss). **Active-active id allocation = globally-unique keys (UUID v7 / ULID)**, never counter-syncing; replicare polices, never allocates. See `.sisyphus/sequence-reseed-plan.md`. |
 | Process model | **Single daemon, many syncs, goroutine worker pools.** |
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
