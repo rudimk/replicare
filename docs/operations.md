@@ -391,7 +391,7 @@ locally-allocated counter (UUID / natural / composite PK) are skipped.
 - **PASSIVE / one-way / DR ONLY.** `reseed-sequences` **refuses** a target that is an active-active
   cluster member: there the same `max(id)+1` would collapse every node onto the same counter and
   silently drop rows via last-write-wins. Active-active id allocation is a schema concern — use
-  **globally-unique keys (UUID v7 / ULID)**; see [multi-master](multi-master.md). (Not the same as
+  **globally-unique keys (UUID v7 / ULID)**; see [multi-master → active-active id allocation](multi-master.md#56-active-active-id-allocation--globally-unique-keys). (Not the same as
   `reseed`, which re-copies a target's *data*.)
 
 ### Keeping counters warm continuously (`sync_sequences`)
