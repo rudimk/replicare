@@ -368,8 +368,9 @@ same-version DUMP-hash fast path is a documented future optimization.
 Conflict resolution (§5.3) decides which value wins when two nodes write the **same** key.
 It says nothing about how two nodes avoid minting the **same key for different rows** in
 the first place — that is a separate, upstream problem, and in a mesh it is **the user's
-schema's job, not replicare's**. This section is the decided guidance; the next milestone
-adds a pre-flight guardrail that enforces it (§6.3).
+schema's job, not replicare's**. This section is the decided guidance; a pre-flight
+guardrail enforces it (§6.3 item 3 — replicare refuses to bring up a mesh member whose
+replicated tables use a locally-allocated integer key).
 
 **The blessed strategy: globally-unique keys — UUID v7 / ULID.** Every node mints its own
 keys with **zero coordination** — no sequence to sync, no node windows, no interleave, no
@@ -510,16 +511,25 @@ Notes:
    syncs (`A→B` + `B→A`, or a ring) not part of a `clusters:` block. Closes the
    silent-corruption footgun in §4, worth doing **independently**. It only *adds* a
    rejection for a config already broken today, so no valid one-way config is affected.
-3. **Mesh id-allocation policing (planned — M7, introspection-based pre-flight).** At mesh
-   start, introspect every replicated table's **primary key and every unique key** and
-   classify each locally-allocated integer key (serial / identity / `AUTO_INCREMENT`). With
-   a declared, collision-free scheme in place → allow; otherwise → **refuse to start,
-   loudly**, naming the offending table/column and pointing at the UUID/ULID guidance
-   (§5.6), with narrow `int4` keys flagged especially. This converts the silent data-loss
-   setup (§5.6) into a loud startup refusal — the same "block on incompatible" philosophy as
-   the type pre-flight (`CLAUDE.md` §4.2). Pure introspection, low-privilege, and the
-   classification logic is pure → CI-testable. This is the whole active-active id-allocation
-   *code* deliverable; replicare polices the strategy, it never allocates or syncs counters.
+3. **Mesh id-allocation policing (SHIPPED — introspection-based pre-flight).** At cluster
+   bring-up, replicare introspects every replicated table's **primary key and every unique
+   key** and classifies each locally-allocated integer key (serial / identity /
+   `AUTO_INCREMENT`). A key that is **not** locally DB-allocated — a UUID/text/natural key,
+   or an app-assigned globally-unique integer where the DB does not generate the value — is
+   allowed (those *are* the collision-free schemes). A locally-allocated **integer** PK or
+   secondary unique key → **refuse to start, loudly**, naming the offending table/column and
+   pointing at the UUID/ULID guidance (§5.6), with narrow (32-bit-or-smaller) keys flagged
+   especially. This converts the silent data-loss setup (§5.6) into a loud startup refusal —
+   the same "block on incompatible" philosophy as the type pre-flight (`CLAUDE.md` §4.2). The
+   classifier is **pure** over the introspected schema (`engine.MeshIDAllocationFindings`,
+   `internal/engine/preflight_mesh.go`) → engine-neutral and CI-tested; the daemon runs it
+   only on a cluster edge (`internal/daemon/build.go`), so one-way syncs are unaffected.
+   Postgres `serial` (a plain int with a `nextval(…)` default, not reported as identity) is
+   caught via a dedicated `Column.DefaultSequence` introspection flag, kept distinct from
+   `Identity` so the apply path's `OVERRIDING SYSTEM VALUE` is unchanged. This is the whole
+   active-active id-allocation *code* deliverable; replicare polices the strategy, it never
+   allocates or syncs counters. (`replicare validate` does not yet walk `clusters:`, so the
+   refusal currently surfaces at `run`/bring-up, not in `validate` — a documented follow-up.)
 
 ### 6.4 State-store & source-schema changes
 
@@ -583,6 +593,7 @@ compiles and runs exactly as before.
 | MM4 | **Postgres HLC-LWW** — version register + HLC, version-guarded apply, tombstones, GC | **Shipped** |
 | MM5 | **MySQL mesh** — mirror of MM3+MM4 for MySQL (`@replicare_apply` guard, inline HLC, version-guarded apply, GC) | **Shipped** |
 | MM6 | **Redis mesh** — metadata-keyspace version register, version-guarded Lua apply, tombstone deletes, age-based GC, slot co-location, config guard lifted (§5.4) | **Shipped** |
+| Id-alloc guardrail | **Pre-flight refusal** of a mesh member whose replicated tables use a locally-allocated integer PK/secondary-unique key — the §5.6 policing (§6.3 item 3), pure+CI-tested classifier run at cluster bring-up | **Shipped** |
 | MM7–MM11 | Cluster retention/reseed, HA, observability, E2E gate, release | Not started |
 
 **What works today (Postgres, MySQL, AND Redis):** define members under `nodes:`, group them

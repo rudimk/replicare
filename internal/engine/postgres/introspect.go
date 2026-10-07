@@ -141,12 +141,21 @@ func loadColumns(ctx context.Context, conn *pgx.Conn, version int, oids []int64,
 	if version >= pg100000 {
 		identity = "(a.attidentity IN ('a', 'd'))"
 	}
+	// Legacy serial/bigserial is a plain integer with a `DEFAULT nextval(...)` — it is
+	// NOT reported via attidentity, so detect the sequence-backed default separately
+	// (version-agnostic: pg_attrdef + pg_get_expr exist on all supported majors). Kept
+	// distinct from identity: the active-active id-allocation pre-flight treats both as
+	// "locally allocated", but the apply path emits OVERRIDING SYSTEM VALUE only for true
+	// identity columns (CLAUDE.md §6, §4.2).
 	q := fmt.Sprintf(`
 SELECT a.attrelid::bigint, a.attname,
        format_type(a.atttypid, a.atttypmod) AS data_type,
        (NOT a.attnotnull) AS nullable,
        %s AS generated,
-       %s AS identity
+       %s AS identity,
+       EXISTS (SELECT 1 FROM pg_attrdef ad
+               WHERE ad.adrelid = a.attrelid AND ad.adnum = a.attnum
+                 AND pg_get_expr(ad.adbin, ad.adrelid) LIKE 'nextval(%%') AS default_sequence
 FROM pg_attribute a
 WHERE a.attrelid = ANY($1::oid[])
   AND a.attnum > 0
@@ -162,7 +171,7 @@ ORDER BY a.attrelid, a.attnum`, generated, identity)
 	for rows.Next() {
 		var relid int64
 		var c engine.Column
-		if err := rows.Scan(&relid, &c.Name, &c.DataType, &c.Nullable, &c.Generated, &c.Identity); err != nil {
+		if err := rows.Scan(&relid, &c.Name, &c.DataType, &c.Nullable, &c.Generated, &c.Identity, &c.DefaultSequence); err != nil {
 			return fmt.Errorf("postgres: scan column: %w", err)
 		}
 		if t := byOID[relid]; t != nil {

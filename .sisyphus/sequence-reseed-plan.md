@@ -178,11 +178,18 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
   refusal and `sync_sequences`), the §6.2 why-counter-syncing-can't-work summary, and a forward
   pointer to the M7 guardrail. Cross-linked from `docs/operations.md` → Sequences section; the
   planned policing is seeded as `docs/multi-master.md` §6.3 item 3. No code.
-- **M7 (active-active guardrail — code, follows M6) —** mesh **pre-flight policing** (§6.1):
-  refuse/warn when a `clusters:` mesh has a replicated table with a locally-allocated integer
-  PK **or secondary unique key** and no declared collision-free scheme; flag `int4`.
-  Introspection-only, low-privilege; the refusal logic is pure + CI-testable. The transparent
-  integer-PK auto-config (§6.3) stays a **separate later plan**.
+- **M7 (active-active guardrail — code) — ✅ SHIPPED.** Mesh **pre-flight policing** (§6.1):
+  at cluster bring-up the daemon refuses to start a mesh member whose replicated tables use a
+  **locally-allocated integer PK or secondary unique key** (serial / identity /
+  `AUTO_INCREMENT`), pointing at the UUID/ULID guidance; narrow (32-bit) keys flagged
+  especially. App-assigned / UUID / natural keys pass (those are the collision-free schemes).
+  Pure, CI-tested classifier `engine.MeshIDAllocationFindings` (`internal/engine/preflight_mesh.go`)
+  over the introspected schema; wired into `internal/daemon/build.go` only on a cluster edge
+  (one-way unaffected). Postgres `serial` caught via a new `Column.DefaultSequence` introspection
+  flag (kept distinct from `Identity` so apply's `OVERRIDING SYSTEM VALUE` is unchanged). Docs:
+  `docs/multi-master.md` §5.6 + §6.3 item 3 + §8 status table. **Follow-up:** `replicare validate`
+  does not yet walk `clusters:`, so the refusal surfaces at `run`/bring-up, not in `validate`.
+  The transparent integer-PK auto-config (§6.3) stays a **separate later plan**.
 
 CI stays Postgres-only; the write path's end-to-end check is a **local gate** (PG + MySQL
 harnesses), matching the repo's existing posture. M3's refusal logic is pure and CI-tested.
