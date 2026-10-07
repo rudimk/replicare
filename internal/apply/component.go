@@ -158,6 +158,7 @@ func DrainComponentPool(ctx context.Context, pool []Conn, concurrency int,
 		if err := src.ConfirmConsumed(ctx, w.ref, target, w.ids); err != nil {
 			return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
 		}
+		recordApplied(ctx, w.ref, len(w.ids))
 	}
 	return total, nil
 }
@@ -244,6 +245,7 @@ func drainAcyclicSeq(ctx context.Context, c Conn, work []tableWork, target engin
 			return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
 		}
 		total += len(w.ids)
+		recordApplied(ctx, w.ref, len(w.ids))
 	}
 	return total, transient
 }
@@ -288,6 +290,7 @@ func drainAcyclicParallel(ctx context.Context, pool []Conn, work []tableWork, ta
 		mu.Lock()
 		total += len(work[i].ids)
 		mu.Unlock()
+		recordApplied(ctx, work[i].ref, len(work[i].ids))
 		return nil
 	})
 	for i, e := range e2 {
@@ -412,6 +415,7 @@ func drainCyclicNullFillSeq(ctx context.Context, c Conn, work []tableWork,
 				return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
 			}
 			total += len(w.ids)
+			recordApplied(ctx, w.ref, len(w.ids))
 		}
 	}
 	return total, transient
@@ -495,6 +499,7 @@ func drainCyclicNullFillParallel(ctx context.Context, pool []Conn, work []tableW
 				return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
 			}
 			total += len(w.ids)
+			recordApplied(ctx, w.ref, len(w.ids))
 		}
 	}
 	return total, transient

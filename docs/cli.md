@@ -58,9 +58,30 @@ replicare status config.yml --no-live          # state store only (no source/tar
 replicare status config.yml --watch 5s         # re-render every 5s until Ctrl-C
 ```
 
-Reports, per sync/target/table: phase (initial-copy vs streaming), lag (cursor
-age), needs-reseed flags, and recent events — read from the **state store**, so it
-works whether or not a daemon is running.
+Each sync prints a one-line **health headline** followed by a per-(table, target)
+grid, read from the **state store** (so it works whether or not a daemon is running):
+
+```
+sync: app-to-warehouse
+  streaming · last pass 2s ago · last applied 40s ago (1240 rows total) · backlog 0 (caught up)
+  TABLE           COPY  ...  SEEN  ...  LAST_SYNC   ROWS   RESEED
+  public.orders   done  ...  2s    ...  40s ago     1240   -
+```
+
+Two **different** time signals — the distinction that makes a caught-up sync legible:
+
+- **`SEEN`** — time since the last *healthy streaming pass* (a liveness heartbeat). The
+  daemon refreshes it every pass whether or not data moved, so a small `SEEN` means
+  "running and current"; a large `SEEN` means the daemon is stopped or stalled. (This
+  is what the old `LAG` column was, renamed — it was never "how far behind".)
+- **`LAST_SYNC` / `ROWS`** — time since the last pass that actually *applied rows* to
+  this (target, table), and how many it applied. A healthy, idle sync shows a recent
+  `SEEN` but a growing `LAST_SYNC` — that's normal (nothing to apply), not lag. `-`
+  until the first data-moving pass. (These come from the state store, so they show in
+  `--no-live` too.)
+
+The headline aggregates these across the sync: phase, most-recent `SEEN`, most-recent
+data movement + total rows applied, and (live) the backlog rollup.
 
 **Live by default.** Unless you pass `--no-live`, `status` also connects to the
 sync's source and targets to add signals that live only in the databases — the
@@ -69,10 +90,11 @@ visibility you'd otherwise get from Grafana:
 - **`SRC_ROWS` / `TGT_ROWS`** — live source and target row counts (Redis: key
   counts). During initial copy `TGT_ROWS` climbs toward `SRC_ROWS`; while streaming
   they track each other.
-- **`BACKLOG`** — the per-target unconsumed **delta backlog** as `rows (oldest-age)`
-  (`0` when caught up), the headline "how far behind is streaming / is the source
-  footprint healthy?" signal. Redis has no durable source-side queue, so it reports
-  `-`.
+- **`BACKLOG`** — the per-target unconsumed **delta backlog** as `rows (oldest-age)`.
+  It distinguishes three states: **`0`** = caught up (healthy — the common steady
+  state); **`N (age)`** = that many deltas waiting; **`-`** = *unknown*, not zero — the
+  signal couldn't be read (a table not captured, Redis's capture-less engine, or a
+  transient error), and a `live: partial (…)` note says why.
 
 Live collection is **best-effort and read-only** (it installs nothing): if the
 source or a target is unreachable, the row still renders from the state store and a

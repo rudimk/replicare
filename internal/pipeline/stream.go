@@ -66,6 +66,10 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// (typically a target that went away) does NOT short-circuit the pass: the
 	// retention enforcement below is source-side and must still run to protect a
 	// source we may not own while the target is down (CLAUDE.md §3.4).
+	// Install a pass-scoped accumulator so the drain records per-table confirmed-consumed
+	// counts (the "rows last synced" status signal) with no change to the drain itself.
+	ctx, readApplied := apply.WithAppliedCounts(ctx)
+
 	var drainErr error
 	var consumed int
 	drainStart := time.Now()
@@ -147,6 +151,9 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
 	s.refreshDBSizes(ctx)
 	s.touchCursors(ctx)
+	// Stamp the last-data-movement signal for any table this pass actually applied rows
+	// to (distinct from touchCursors' liveness bump). Reads the pass accumulator.
+	s.recordApplied(ctx, readApplied())
 
 	// Delete reconciliation (redis-plan §0.4): AFTER the drain, on a healthy pass
 	// (you cannot DEL on a down target). A no-op for capture-driven engines
@@ -191,6 +198,32 @@ func (s *Syncer) gcTombstones(ctx context.Context) {
 	for _, t := range s.Replicable {
 		if _, err := gc.GCTombstones(ctx, t); err != nil {
 			s.log(ctx, "tombstone GC error", err)
+		}
+	}
+}
+
+// recordApplied stamps the last-data-movement signal (last_applied_at + rows) on each
+// table that actually applied rows this pass, from the drain's per-table accumulator.
+// It targets only the last-applied columns, so it never disturbs the streaming cursor or
+// the liveness timestamp. A no-op if the StateStore does not implement the optional
+// recorder (keeps the core StateStore interface unchanged), and skips tables with 0 rows
+// so a caught-up table keeps its prior last-applied.
+func (s *Syncer) recordApplied(ctx context.Context, counts map[engine.TableRef]int) {
+	if len(counts) == 0 {
+		return
+	}
+	rec, ok := s.Store.(interface {
+		RecordApplied(context.Context, string, engine.TargetID, engine.TableRef, int64) error
+	})
+	if !ok {
+		return
+	}
+	for ref, n := range counts {
+		if n <= 0 {
+			continue
+		}
+		if err := rec.RecordApplied(ctx, s.Name, s.Target, ref, int64(n)); err != nil {
+			s.log(ctx, "record applied-rows", err)
 		}
 	}
 }

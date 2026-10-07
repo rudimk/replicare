@@ -45,7 +45,13 @@ type Cursor struct {
 	Phase       Phase
 	LastDelta   engine.DeltaID
 	NeedsReseed bool      // set when retention cap forces a reseed (CLAUDE.md §3.4)
-	UpdatedAt   time.Time // last cursor write (read-only; the lag/age signal)
+	UpdatedAt   time.Time // last cursor write — bumped EVERY healthy pass (liveness heartbeat)
+	// LastAppliedAt/Rows record the last streaming pass that actually MOVED data to this
+	// (target, table) and how many rows it applied — the "last successful sync / rows last
+	// synced" status signal, distinct from UpdatedAt. Zero/0 until the first data-moving
+	// pass. Read-only (set by RecordApplied, surfaced by status); not part of SaveCursor.
+	LastAppliedAt   time.Time
+	LastAppliedRows int64
 }
 
 // Phase is a table's lifecycle phase within a sync.

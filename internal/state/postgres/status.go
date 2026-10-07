@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/rudimk/replicare/internal/engine"
 	"github.com/rudimk/replicare/internal/state"
@@ -61,7 +62,8 @@ func (s *Store) ListCursors(ctx context.Context, sync string) ([]state.Cursor, e
 		return nil, err
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT target, schema_name, table_name, phase, last_delta, needs_reseed, updated_at
+		SELECT target, schema_name, table_name, phase, last_delta, needs_reseed, updated_at,
+		       last_applied_at, last_applied_rows
 		FROM replicare_state.cursors
 		WHERE sync = $1
 		ORDER BY target, schema_name, table_name`, sync)
@@ -73,17 +75,22 @@ func (s *Store) ListCursors(ctx context.Context, sync string) ([]state.Cursor, e
 	var out []state.Cursor
 	for rows.Next() {
 		var (
-			c         state.Cursor
-			target    string
-			phase     string
-			lastDelta int64
+			c             state.Cursor
+			target        string
+			phase         string
+			lastDelta     int64
+			lastAppliedAt *time.Time // NULL until the first data-moving pass
 		)
-		if err := rows.Scan(&target, &c.Table.Schema, &c.Table.Name, &phase, &lastDelta, &c.NeedsReseed, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&target, &c.Table.Schema, &c.Table.Name, &phase, &lastDelta, &c.NeedsReseed, &c.UpdatedAt,
+			&lastAppliedAt, &c.LastAppliedRows); err != nil {
 			return nil, fmt.Errorf("statepg: scan cursor: %w", err)
 		}
 		c.Target = engine.TargetID(target)
 		c.Phase = state.Phase(phase)
 		c.LastDelta = engine.DeltaID(lastDelta)
+		if lastAppliedAt != nil {
+			c.LastAppliedAt = *lastAppliedAt
+		}
 		out = append(out, c)
 	}
 	if err := rows.Err(); err != nil {

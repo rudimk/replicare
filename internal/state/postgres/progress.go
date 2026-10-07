@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -117,28 +118,56 @@ func (s *Store) LoadCursor(ctx context.Context, sync string, target engine.Targe
 		return state.Cursor{}, err
 	}
 	var (
-		phase       string
-		lastDelta   int64
-		needsReseed bool
+		phase           string
+		lastDelta       int64
+		needsReseed     bool
+		lastAppliedAt   *time.Time // NULL until the first data-moving pass
+		lastAppliedRows int64
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT phase, last_delta, needs_reseed
+		SELECT phase, last_delta, needs_reseed, last_applied_at, last_applied_rows
 		FROM replicare_state.cursors
 		WHERE sync = $1 AND target = $2 AND schema_name = $3 AND table_name = $4`,
-		sync, string(target), t.Schema, t.Name).Scan(&phase, &lastDelta, &needsReseed)
+		sync, string(target), t.Schema, t.Name).Scan(&phase, &lastDelta, &needsReseed, &lastAppliedAt, &lastAppliedRows)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return state.Cursor{Target: target, Table: t, Phase: state.PhaseInitialCopy}, nil
 	}
 	if err != nil {
 		return state.Cursor{}, fmt.Errorf("statepg: load cursor for %s/%s/%s: %w", sync, target, t, err)
 	}
-	return state.Cursor{
-		Target:      target,
-		Table:       t,
-		Phase:       state.Phase(phase),
-		LastDelta:   engine.DeltaID(lastDelta),
-		NeedsReseed: needsReseed,
-	}, nil
+	c := state.Cursor{
+		Target:          target,
+		Table:           t,
+		Phase:           state.Phase(phase),
+		LastDelta:       engine.DeltaID(lastDelta),
+		NeedsReseed:     needsReseed,
+		LastAppliedRows: lastAppliedRows,
+	}
+	if lastAppliedAt != nil {
+		c.LastAppliedAt = *lastAppliedAt
+	}
+	return c, nil
+}
+
+// RecordApplied stamps a (target, table) cursor's last-data-movement signal: it sets
+// last_applied_at=now() and last_applied_rows=rows. It is a TARGETED update of only those
+// two columns — disjoint from SaveCursor's (phase/last_delta/needs_reseed/updated_at) — so
+// a liveness touch or any other cursor write never clobbers it, and it never touches the
+// streaming position. Called once per data-moving pass per table (rows > 0). A no-op if
+// the cursor row does not exist yet (nothing streamed to confirm).
+func (s *Store) RecordApplied(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef, rows int64) error {
+	if err := s.requirePool(); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE replicare_state.cursors
+		SET last_applied_at = now(), last_applied_rows = $5
+		WHERE sync = $1 AND target = $2 AND schema_name = $3 AND table_name = $4`,
+		sync, string(target), t.Schema, t.Name, rows)
+	if err != nil {
+		return fmt.Errorf("statepg: record applied for %s/%s/%s: %w", sync, target, t, err)
+	}
+	return nil
 }
 
 // decodeKeyValues decodes a JSON key tuple, using json.Number so integer keys do

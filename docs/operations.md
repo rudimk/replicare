@@ -242,10 +242,16 @@ replicare status config.yml --watch 5s # refresh in place until Ctrl-C
 replicare verify config.yml            # source<->target convergence spot-check (exit 0 = converged)
 ```
 
-- **`status`** is [live by default](cli.md#status-config---json---sync-name---no-live---watch-dur): on
-  top of the state-store view it connects to the source and targets and shows live `SRC_ROWS` /
-  `TGT_ROWS` and the per-target delta `BACKLOG` (`rows (oldest-age)`), so initial-copy progress and
-  streaming catch-up are concrete numbers. `--no-live` drops back to state-store-only.
+- **`status`** is [live by default](cli.md#status-config---json---sync-name---no-live---watch-dur): each
+  sync prints a one-line health **headline** (phase · last healthy pass · last data applied + rows ·
+  backlog) over a per-(table, target) grid. Two distinct time signals keep a caught-up sync legible:
+  **`SEEN`** (time since the last *healthy pass* — a liveness heartbeat, small when running) and
+  **`LAST_SYNC` / `ROWS`** (when data was last *applied* to that table and how many rows). A healthy
+  idle sync shows a recent `SEEN` with a growing `LAST_SYNC` — normal, not lag. Live mode adds
+  `SRC_ROWS` / `TGT_ROWS` and the per-target delta `BACKLOG` — `0` = caught up, `N (age)` = waiting,
+  `-` = *unknown* (couldn't read it; a `live: partial` note says why), never conflated with `0`.
+  `--no-live` drops the source/target connections but keeps the state-store signals (phase, `SEEN`,
+  `LAST_SYNC`, reseed).
 - **`verify`** is a [read-only convergence check](cli.md#verify-config---json---sync-name---watch-dur):
   it counts and content-fingerprints every replicated unit on both ends and reports `ok` /
   `drift-count` / `drift-checksum` per table, exiting non-zero on drift — the same count+checksum
