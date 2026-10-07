@@ -115,5 +115,19 @@ var schemaSet = migrate.Set{
 				   ADD CONSTRAINT copy_progress_pkey PRIMARY KEY (sync, target, schema_name, table_name)`,
 			},
 		},
+		{
+			Version: 3,
+			Name:    "cursor_last_applied",
+			// Record, per (target, table), the last streaming pass that actually MOVED
+			// data and how many rows it applied — the "last successful sync / rows last
+			// synced" status signal, distinct from updated_at (which every healthy pass
+			// bumps as a liveness heartbeat). In-place, progress-preserving (§14): new
+			// nullable/defaulted columns, existing cursors keep their position and
+			// simply report no last-applied until the next data-moving pass.
+			Statements: []string{
+				`ALTER TABLE replicare_state.cursors ADD COLUMN last_applied_at timestamptz`,
+				`ALTER TABLE replicare_state.cursors ADD COLUMN last_applied_rows bigint NOT NULL DEFAULT 0`,
+			},
+		},
 	},
 }

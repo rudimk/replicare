@@ -219,6 +219,11 @@ func (e *Enricher) Enrich(ctx context.Context, name string, base status.Report) 
 				tt.Backlog = &status.Backlog{
 					Rows: b.Rows, Bytes: b.Bytes, OldestAgeSeconds: b.OldestAge.Seconds(),
 				}
+			} else {
+				// Leave Backlog nil (renders "-", i.e. unknown — distinct from a real 0)
+				// but surface WHY, so an operator isn't left guessing why backlog is blank
+				// (e.g. a table not captured, or a transient source error).
+				notes = appendNote(notes, fmt.Sprintf("backlog %s -> %s: %v", rt.ref, tgtName, err))
 			}
 			qcancel()
 		}

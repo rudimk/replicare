@@ -31,34 +31,36 @@ func TestVersionBumpPreservesState(t *testing.T) {
 		t.Fatalf("SaveCursor: %v", err)
 	}
 
-	// A hypothetical next migration (v3, on top of the real v1+v2): add a column.
-	// Reuses the real migrations so Apply runs only the pending v3 against the
-	// already-upgraded database.
+	// A hypothetical NEXT migration (one past the real schema's latest): add a column.
+	// Reuses the real migrations so Apply runs only the one pending migration against
+	// the already-upgraded database. Computed (not hardcoded) so adding a real migration
+	// never breaks this test.
+	nextVer := schemaSet.Migrations[len(schemaSet.Migrations)-1].Version + 1
 	next := migrate.Set{
 		Name:         schemaSet.Name,
 		VersionTable: schemaSet.VersionTable,
 		Migrations: append(append([]migrate.Migration{}, schemaSet.Migrations...),
 			migrate.Migration{
-				Version:    3,
+				Version:    nextVer,
 				Name:       "add_syncs_note",
 				Statements: []string{"ALTER TABLE replicare_state.syncs ADD COLUMN note text"},
 			}),
 	}
 	applied, err := migrate.Apply(ctx, pgmigrate.New(s.pool), next)
 	if err != nil {
-		t.Fatalf("apply v3: %v", err)
+		t.Fatalf("apply v%d: %v", nextVer, err)
 	}
-	if len(applied) != 1 || applied[0] != 3 {
-		t.Fatalf("expected only v3 to apply, got %v", applied)
+	if len(applied) != 1 || applied[0] != nextVer {
+		t.Fatalf("expected only v%d to apply, got %v", nextVer, applied)
 	}
 
-	// Version is now 3.
+	// Version is now nextVer.
 	var version int
 	if err := s.pool.QueryRow(ctx, "SELECT COALESCE(MAX(version),0) FROM "+versionTable).Scan(&version); err != nil {
 		t.Fatalf("read version: %v", err)
 	}
-	if version != 3 {
-		t.Errorf("version = %d, want 3", version)
+	if version != nextVer {
+		t.Errorf("version = %d, want %d", version, nextVer)
 	}
 
 	// The new column exists.
@@ -70,7 +72,7 @@ func TestVersionBumpPreservesState(t *testing.T) {
 		t.Fatalf("check column: %v", err)
 	}
 	if !colExists {
-		t.Error("expected the v2-added column 'note' to exist")
+		t.Error("expected the newly-added column 'note' to exist")
 	}
 
 	// Crucially, pre-existing state survived the upgrade unchanged.

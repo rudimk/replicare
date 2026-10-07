@@ -49,13 +49,20 @@ type TableStatus struct {
 // (now - last cursor write) is the lag proxy surfaced to operators. TargetRows and
 // Backlog are live signals populated only by the CLI's live mode (nil otherwise).
 type TargetStatus struct {
-	Target           string   `json:"target"`
-	Phase            string   `json:"phase"`
-	LastDelta        int64    `json:"last_delta"`
-	NeedsReseed      bool     `json:"needs_reseed"`
-	CursorAgeSeconds float64  `json:"cursor_age_seconds"`
-	TargetRows       *int64   `json:"target_rows,omitempty"`
-	Backlog          *Backlog `json:"delta_backlog,omitempty"`
+	Target           string  `json:"target"`
+	Phase            string  `json:"phase"`
+	LastDelta        int64   `json:"last_delta"`
+	NeedsReseed      bool    `json:"needs_reseed"`
+	CursorAgeSeconds float64 `json:"cursor_age_seconds"`
+	// LastAppliedAt/Rows are the last streaming pass that actually MOVED data to this
+	// (target, table) and how many rows it applied — the "last successful sync / rows last
+	// synced" signal, distinct from CursorAgeSeconds (which every healthy pass refreshes as
+	// a liveness heartbeat). LastAppliedAt is nil until the first data-moving pass. These
+	// come from the state store, so they are present even in --no-live mode.
+	LastAppliedAt   *time.Time `json:"last_applied_at,omitempty"`
+	LastAppliedRows int64      `json:"last_applied_rows"`
+	TargetRows      *int64     `json:"target_rows,omitempty"`
+	Backlog         *Backlog   `json:"delta_backlog,omitempty"`
 }
 
 // Backlog is a target's unconsumed-delta footprint for a table (CLAUDE.md §3.4):
@@ -140,13 +147,19 @@ func (r *Reporter) Report(ctx context.Context, sync string) (Report, error) {
 		if !c.UpdatedAt.IsZero() {
 			age = now.Sub(c.UpdatedAt).Seconds()
 		}
-		e.st.Targets = append(e.st.Targets, TargetStatus{
+		ts := TargetStatus{
 			Target:           string(c.Target),
 			Phase:            string(c.Phase),
 			LastDelta:        int64(c.LastDelta),
 			NeedsReseed:      c.NeedsReseed,
 			CursorAgeSeconds: age,
-		})
+			LastAppliedRows:  c.LastAppliedRows,
+		}
+		if !c.LastAppliedAt.IsZero() {
+			la := c.LastAppliedAt
+			ts.LastAppliedAt = &la
+		}
+		e.st.Targets = append(e.st.Targets, ts)
 	}
 
 	tables := make([]TableStatus, 0, len(order))

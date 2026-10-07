@@ -58,6 +58,62 @@ func TestCopyProgressResumeAfterRestart(t *testing.T) {
 	}
 }
 
+// TestRecordAppliedRoundTrip exercises the v3 cursor columns end-to-end: a fresh cursor
+// reports no last-applied; RecordApplied stamps rows + a timestamp; LoadCursor/ListCursors
+// read them back; and a subsequent plain SaveCursor (a liveness touch) does NOT clobber
+// the last-applied signal (the disjoint-columns guarantee).
+func TestRecordAppliedRoundTrip(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := openTestStore(t, ctx)
+	if err := s.PutSync(ctx, state.SyncDef{Name: "s1", Source: "src", Targets: []engine.TargetID{"dst"}}); err != nil {
+		t.Fatalf("PutSync: %v", err)
+	}
+	tbl := engine.TableRef{Schema: "public", Name: "orders"}
+
+	// Create the cursor row; it has no last-applied yet.
+	if err := s.SaveCursor(ctx, "s1", state.Cursor{Target: "dst", Table: tbl, Phase: state.PhaseStreaming, LastDelta: 7}); err != nil {
+		t.Fatalf("SaveCursor: %v", err)
+	}
+	c0, err := s.LoadCursor(ctx, "s1", "dst", tbl)
+	if err != nil {
+		t.Fatalf("LoadCursor: %v", err)
+	}
+	if !c0.LastAppliedAt.IsZero() || c0.LastAppliedRows != 0 {
+		t.Fatalf("fresh cursor should have no last-applied, got at=%v rows=%d", c0.LastAppliedAt, c0.LastAppliedRows)
+	}
+
+	// Stamp a data-moving pass.
+	if err := s.RecordApplied(ctx, "s1", "dst", tbl, 1240); err != nil {
+		t.Fatalf("RecordApplied: %v", err)
+	}
+	c1, err := s.LoadCursor(ctx, "s1", "dst", tbl)
+	if err != nil {
+		t.Fatalf("LoadCursor after apply: %v", err)
+	}
+	if c1.LastAppliedRows != 1240 || c1.LastAppliedAt.IsZero() {
+		t.Fatalf("after RecordApplied: at=%v rows=%d, want non-zero/1240", c1.LastAppliedAt, c1.LastAppliedRows)
+	}
+
+	// A plain liveness touch (SaveCursor) must preserve last-applied (disjoint columns).
+	if err := s.SaveCursor(ctx, "s1", state.Cursor{Target: "dst", Table: tbl, Phase: state.PhaseStreaming, LastDelta: 9}); err != nil {
+		t.Fatalf("SaveCursor touch: %v", err)
+	}
+	cursors, err := s.ListCursors(ctx, "s1")
+	if err != nil {
+		t.Fatalf("ListCursors: %v", err)
+	}
+	if len(cursors) != 1 {
+		t.Fatalf("expected 1 cursor, got %d", len(cursors))
+	}
+	if cursors[0].LastAppliedRows != 1240 || cursors[0].LastAppliedAt.IsZero() {
+		t.Errorf("liveness touch clobbered last-applied: at=%v rows=%d", cursors[0].LastAppliedAt, cursors[0].LastAppliedRows)
+	}
+	if cursors[0].LastDelta != 9 {
+		t.Errorf("SaveCursor should have advanced last_delta to 9, got %d", cursors[0].LastDelta)
+	}
+}
+
 func TestCopyProgressFreshWhenAbsent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

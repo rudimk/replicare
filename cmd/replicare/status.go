@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -131,7 +132,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 		if asJSON {
 			return emitJSON(stdout, stderr, reports)
 		}
-		renderReports(stdout, reports, liveMode)
+		renderReports(stdout, reports, liveMode, time.Now())
 		return 0
 	}
 
@@ -159,7 +160,7 @@ func runStatus(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprint(stdout, clearScreen)
 			fmt.Fprintf(stdout, "replicare status @ %s  (every %s, Ctrl-C to stop)\n\n",
 				time.Now().Format(time.RFC3339), watch)
-			renderReports(stdout, reports, liveMode)
+			renderReports(stdout, reports, liveMode, time.Now())
 		}
 		select {
 		case <-ctx.Done():
@@ -207,13 +208,21 @@ func pausedSyncs(cfg *config.Config) map[string]bool {
 	return m
 }
 
-// renderReports prints a human-readable status table per sync. When live is true it
-// includes the live SRC_ROWS / TGT_ROWS / BACKLOG columns.
-func renderReports(w io.Writer, reports []status.Report, live bool) {
+// renderReports prints a human-readable status per sync: a one-line health headline
+// followed by a per-(table,target) grid. When live is true it includes the live
+// SRC_ROWS / TGT_ROWS / BACKLOG columns. now is the reference time for relative ages
+// (injected so the output is deterministic in tests). Columns:
+//   - SEEN: time since the last healthy streaming pass (liveness heartbeat — small when
+//     the daemon is running, regardless of whether data moved).
+//   - LAST_SYNC / ROWS: time since the last pass that actually APPLIED rows, and how many
+//     it applied ("-" until the first data-moving pass).
+func renderReports(w io.Writer, reports []status.Report, live bool, now time.Time) {
 	for _, rep := range reports {
 		fmt.Fprintf(w, "sync: %s\n", rep.Sync)
 		if rep.Paused {
 			fmt.Fprintln(w, "  [PAUSED] disabled (enabled: false) — not running; source capture still queues deltas. Set enabled: true and restart to resume.")
+		} else {
+			fmt.Fprintf(w, "  %s\n", summarizeSync(rep, live, now))
 		}
 		if rep.LiveError != "" {
 			fmt.Fprintf(w, "  live: partial (%s)\n", rep.LiveError)
@@ -223,9 +232,9 @@ func renderReports(w io.Writer, reports []status.Report, live bool) {
 		}
 		tw := tabwriter.NewWriter(w, 0, 2, 2, ' ', 0)
 		if live {
-			fmt.Fprintln(tw, "  TABLE\tCOPY\tSRC_ROWS\tTARGET\tPHASE\tLAG\tTGT_ROWS\tBACKLOG\tLAST_DELTA\tRESEED")
+			fmt.Fprintln(tw, "  TABLE\tCOPY\tSRC_ROWS\tTARGET\tPHASE\tSEEN\tTGT_ROWS\tBACKLOG\tLAST_SYNC\tROWS\tRESEED")
 		} else {
-			fmt.Fprintln(tw, "  TABLE\tCOPY\tTARGET\tPHASE\tLAG\tLAST_DELTA\tRESEED")
+			fmt.Fprintln(tw, "  TABLE\tCOPY\tTARGET\tPHASE\tSEEN\tLAST_SYNC\tROWS\tRESEED")
 		}
 		for _, tbl := range rep.Tables {
 			cp := "pending"
@@ -235,9 +244,9 @@ func renderReports(w io.Writer, reports []status.Report, live bool) {
 			src := countCell(tbl.SourceRows)
 			if len(tbl.Targets) == 0 {
 				if live {
-					fmt.Fprintf(tw, "  %s\t%s\t%s\t-\t-\t-\t-\t-\t-\t-\n", tbl.Table, cp, src)
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t-\t-\t-\t-\t-\t-\t-\t-\n", tbl.Table, cp, src)
 				} else {
-					fmt.Fprintf(tw, "  %s\t%s\t-\t-\t-\t-\t-\n", tbl.Table, cp)
+					fmt.Fprintf(tw, "  %s\t%s\t-\t-\t-\t-\t-\t-\n", tbl.Table, cp)
 				}
 				continue
 			}
@@ -247,12 +256,14 @@ func renderReports(w io.Writer, reports []status.Report, live bool) {
 					reseed = "NEEDS-RESEED"
 				}
 				if live {
-					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 						tbl.Table, cp, src, tg.Target, tg.Phase, humanAge(tg.CursorAgeSeconds),
-						countCell(tg.TargetRows), backlogCell(tg.Backlog), tg.LastDelta, reseed)
+						countCell(tg.TargetRows), backlogCell(tg.Backlog),
+						lastSyncCell(tg.LastAppliedAt, now), rowsCell(tg), reseed)
 				} else {
-					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-						tbl.Table, cp, tg.Target, tg.Phase, humanAge(tg.CursorAgeSeconds), tg.LastDelta, reseed)
+					fmt.Fprintf(tw, "  %s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+						tbl.Table, cp, tg.Target, tg.Phase, humanAge(tg.CursorAgeSeconds),
+						lastSyncCell(tg.LastAppliedAt, now), rowsCell(tg), reseed)
 				}
 			}
 		}
@@ -297,4 +308,103 @@ func humanAge(sec float64) string {
 	}
 	d := time.Duration(sec * float64(time.Second))
 	return d.Round(time.Second).String()
+}
+
+// lastSyncCell renders the time since the last data-moving pass, or "-" when no rows
+// have been applied to this (target, table) yet.
+func lastSyncCell(at *time.Time, now time.Time) string {
+	if at == nil {
+		return "-"
+	}
+	return humanAge(now.Sub(*at).Seconds()) + " ago"
+}
+
+// rowsCell renders the rows applied in the last data-moving pass, or "-" when none yet.
+func rowsCell(tg status.TargetStatus) string {
+	if tg.LastAppliedAt == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%d", tg.LastAppliedRows)
+}
+
+// summarizeSync builds the one-line health headline for a sync: phase, liveness (time
+// since the most recent healthy pass across its targets), last data movement (most recent
+// applied pass + total rows applied across tables), and — in live mode — the backlog
+// rollup (caught up / N rows / unknown). It aggregates over every (table, target).
+func summarizeSync(rep status.Report, live bool, now time.Time) string {
+	var (
+		anyTarget    bool
+		anyInitial   bool
+		anyStreaming bool
+		minSeen      = -1.0    // smallest cursor age = most recent healthy pass
+		lastApplied  time.Time // most recent data-moving pass
+		totalApplied int64     // rows applied across tables' last data-moving passes
+		backlogRows  int64
+		backlogKnown bool   // at least one target reported a backlog
+		backlogAll0  = true // every reported backlog is 0
+		oldestAge    float64
+	)
+	for _, tbl := range rep.Tables {
+		for _, tg := range tbl.Targets {
+			anyTarget = true
+			switch tg.Phase {
+			case "initial_copy":
+				anyInitial = true
+			case "streaming":
+				anyStreaming = true
+			}
+			if minSeen < 0 || tg.CursorAgeSeconds < minSeen {
+				minSeen = tg.CursorAgeSeconds
+			}
+			if tg.LastAppliedAt != nil {
+				if tg.LastAppliedAt.After(lastApplied) {
+					lastApplied = *tg.LastAppliedAt
+				}
+				totalApplied += tg.LastAppliedRows
+			}
+			if live && tg.Backlog != nil {
+				backlogKnown = true
+				backlogRows += tg.Backlog.Rows
+				if tg.Backlog.Rows > 0 {
+					backlogAll0 = false
+				}
+				if tg.Backlog.OldestAgeSeconds > oldestAge {
+					oldestAge = tg.Backlog.OldestAgeSeconds
+				}
+			}
+		}
+	}
+
+	if !anyTarget {
+		return "no targets tracked yet"
+	}
+
+	phase := "pending"
+	switch {
+	case anyInitial:
+		phase = "initial-copy"
+	case anyStreaming:
+		phase = "streaming"
+	}
+	parts := []string{phase}
+	if minSeen >= 0 {
+		parts = append(parts, "last pass "+humanAge(minSeen)+" ago")
+	}
+	if lastApplied.IsZero() {
+		parts = append(parts, "no data applied yet")
+	} else {
+		parts = append(parts, fmt.Sprintf("last applied %s ago (%d rows total)",
+			humanAge(now.Sub(lastApplied).Seconds()), totalApplied))
+	}
+	if live {
+		switch {
+		case !backlogKnown:
+			parts = append(parts, "backlog unknown")
+		case backlogAll0:
+			parts = append(parts, "backlog 0 (caught up)")
+		default:
+			parts = append(parts, fmt.Sprintf("backlog %d (oldest %s)", backlogRows, humanAge(oldestAge)))
+		}
+	}
+	return strings.Join(parts, " · ")
 }
