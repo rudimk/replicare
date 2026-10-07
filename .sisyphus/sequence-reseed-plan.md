@@ -170,12 +170,14 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
   (`syncSequences`), `internal/daemon/build.go` (threaded, always false on a cluster edge). Unit-tested
   (config parse + mesh refusal; pipeline gating/throttle/best-effort). Docs: `docs/configuration.md`,
   `docs/operations.md`, `CLAUDE.md` §12 + decision log.
-- **M6 (active-active docs — near-term, after the owner's chat with the consuming team) —**
-  repo docs (`docs/multi-master.md`, cross-linked from `docs/operations.md`): **UUID v7 / ULID
-  (stored binary) is the blessed active-active id strategy**, with the §6.0 fine print
-  (allocation-not-conflict-resolution, the migration cost, v7/ULID-over-v4, and *all* unique
-  keys not just the PK). This is the active-active deliverable the owner asked to document;
-  no code.
+- **M6 (active-active docs) — ✅ SHIPPED.** `docs/multi-master.md` §5.6 "Active-active id
+  allocation — globally-unique keys": **UUID v7 / ULID (stored binary) is the blessed strategy**,
+  with the §6.0 fine print (allocation-not-conflict-resolution, the migration cost,
+  v7/ULID-over-v4 stored binary, and *all* unique keys not just the PK), a loud "do NOT sync
+  integer counters across a mesh" (the §5 blast radius, cross-linked to the `reseed-sequences`
+  refusal and `sync_sequences`), the §6.2 why-counter-syncing-can't-work summary, and a forward
+  pointer to the M7 guardrail. Cross-linked from `docs/operations.md` → Sequences section; the
+  planned policing is seeded as `docs/multi-master.md` §6.3 item 3. No code.
 - **M7 (active-active guardrail — code, follows M6) —** mesh **pre-flight policing** (§6.1):
   refuse/warn when a `clusters:` mesh has a replicated table with a locally-allocated integer
   PK **or secondary unique key** and no declared collision-free scheme; flag `int4`.

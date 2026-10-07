@@ -363,6 +363,68 @@ same-version DUMP-hash fast path is a documented future optimization.
   must be ready for `pg_advisory_lock`-based leader election before mesh is declared
   production-ready.
 
+### 5.6 Active-active id allocation — globally-unique keys
+
+Conflict resolution (§5.3) decides which value wins when two nodes write the **same** key.
+It says nothing about how two nodes avoid minting the **same key for different rows** in
+the first place — that is a separate, upstream problem, and in a mesh it is **the user's
+schema's job, not replicare's**. This section is the decided guidance; the next milestone
+adds a pre-flight guardrail that enforces it (§6.3).
+
+**The blessed strategy: globally-unique keys — UUID v7 / ULID.** Every node mints its own
+keys with **zero coordination** — no sequence to sync, no node windows, no interleave, no
+engine asymmetry — and replicare moves them verbatim (faithful transport already handles a
+UUID). Id allocation belongs upstream of replication, and UUIDs put the fix exactly there,
+keeping replicare a pure replicator with nothing to build on the write path.
+
+**Do NOT try to sync integer counters across a mesh.** This is the single most dangerous
+anti-pattern here, and it is why [`reseed-sequences` refuses a cluster member](operations.md#sequences--identity-counters-dr--promotion)
+and why [`sync_sequences`](operations.md#keeping-counters-warm-continuously-sync_sequences)
+is one-way only. In a converged mesh every node holds the **union** of all rows, so
+`max(id)` is the same global maximum everywhere; setting every node's counter to
+`max(id)+1` collapses them onto **one shared counter**. Two nodes then both allocate
+`global_max+1`, insert *different* rows under the *same* id, replicate, and HLC-LWW keeps
+one and **silently discards the other** — the §1.7 cardinal sin (silent data loss),
+delivered by an operation that exits 0. On a *correctly partitioned* mesh it is worse: it
+yanks a node out of its disjoint window into another's space, destroying the very invariant
+that was keeping the cluster collision-free. replicare cannot de-collide two independently
+minted ids after the fact — allocation happened before capture ever saw the row — so the
+only safe fix is to not collide in the first place.
+
+**Fine print — carry these into any "we'll use UUIDs" decision:**
+
+- **It solves *allocation*, not *conflict resolution*.** UUIDs guarantee two nodes never
+  mint the same key for *different* rows; two concurrent updates to the *same* row are
+  still HLC-LWW's job (§5.3). UUIDs retire one of the two mesh hazards, not both.
+- **It is a schema migration.** Conceptually "one move", but on a live system it means
+  every surrogate-int PK → UUID, every referencing FK, a reindex, and app code that assumes
+  integer ids. Greenfield: trivial. An established production schema: a real project — plan
+  it as one.
+- **Use time-ordered UUID v7 / ULID, stored binary** — `uuid` on Postgres; `BINARY(16)` via
+  `UUID_TO_BIN(…, 1)` on MySQL. Random v4 as a PK scatters inserts (on MySQL/InnoDB the PK
+  *is* the clustered index, so v4 causes page splits and write amplification); v7/ULID
+  restore insert locality, and binary storage halves the width of the 36-char text form.
+- **It must cover *every* locally-allocated unique value, not just the PK.** A secondary
+  `UNIQUE` column fed by a sequence (a human-facing `order_number`, say) still collides
+  across nodes even with a UUID PK. "We use UUIDs" has to mean **every** locally-allocated
+  unique value — which is exactly what the §6.3 guardrail checks.
+
+**Why not any of the counter schemes real databases use?** Production active-active systems
+never sync counters — they make allocations **disjoint or globally-unique**: interleaved
+sequences (offset + increment = N; MySQL Group Replication, Galera), coordinated block
+allocation (Postgres BDR `galloc`, CockroachDB per-node blocks — but the *app* must
+allocate through the coordinator), or globally-unique-by-construction (snowflake ids,
+`unique_rowid()`, UUID/ULID). The first two either need an engine feature replicare does
+not control or push allocation into the app's write path; the third is the one that needs
+**nothing** from replicare and no coordination at all. That is why UUID/ULID is the blessed
+answer and not merely *an* option.
+
+A transparent integer-PK auto-config (replicare assigning node-disjoint sequence windows on
+Postgres) is a **deferred, lower-priority fallback** for schemas that genuinely cannot move
+to UUIDs; it is Postgres-only in practice (MySQL's `AUTO_INCREMENT` floats to the global max
+and cannot be pinned to a low window) and is out of scope here. For now, replicare's only
+mesh-side obligation is to **police** the chosen strategy (§6.3), never to allocate.
+
 ---
 
 ## 6. Config-schema changes
@@ -448,6 +510,16 @@ Notes:
    syncs (`A→B` + `B→A`, or a ring) not part of a `clusters:` block. Closes the
    silent-corruption footgun in §4, worth doing **independently**. It only *adds* a
    rejection for a config already broken today, so no valid one-way config is affected.
+3. **Mesh id-allocation policing (planned — M7, introspection-based pre-flight).** At mesh
+   start, introspect every replicated table's **primary key and every unique key** and
+   classify each locally-allocated integer key (serial / identity / `AUTO_INCREMENT`). With
+   a declared, collision-free scheme in place → allow; otherwise → **refuse to start,
+   loudly**, naming the offending table/column and pointing at the UUID/ULID guidance
+   (§5.6), with narrow `int4` keys flagged especially. This converts the silent data-loss
+   setup (§5.6) into a loud startup refusal — the same "block on incompatible" philosophy as
+   the type pre-flight (`CLAUDE.md` §4.2). Pure introspection, low-privilege, and the
+   classification logic is pure → CI-testable. This is the whole active-active id-allocation
+   *code* deliverable; replicare polices the strategy, it never allocates or syncs counters.
 
 ### 6.4 State-store & source-schema changes
 
