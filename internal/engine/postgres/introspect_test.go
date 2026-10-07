@@ -87,6 +87,8 @@ func TestIntrospectModernTarget(t *testing.T) {
 			area int GENERATED ALWAYS AS (w * h) STORED
 		)`,
 		`CREATE TABLE rc_it.nopk (a int, b int)`,
+		// Legacy serial: a plain int with a nextval default (NOT an identity column).
+		`CREATE TABLE rc_it.serialt (id serial PRIMARY KEY, v int)`,
 		`CREATE TABLE rc_it.events (
 			id bigint,
 			ts date,
@@ -162,6 +164,20 @@ func TestIntrospectModernTarget(t *testing.T) {
 	// nopk: no usable key.
 	if tbls["rc_it.nopk"].HasUsableKey() {
 		t.Error("rc_it.nopk should have no usable key")
+	}
+
+	// serialt.id: legacy serial → DefaultSequence true, Identity false (serial is a
+	// plain int with a nextval default, not GENERATED AS IDENTITY). Contrast with
+	// orders.id (identity: DefaultSequence false) and customers.id (plain int: both false).
+	sid := columnBy(tbls["rc_it.serialt"], "id")
+	if !sid.DefaultSequence || sid.Identity {
+		t.Errorf("serialt.id should be DefaultSequence (serial), not Identity: %+v", sid)
+	}
+	if columnBy(orders, "id").DefaultSequence {
+		t.Error("orders.id is GENERATED AS IDENTITY, not a serial default; DefaultSequence should be false")
+	}
+	if cid := columnBy(cust, "id"); cid.DefaultSequence || cid.Identity {
+		t.Errorf("customers.id is a plain int; DefaultSequence and Identity should both be false: %+v", cid)
 	}
 }
 

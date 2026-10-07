@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/copy"
@@ -138,6 +139,20 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return fail(fmt.Errorf("target version: %w", err))
 	}
 	report := eng.Preflight(name, srcVer, tgtVer, srcSchema, tgtSchema)
+	// Active-active id-allocation policing (CLAUDE.md §6, docs/multi-master.md §5.6, §6.3):
+	// only on a cluster edge, refuse to bring up a mesh member whose replicated tables use
+	// a locally-allocated integer PK/unique key — that is a silent-data-loss setup under
+	// HLC-LWW. The check is pure over the (source) schema; fold its findings into the report
+	// so the generic block path and any report consumer see them, then fail with the
+	// specific, actionable offenders (the fix is the id strategy, not the target schema).
+	if clusterMode {
+		if mf := engine.MeshIDAllocationFindings(srcSchema); len(mf) > 0 {
+			report.Findings = append(report.Findings, mf...)
+			if detail := meshBlockDetail(mf); detail != "" {
+				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — docs/multi-master.md §5.6):%s", name, detail))
+			}
+		}
+	}
 	if report.Blocked() {
 		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix the target schema before starting", blockingCount(report)))
 	}
@@ -267,4 +282,16 @@ func blockingCount(r *engine.PreflightReport) int {
 		}
 	}
 	return n
+}
+
+// meshBlockDetail renders the blocking mesh id-allocation findings as an indented,
+// newline-separated list for the startup refusal message; empty when none block.
+func meshBlockDetail(findings []engine.Finding) string {
+	var b strings.Builder
+	for _, f := range findings {
+		if f.Severity == engine.SevBlock {
+			fmt.Fprintf(&b, "\n  - %s", f.Message)
+		}
+	}
+	return b.String()
 }

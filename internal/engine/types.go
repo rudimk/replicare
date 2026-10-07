@@ -34,6 +34,15 @@ type Column struct {
 	Nullable  bool
 	Generated bool // GENERATED ... STORED (excluded from inserts; MySQL: VIRTUAL or STORED)
 	Identity  bool // GENERATED ... AS IDENTITY (Postgres) / AUTO_INCREMENT (MySQL)
+	// DefaultSequence marks a column whose DEFAULT draws its value from a sequence —
+	// Postgres legacy `serial`/`bigserial` (a plain integer with `DEFAULT nextval(...)`,
+	// which is NOT reported as Identity). It is kept DISTINCT from Identity on purpose:
+	// the apply path emits `OVERRIDING SYSTEM VALUE` only for true Identity columns, so
+	// conflating serial into Identity would break copy/apply. Both Identity and
+	// DefaultSequence mean "the DB locally allocates this value" — the signal the
+	// active-active id-allocation pre-flight keys on (CLAUDE.md §6, docs/multi-master.md
+	// §5.6). MySQL leaves this false (AUTO_INCREMENT is already Identity).
+	DefaultSequence bool
 	// AutoUpdate marks a column whose value the engine rewrites on every UPDATE
 	// (MySQL `ON UPDATE CURRENT_TIMESTAMP`). Faithful apply must set it to the
 	// verbatim source value so it is not silently mutated to "now" (CLAUDE.md
