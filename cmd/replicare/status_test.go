@@ -58,8 +58,8 @@ func TestRenderReports(t *testing.T) {
 	for _, want := range []string{
 		"sync: s1", "public.orders", "streaming", "NEEDS-RESEED", "target.unreachable",
 		"SEEN", "LAST_SYNC", "ROWS", // the new columns
-		"last pass",                 // headline liveness
-		"no data applied yet",       // headline: no LastAppliedAt set on this cursor
+		"last pass",           // headline liveness
+		"no data applied yet", // headline: no LastAppliedAt set on this cursor
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("rendered output missing %q:\n%s", want, got)

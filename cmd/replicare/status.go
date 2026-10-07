@@ -336,12 +336,12 @@ func summarizeSync(rep status.Report, live bool, now time.Time) string {
 		anyTarget    bool
 		anyInitial   bool
 		anyStreaming bool
-		minSeen      = -1.0      // smallest cursor age = most recent healthy pass
-		lastApplied  time.Time   // most recent data-moving pass
-		totalApplied int64       // rows applied across tables' last data-moving passes
+		minSeen      = -1.0    // smallest cursor age = most recent healthy pass
+		lastApplied  time.Time // most recent data-moving pass
+		totalApplied int64     // rows applied across tables' last data-moving passes
 		backlogRows  int64
-		backlogKnown bool        // at least one target reported a backlog
-		backlogAll0  = true      // every reported backlog is 0
+		backlogKnown bool   // at least one target reported a backlog
+		backlogAll0  = true // every reported backlog is 0
 		oldestAge    float64
 	)
 	for _, tbl := range rep.Tables {
