@@ -49,6 +49,15 @@ type Syncer struct {
 	// one-way path.
 	NodeID string
 
+	// SyncSequences opts this one-way sync into continuous sequence syncing: on a lazy
+	// interval during streaming the Syncer advances each replicable table's owned
+	// identity/serial/AUTO_INCREMENT counter on the target to max(id)+1 (the same
+	// mechanism as `replicare reseed-sequences`), so a promoted DR node's counters are
+	// already past the replicated ids at cutover (CLAUDE.md §13). Off (the default) is
+	// the pre-existing path. It is NEVER set on a cluster edge — the daemon only wires it
+	// from a one-way sync's config, and config load refuses it on a mesh-member target.
+	SyncSequences bool
+
 	// ApplyConcurrency is how many of a component's tables may apply at once during
 	// streaming (CLAUDE.md §8 parallel delta apply). 1 (the default) is the
 	// strictly-sequential per-table drain. Higher values fan the per-table apply
@@ -77,6 +86,9 @@ type Syncer struct {
 	// lastDBSize throttles the DB-size metric queries (they scan catalogs, so we
 	// emit them on an interval, not every drain pass).
 	lastDBSize time.Time
+	// lastSeqSync throttles continuous sequence syncing (SyncSequences): the per-table
+	// counter advance runs on a lazy interval, not every drain pass. Zero → due now.
+	lastSeqSync time.Time
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture

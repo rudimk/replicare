@@ -23,7 +23,7 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		return nil, nil, fmt.Errorf("unknown source %q or target %q", sync.Source, targetName)
 	}
 	sel := engine.Selection{Include: sync.Include, Exclude: sync.Exclude}
-	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false, "", "")
+	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false, "", "", sync.SyncsSequences())
 }
 
 // buildClusterEdge constructs a connected Syncer for one directed edge of an
@@ -39,7 +39,9 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 		return nil, nil, fmt.Errorf("unknown cluster node %q or %q", e.srcNode, e.dstNode)
 	}
 	sel := engine.Selection{Include: e.cluster.Include, Exclude: e.cluster.Exclude}
-	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID)
+	// A cluster edge never syncs sequences (false): a mesh counter advance is silent data
+	// loss (.sisyphus/sequence-reseed-plan.md §5); the knob is one-way only.
+	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID, false)
 }
 
 // buildSyncerCore is the shared build path for a one-way sync target and a cluster
@@ -47,7 +49,7 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 // aware capture and every sink it opened (main + copy pool) is switched to origin
 // marking. clusterMode=false is exactly the pre-multi-master path.
 func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp *config.Endpoint,
-	sel engine.Selection, tuning config.Tuning, targetName string, clusterMode bool, srcNodeID, tgtNodeID string) (*pipeline.Syncer, func(), error) {
+	sel engine.Selection, tuning config.Tuning, targetName string, clusterMode bool, srcNodeID, tgtNodeID string, syncSequences bool) (*pipeline.Syncer, func(), error) {
 	eng, err := engine.Get(srcEp.Engine)
 	if err != nil {
 		return nil, nil, err
@@ -157,6 +159,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		Retention:        retentionPolicy(tuning.Retention),
 		ClusterMode:      clusterMode,
 		NodeID:           srcNodeID,
+		SyncSequences:    syncSequences,
 	}
 	// Mark the streaming-liveness heartbeat once per pass (runSync registers the
 	// key after bring-up); lets /healthz restart a wedged pod.

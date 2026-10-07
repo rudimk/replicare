@@ -164,10 +164,24 @@ syncs:
     source: app               # a key in `sources`
     targets: [warehouse]      # keys in `targets` (one or more; fan-out)
     enabled: true             # optional; false PAUSES just this sync (see below)
+    sync_sequences: false     # optional; true keeps DR counters warm (see below)
     include: ["public.*"]     # selection globs (schema.table)
     exclude: ["*_audit"]      # excluded from the include set
     tuning: { ... }           # optional (see below)
 ```
+
+### Keeping DR counters warm (`sync_sequences`)
+
+`sync_sequences` is an opt-in, one-way/DR-only switch (default **off**). With it on, the
+daemon advances each replicated table's owned identity/serial/`AUTO_INCREMENT` counter on
+the target to `max(id)+1` on a lazy interval during streaming — the same mechanism as the
+[`reseed-sequences`](cli.md#reseed-sequences-config---sync-name---target-name---dry-run)
+command, kept running — so a promoted DR node has nothing sequence-related to do at cutover.
+Enabling it adds a steady-state **target** grant (Postgres `UPDATE` on each sequence, MySQL
+`ALTER` on each table); a missing grant is logged and retried, never fatal. It is **refused
+at config load** when the target is also an active-active cluster member (a mesh counter
+advance is silent data loss — use UUID/ULID keys there). See
+[operations → Sequences & identity counters](operations.md#keeping-counters-warm-continuously-sync_sequences).
 
 ### Pausing a sync (`enabled`)
 

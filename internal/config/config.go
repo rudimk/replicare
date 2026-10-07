@@ -96,11 +96,28 @@ type Sync struct {
 	// skipped). Takes effect at daemon start, so pausing/resuming is a config change +
 	// restart, not a live toggle.
 	Enabled *bool `yaml:"enabled"`
+	// SyncSequences opts this one-way sync into continuous sequence syncing: on a lazy
+	// interval during streaming the daemon advances each replicated table's owned
+	// identity/serial/AUTO_INCREMENT counter on the target to max(id)+1 (the same
+	// mechanism as `replicare reseed-sequences`), so a promoted DR node has nothing
+	// surprising to do at cutover — its counters are already past the replicated ids.
+	// Unset (nil) or false → off (the default; the promotion-time reseed command remains
+	// the guarantee). It is PASSIVE / one-way / DR ONLY and REFUSED (at config load) when
+	// the target is also an active-active cluster member — advancing a mesh node's counter
+	// is silent data loss (CLAUDE.md §13, .sisyphus/sequence-reseed-plan.md §5). Enabling
+	// it adds a steady-state target privilege: Postgres UPDATE on each owned sequence,
+	// MySQL ALTER on each table (the same DR-only grant the command needs).
+	SyncSequences *bool `yaml:"sync_sequences"`
 }
 
 // IsEnabled reports whether the sync should run. The zero/unset value is enabled, so
 // the flag is a pure opt-out and every pre-existing config keeps running unchanged.
 func (s *Sync) IsEnabled() bool { return s.Enabled == nil || *s.Enabled }
+
+// SyncsSequences reports whether continuous sequence syncing is enabled for this sync.
+// The zero/unset value is off, so it is a pure opt-in and every pre-existing config is
+// unchanged.
+func (s *Sync) SyncsSequences() bool { return s.SyncSequences != nil && *s.SyncSequences }
 
 // Cluster is one active-active (multi-master) replication group: a set of peer
 // nodes, each simultaneously a source and a target, kept converged with writes
@@ -364,6 +381,20 @@ func (c *Config) Validate() error {
 		if s.Tuning.ApplyConcurrency < 1 {
 			return fmt.Errorf("sync %q: apply_concurrency must be >= 1", s.Name)
 		}
+
+		// Continuous sequence syncing is passive/DR only. Refuse it when a target is
+		// also an active-active cluster member: advancing a mesh node's counter to
+		// max(id)+1 collapses every node onto one counter and silently loses rows via
+		// LWW (.sisyphus/sequence-reseed-plan.md §5). This mirrors the reseed-sequences
+		// CLI mesh guard, enforced at load so `validate`/`run` refuse it up front.
+		if s.SyncsSequences() {
+			members := c.clusterMemberIdentities()
+			for _, ref := range s.Targets {
+				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
+					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (docs/multi-master.md)", s.Name, ref, id)
+				}
+			}
+		}
 	}
 
 	for i, cl := range c.Clusters {
@@ -393,6 +424,21 @@ func connIdentity(ep *Endpoint) string {
 	}
 	cc := ep.Conn.ConnConfig()
 	return fmt.Sprintf("%s://%s:%d/%s", ep.Engine, cc.Host, cc.Port, cc.Database)
+}
+
+// clusterMemberIdentities returns the connection identity of every active-active
+// cluster member node, as a set for membership tests (the sync_sequences mesh guard).
+// Empty when the config has no clusters.
+func (c *Config) clusterMemberIdentities() map[string]bool {
+	out := map[string]bool{}
+	for _, cl := range c.Clusters {
+		for _, m := range cl.Members {
+			if id := connIdentity(c.Nodes[m]); id != "" {
+				out[id] = true
+			}
+		}
+	}
+	return out
 }
 
 // detectSyncCycles builds the directed graph of one-way syncs (each source → each of

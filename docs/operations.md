@@ -394,6 +394,38 @@ locally-allocated counter (UUID / natural / composite PK) are skipped.
   **globally-unique keys (UUID v7 / ULID)**; see [multi-master](multi-master.md). (Not the same as
   `reseed`, which re-copies a target's *data*.)
 
+### Keeping counters warm continuously (`sync_sequences`)
+
+The promotion-time `reseed-sequences` run above is the guarantee. If you'd rather have the counters
+kept advanced *during* streaming — so a failover has nothing sequence-related to do — opt the sync
+into continuous sequence syncing on the neutral config layer:
+
+```yaml
+syncs:
+  - name: app-to-dr
+    source: primary
+    targets: [dr]
+    sync_sequences: true      # optional; default false
+```
+
+While streaming, the daemon advances each replicated table's owned counter on the target to
+`max(id)+1` on a lazy interval (the same mechanism as `reseed-sequences`). Because a passive
+replica's applier always supplies explicit ids (`OVERRIDING SYSTEM VALUE`), which never advance the
+sequence, repeatedly setting it is idempotent and simply holds the counter ahead of the data.
+
+- **Opt-in and off by default** — unset or `false` is exactly the pre-existing behavior.
+- **Steady-state privilege.** Enabling it means the daemon's *target* connection needs the same
+  DR-only grant the command needs, now continuously: Postgres `UPDATE` on each owned sequence, MySQL
+  `ALTER` on each table. Without it the advance fails — but **best-effort**: the failure is logged
+  (`stream.pass_error` with a `sequence sync` message) and retried next interval; it never aborts
+  the streaming pass or stops data replication.
+- **Still PASSIVE / one-way / DR ONLY.** Same mesh refusal as the command, enforced at **config
+  load**: `sync_sequences: true` on a sync whose target is also an active-active cluster member is
+  rejected by `validate`/`run` up front (advancing a mesh counter is silent data loss).
+- **Not a substitute for the runbook.** It narrows the promotion gap but the cutover order
+  (stop replication → open to writes) is unchanged; run `reseed-sequences` as the final belt-and-
+  braces step if you want certainty at the instant of promotion.
+
 ## Runtime type errors
 
 If the target rejects a value (type/constraint), replicare **halts the affected component loudly**

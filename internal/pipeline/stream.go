@@ -154,6 +154,10 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// Stamp the last-data-movement signal for any table this pass actually applied rows
 	// to (distinct from touchCursors' liveness bump). Reads the pass accumulator.
 	s.recordApplied(ctx, readApplied())
+	// Continuous sequence syncing (opt-in, one-way/DR only): advance the target's owned
+	// counters past the replicated ids on a lazy interval, so a promoted node has nothing
+	// to reseed at cutover. Best-effort and throttled; a no-op unless enabled.
+	s.syncSequences(ctx)
 
 	// Delete reconciliation (redis-plan §0.4): AFTER the drain, on a healthy pass
 	// (you cannot DEL on a down target). A no-op for capture-driven engines
@@ -224,6 +228,48 @@ func (s *Syncer) recordApplied(ctx context.Context, counts map[engine.TableRef]i
 		}
 		if err := rec.RecordApplied(ctx, s.Name, s.Target, ref, int64(n)); err != nil {
 			s.log(ctx, "record applied-rows", err)
+		}
+	}
+}
+
+// seqSyncInterval throttles continuous sequence syncing: the per-table counter
+// advance (setval / ALTER … AUTO_INCREMENT) touches the target, so it runs on this
+// lazy cadence rather than every drain pass. The promotion-time `reseed-sequences`
+// command is the correctness guarantee; this just keeps the counters warm.
+const seqSyncInterval = 60 * time.Second
+
+// syncSequences advances each replicable table's owned identity/serial/AUTO_INCREMENT
+// counter on the target to max(id)+1 (the same engine.SequenceReseeder mechanism as the
+// `reseed-sequences` command), on a lazy interval, when the sync opted in via
+// SyncSequences. It is a passive/DR aid, not a correctness mechanism, so it is:
+//   - a no-op unless SyncSequences is set (opt-in);
+//   - a no-op in cluster mode (a mesh counter advance is silent data loss — defence in
+//     depth; config load already refuses a mesh-member target);
+//   - a no-op when the engine's Sink does not implement SequenceReseeder (Redis);
+//   - throttled to seqSyncInterval; and
+//   - best-effort: a failure (e.g. the DR-only grant is missing) is logged and retried
+//     next interval, never aborting the streaming pass.
+//
+// It runs only on a healthy pass (the caller guarantees the target answered the drain),
+// and against a passive replica the applier supplies explicit ids (OVERRIDING SYSTEM
+// VALUE), which never advance the sequence, so repeatedly setting it to max(id)+1 is
+// idempotent and holds.
+func (s *Syncer) syncSequences(ctx context.Context) {
+	if !s.SyncSequences || s.ClusterMode {
+		return
+	}
+	reseeder, ok := s.Sink.(engine.SequenceReseeder)
+	if !ok {
+		return // engine has no owned counters (e.g. Redis) — nothing to sync
+	}
+	now := time.Now()
+	if !s.lastSeqSync.IsZero() && now.Sub(s.lastSeqSync) < seqSyncInterval {
+		return
+	}
+	s.lastSeqSync = now
+	for _, t := range s.Replicable {
+		if _, err := reseeder.ReseedSequences(ctx, t, false); err != nil {
+			s.log(ctx, "sequence sync for "+t.String(), err)
 		}
 	}
 }

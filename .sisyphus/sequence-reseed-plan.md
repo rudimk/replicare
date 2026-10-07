@@ -159,8 +159,17 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
 - **M4 — Docs.** `docs/operations.md` failover/DR section: the gap, the command, the
   runbook ordering, the new privilege; `CLAUDE.md` §12 privilege note + a decision-log row;
   a loud "active-active: NOT this command — see below" cross-link.
-- **M5 (fast-follow, optional) — continuous `sync_sequences`.** The lazy-interval sync knob,
-  one-way only, same refusal on a mesh.
+- **M5 (fast-follow, optional) — continuous `sync_sequences`.** ✅ **SHIPPED.** An opt-in neutral
+  `sync_sequences: true` knob on a one-way `sync` advances the target's owned counters to `max(id)+1`
+  on a lazy interval (`seqSyncInterval`, 60s) during streaming, via the existing `engine.SequenceReseeder`
+  capability. Off by default; a no-op in cluster mode, when the engine lacks the capability (Redis), or
+  outside the interval; best-effort (a reseed error — e.g. the missing DR grant — is logged and retried,
+  never aborting the pass). Same mesh refusal as the command, enforced at **config load** (a
+  `sync_sequences: true` target that is also a cluster member is rejected by `validate`/`run`).
+  `internal/config` (knob + `SyncsSequences()` + validation), `internal/pipeline/stream.go`
+  (`syncSequences`), `internal/daemon/build.go` (threaded, always false on a cluster edge). Unit-tested
+  (config parse + mesh refusal; pipeline gating/throttle/best-effort). Docs: `docs/configuration.md`,
+  `docs/operations.md`, `CLAUDE.md` §12 + decision log.
 - **M6 (active-active docs — near-term, after the owner's chat with the consuming team) —**
   repo docs (`docs/multi-master.md`, cross-linked from `docs/operations.md`): **UUID v7 / ULID
   (stored binary) is the blessed active-active id strategy**, with the §6.0 fine print
