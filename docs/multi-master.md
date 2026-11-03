@@ -29,6 +29,12 @@ tombstones live in the `replicare` schema and are **GC'd**; it must work with **
 superuser anywhere**; the config surface is **`clusters:`**. The milestone-level plan is
 [`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md).
 
+**Operator-facing rules.** The plain-language rules for safely running an active-active
+cluster — the globally-unique-ID requirement and the schema-change procedure — live in
+[`active-active.md`](active-active.md). This note is the engineering design behind them; if
+the two ever disagree, the mechanisms described here are the source of truth and
+`active-active.md` should be corrected to match.
+
 ---
 
 ## 1. Goal
@@ -530,6 +536,12 @@ Notes:
    active-active id-allocation *code* deliverable; replicare polices the strategy, it never
    allocates or syncs counters. (`replicare validate` does not yet walk `clusters:`, so the
    refusal currently surfaces at `run`/bring-up, not in `validate` — a documented follow-up.)
+   **Planned — continuous re-check:** the classifier runs only at bring-up today, so a
+   mesh-unsafe key introduced by a *mid-stream* migration (a new table, or a new
+   auto-counting column added to a running cluster) is not caught until the next restart.
+   The plan is to run the same pure classifier on a schedule and on demand, so a risky
+   change is flagged when it ships rather than at the next restart. This is the continuous
+   check referenced in [`active-active.md`](active-active.md) Rule 1.
 
 ### 6.4 State-store & source-schema changes
 
