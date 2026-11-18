@@ -255,13 +255,16 @@ on `:19091/metrics` climb as the `DEL`/`RENAME` churn is reconciled.
 
 ## Cluster mode
 
-The same tool drives a Redis Cluster target. Bring up the cluster harness, then pass `--cluster`
-plus a seed list:
+The same tool works against Redis Cluster. `--cluster` switches *every* connection spec in a
+command to a comma-separated seed list, and `--password` is shared by both sides too, so a
+`verify` compares a cluster with a cluster; it can't compare a standalone server with a cluster in
+one command. The cluster harness brings up one 3-node cluster, which `run` seeds and churns as the
+source; point `verify` at it and at a second cluster that `replicare` replicates into:
 
 ```sh
 task harness:redis:cluster:up
 go run ./test/loadgen-redis run    --dsn "127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002" --cluster --scale 0.1
-go run ./test/loadgen-redis verify --source "…standalone source…" --target "127.0.0.1:7000,…" --cluster --wait 120s
+go run ./test/loadgen-redis verify --source "127.0.0.1:7000,127.0.0.1:7001,127.0.0.1:7002" --target "…target cluster seeds…" --cluster --wait 120s
 ```
 
 The `{bucket}` hash tags spread keys across the cluster's slots, so the per-master SCAN fan-out

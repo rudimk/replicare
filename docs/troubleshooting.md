@@ -19,7 +19,8 @@ new user hits:
 4. A sync references a source / target that isn't defined, or crosses engines. A sync is
    single-engine, so its source and all of its targets have to share one engine.
 
-`replicare validate <config>` reports all of these without connecting. Exit `2` means a
+`replicare validate <config>` reports all of these when it loads the config, before it connects
+to anything. Exit `2` means a
 config / usage problem, while exit `1` means a clean pre-flight BLOCK or a connection
 failure(see the [CLI reference](cli.md)).
 

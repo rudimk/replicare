@@ -35,8 +35,9 @@ old servers, while still being practical to run in CI:
 
 > ⚠️ Even older sources(9.4 / 9.5 and earlier) aren't covered by the CI matrix. If we need them
 > later, we'll add matrix entries; until then, behaviour on pre-9.6 servers is unverified.
-> Notably, pre-9.0 `bytea` defaults to `escape` output, which the modern target still parses -
-> but this isn't exercised.
+> Servers older than 9.0 can't be used at all: `replicare` sets `bytea_output` on every
+> connection, and that setting only exists from 9.0, so the connection fails with an error naming
+> it before any data moves.
 
 ## What is verified vs unverified
 

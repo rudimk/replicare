@@ -16,7 +16,9 @@ example `port: ${PGPORT:-5432}`); we built it this way so that env-var overrides
 field, though keeping passwords out of the file is still the common case. An unset `${VAR}`
 with no default is a hard config-load error(exit 2).
 
-To check a config without connecting and running it, use `replicare validate <config>`.
+To check a config before running it, use `replicare validate <config>`. It loads the config first,
+then connects to every source and target, read-only, to run the pre-flight checks; it never starts
+replicating.
 
 ## Top-level structure
 
@@ -95,7 +97,7 @@ the target.
 | `database` | string | |
 | `user` | string | the least-privilege `replicare` role |
 | `password` | string | use `${VAR}` |
-| `sslmode` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode(libpq semantics) |
+| `sslmode` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode(libpq semantics); default `prefer` |
 | `params` | map | extra key=value connection parameters |
 
 ### MySQL connection block
