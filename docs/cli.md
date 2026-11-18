@@ -131,15 +131,19 @@ own, and against live targets. For each table it reports one of:
 - `ok` - the row counts *and* the content checksums match.
 - `drift-count` - the row counts differ(the target is missing rows / has extra rows).
 - `drift-checksum` - the counts match but the content differs(a value has diverged).
-- `count-only-ok` - the counts match, and the engine only compares membership(see below).
+- `count-only-ok` - the counts match, but there was no content hash to compare. Every engine
+  `replicare` ships today hashes content, so this shouldn't normally appear.
 - `error` - a table couldn't be compared(for example, it's missing on the target).
 
 The content fingerprint is an order-independent hash over a name-matched column projection, so
 it isn't thrown by differences in physical column order, and it streams in constant server
-memory. The relational engines(Postgres and MySQL) hash row content. Redis compares the key
-set(count plus membership), which catches missing / extra keys, the most common way Redis
-diverges, since transport is a value-faithful `DUMP` then `RESTORE`. Per-value content diffing
-for Redis is a documented follow-up.
+memory. The relational engines(Postgres and MySQL) hash row content. Redis hashes each key's
+name, type and value, so it catches a changed value as well as missing / extra keys. Values are
+read in their logical form rather than as raw `DUMP` bytes; transport is a value-faithful `DUMP`
+then `RESTORE`, but the bytes themselves can differ between Redis versions for the same value, so
+hashing them would report drift that isn't there. Key expiry times aren't part of the hash, since
+they're replicated as time remaining and differ slightly by design. Stream entries are compared,
+but stream consumer groups aren't.
 
 The exit codes make `replicare verify config.yml` scriptable as a convergence gate. `0` means
 every selected sync converged, `1` means drift or an endpoint that couldn't be reached, and `2`
