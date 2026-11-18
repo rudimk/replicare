@@ -99,11 +99,29 @@ Actively-written tables won't match as a whole, since the source runs ahead. Ins
 immutable historical window - a key range below the active tail - which must match exactly.
 Adjust the table, key column and range to a span that's known not to be updated.
 
+This hashes the same name-sorted, generated-excluded column list as step 2, so a table whose
+columns are in a different order on each side, or that has a `GENERATED … STORED` column, still
+gives matching digests. The range bounds are `bigint`; for a key of another type(a UUID, say),
+change the two `bigint` parameters to the key's type.
+
 ```sql
-SELECT count(*),
-       md5(string_agg(md5(t::text), '' ORDER BY id)) AS digest
-FROM public.user_answer t
-WHERE id BETWEEN 1000000 AND 1010000;
+CREATE OR REPLACE FUNCTION pg_temp.rc_verify_range(sch text, tbl text, keycol text, lo bigint, hi bigint)
+RETURNS TABLE(rows bigint, digest text) AS $$
+DECLARE cols text;
+BEGIN
+  -- the same name-sorted, generated-excluded column list as step 2
+  SELECT string_agg(quote_ident(column_name), ',' ORDER BY column_name)
+    INTO cols
+    FROM information_schema.columns
+   WHERE table_schema = sch AND table_name = tbl AND is_generated = 'NEVER';
+  RETURN QUERY EXECUTE format(
+    'SELECT count(*)::bigint,
+            md5(coalesce(string_agg(md5(ROW(%s)::text), '''' ORDER BY md5(ROW(%s)::text)), ''empty''))
+       FROM %I.%I WHERE %I BETWEEN $1 AND $2',
+    cols, cols, sch, tbl, keycol) USING lo, hi;
+END $$ LANGUAGE plpgsql;
+
+SELECT * FROM pg_temp.rc_verify_range('public', 'user_answer', 'id', 1000000, 1010000);
 ```
 
 ## 4. Referential integrity, run on the target
