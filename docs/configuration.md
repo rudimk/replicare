@@ -178,7 +178,7 @@ syncs:
     tuning: { ... }           # optional (see below)
 ```
 
-### Keeping DR counters warm (`sync_sequences`)
+### Keeping DR counters warm: `sync_sequences`
 
 `sync_sequences` is an opt-in switch for one-way / DR setups only, and it's off by default.
 With it on, the daemon advances each replicated table's owned identity / serial /
@@ -195,7 +195,7 @@ cluster, since advancing a counter across a mesh is silent data loss; use UUID /
 there instead. See
 [sequences & identity counters in operations](operations.md#keeping-counters-warm-continuously-sync_sequences).
 
-### Pausing a sync (`enabled`)
+### Pausing a sync: `enabled`
 
 `enabled` is a per-pipeline pause switch, and it's a pure opt-out. Leave it out(or set it to
 `true`) and the sync runs, so a config written before this field existed behaves exactly as it
@@ -251,7 +251,7 @@ no tables, keys or FKs to deal with; the "unit" is the logical keyspace(one DB, 
 cluster). An optional `types` filter in the `redis:` block narrows the selection down to
 specific value types.
 
-### `tuning` (per sync)
+### `tuning`, per sync
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
@@ -271,7 +271,7 @@ For Redis, the neutral `retention.*` knobs do nothing, since there's no source-s
 to bound. Redis pacing lives in the `redis:` block instead(`scan_count`, `reconcile_interval`,
 `delete_sweep_interval`).
 
-## Active-active clusters (`nodes` and `clusters`)
+## Active-active clusters: `nodes` and `clusters`
 
 A `clusters:` block runs a full active-active cluster on Postgres, MySQL and Redis. Writes
 accepted on any node - including changes to the *same* row on two nodes at once - end up with

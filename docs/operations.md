@@ -215,7 +215,7 @@ MySQL-only items:
 - (MySQL only) A Postgres database for `replicare`'s state is still required for a MySQL to MySQL
     sync(see [the MySQL page](mysql.md#1-a-mysql-sync-still-needs-a-postgres-for-state)).
 
-## Tuning knobs (per sync, under `tuning:`)
+## Tuning knobs, per sync under `tuning:`
 
 Each sync has its own `tuning:` block, with these knobs:
 
@@ -269,7 +269,7 @@ This doesn't speed up a *single* hot table; that's still down to `drain_batch` /
 and the target's capacity. What it removes is the queuing across tables when many of them are hot.
 As always, it only helps until the target's write capacity saturates.
 
-## Source footprint (the thing to watch)
+## Source footprint: the thing to watch
 
 `replicare` writes delta and track tables to the source - a database we may not own - so keeping
 that footprint bounded matters just as much as keeping the target up to date. The headline signals,
@@ -443,7 +443,7 @@ A ready-to-import Grafana dashboard over these metrics(per-table backlog / lag, 
 initial-copy progress, throughput and errors, with a configurable Prometheus data source) lives at
 [Grafana dashboard](grafana-dashboard.md).
 
-### Traces (OpenTelemetry)
+### OpenTelemetry traces
 
 Traces are exported over OTLP/gRPC when `observability.otlp_endpoint` is set. The span names come
 from a fixed registry:
@@ -460,7 +460,7 @@ from a fixed registry:
 A drain / apply span against an unreachable target is recorded with error status, plus the backlog /
 age attributes, so the stall and its blast radius are visible in the trace timeline.
 
-### Structured logs (slog)
+### Structured logs with slog
 
 Logs are JSON or text(`logging.format`) and levelled(`logging.level`), with a stable `event`
 field to grep / alert on:
@@ -489,7 +489,7 @@ The daemon serves an operator HTTP surface, bound to `observability.status_addr`
 The CLI's `replicare status` reads the same state-store snapshot and adds live signals on top,
 covered in the next section.
 
-## Checking progress from the CLI (no Grafana required)
+## Checking progress from the CLI, no Grafana required
 
 Sometimes Grafana can't be deployed next to `replicare` - for example, when the daemon runs inside
 the source cluster because that's the only network path to the source databases. In that case the
@@ -625,7 +625,7 @@ This flags the target in the state store, and the running daemon re-copies it on
 then resumes streaming. The command signals the owning daemon rather than acting directly, which
 honours single-active ownership.
 
-## Sequences & identity counters (DR / promotion)
+## Sequences & identity counters: DR / promotion
 
 `replicare` replicates row values faithfully; the integer `id` a sequence produced lands on the
 target verbatim(`OVERRIDING SYSTEM VALUE` on Postgres, the explicit value on MySQL). What it
@@ -666,7 +666,7 @@ about it:
 > [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids). (This isn't the same as
 > `reseed`, which re-copies a target's data.)
 
-### Keeping counters warm continuously (`sync_sequences`)
+### Keeping counters warm continuously: `sync_sequences`
 
 The promotion-time `reseed-sequences` run above is the guarantee. To keep the counters advanced
 *during* streaming as well, so a failover has nothing sequence-related left to do, opt the sync

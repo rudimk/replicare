@@ -90,7 +90,7 @@ have to hold the identical union.
 `verify` compares only the 9 keyed tables, skipping `audit_log` just as `replicare` does. The
 `GENERATED … STORED` column is included, and matches because both servers recompute it.
 
-## Active-active (multi-master) load testing
+## Active-active, multi-master load testing
 
 The same harness drives a `clusters:` mesh, using disjoint partitioning. Each writer node gets
 `--node-id K`, which shifts every generated key and every FK reference into a private slice,

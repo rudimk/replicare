@@ -12,10 +12,10 @@
 - [Configuration](configuration.md)
 - [CLI](cli.md)
 
-# Running replicare
+# Running `replicare`
 
 - [Operations](operations.md)
-- [Kubernetes (Helm)](kubernetes.md)
+- [Kubernetes with Helm](kubernetes.md)
   - [Helm chart reference](helm-chart.md)
 - [Grafana dashboard](grafana-dashboard.md)
 - [Scraping metrics](otel-collector.md)

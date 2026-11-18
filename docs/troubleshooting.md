@@ -4,7 +4,7 @@ This page collects the problems operators most often run into with `replicare`, 
 that won't load through to engine-specific errors on MySQL and Redis. For each one, it explains
 what's going on and why `replicare` behaves the way it does, then what to do about it.
 
-## The config won't load (exit code 2)
+## The config won't load: exit code 2
 
 Before any pre-flight runs, the config is parsed and structurally validated. Failures at this
 stage exit with code 2 and a message naming the problem, and they're usually the first thing a
@@ -51,7 +51,7 @@ Dropping a trigger needs table ownership. Postgres allows `CREATE TRIGGER` with 
 the owner drop the `replicare_trg_*` trigger. `replicare`'s own delta / track tables and
 functions are dropped without any trouble by the daemon role.
 
-## The source's disk is filling up (delta / `replicare` schema growth)
+## The source's disk is filling up: delta / `replicare` schema growth
 
 The delta tables on the source are a high-churn queue. If a target is down or slow, its deltas
 can't be purged, and the queue grows. `replicare` bounds this with retention: past
@@ -141,7 +141,7 @@ wrinkles.
 
 ## Redis-specific issues
 
-### `validate` blocks on a newer source and an older target (RDB version)
+### `validate` blocks on a newer source and an older target: RDB version
 
 `RESTORE` rejects a payload whose RDB version is higher than the target's maximum, so
 `replicare` blocks a newer source / older target pair up front, with an error that mentions the

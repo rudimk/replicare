@@ -12,7 +12,7 @@ no `GROUP_CONCAT` length ceiling.
 > ⚠️ The authoritative check is still `replicare verify <config>`. These queries are the
 > fallback for when there's no pod to run it from.
 
-## 0. Pin the session (run on both, every session)
+## 0. Pin the session, run on both in every session
 
 `replicare` moves MySQL values byte-faithfully(`LOAD DATA … CHARACTER SET binary`), so the main
 cross-version rendering risk in a manual hash is the time zone. Pin it to UTC on both sides
@@ -23,7 +23,7 @@ SET SESSION time_zone = '+00:00';
 SET SESSION group_concat_max_len = 1048576;  -- so the generator below isn't truncated
 ```
 
-## 1. Row counts per table (run on both)
+## 1. Row counts per table, run on both
 
 `information_schema.TABLES.TABLE_ROWS` is only an estimate for InnoDB, so we generate exact
 `COUNT(*)`s instead. Run this to emit one `SELECT … UNION ALL …`, then run the emitted statement:
@@ -40,7 +40,7 @@ WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE';
 A hot table reads a few rows ahead on the source, by whatever's in flight; a gap that shrinks
 towards 0 is normal streaming, not drift.
 
-## 2. Content digest per table (run on both; digests must match)
+## 2. Content digest per table, run on both; the digests must match
 
 This generates a single statement that hashes every table, with name-matched columns, generated
 columns excluded, and a `BIT_XOR` fold so row order doesn't matter. Run the generator, then run
@@ -75,7 +75,7 @@ Each column is `COALESCE`d to a sentinel(`\0N`), so a real `NULL` never collides
 string, and `CONCAT_WS('#', …)` separates the columns, so `('a','bc')` and `('ab','c')` don't
 hash alike.
 
-## 3. Hot-table digest over a stable key range (run on both)
+## 3. Hot-table digest over a stable key range, run on both
 
 Actively-written tables won't match as a whole, since the source runs ahead. Instead, hash an
 immutable historical window - a key range below the active tail - which must match exactly.
@@ -91,7 +91,7 @@ FROM `rc_it`.`orders`
 WHERE id BETWEEN 1000000 AND 1010000;
 ```
 
-## 4. Referential integrity (run on target)
+## 4. Referential integrity, run on the target
 
 This generates one anti-join per foreign key; run it, then run the emitted
 `SELECT … UNION ALL …`. Every `orphans` count should be 0.

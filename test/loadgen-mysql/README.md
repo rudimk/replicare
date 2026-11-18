@@ -114,7 +114,7 @@ bit-faithfully, so both ends hold the identical double, but the two server versi
 format a raw double as a string differently; normalising removes that difference. It's this
 canonical rendering that gets compared, never the raw storage bytes.
 
-## Active-active (multi-master) load testing
+## Active-active, multi-master load testing
 
 The same harness drives a MySQL `clusters:` mesh, using disjoint partitioning. Each writer node
 gets `--node-id K`, which shifts every generated key and every FK reference into a private

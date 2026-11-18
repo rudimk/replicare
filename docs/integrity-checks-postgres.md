@@ -11,7 +11,7 @@ order-independent, so physical row order, index order and text collation don't a
 > ⚠️ The authoritative check is still `replicare verify <config>`. These queries are the
 > fallback for when there's no pod to run it from, and their results should agree with `verify`.
 
-## 0. Pin session GUCs (run on both, every session)
+## 0. Pin session GUCs, run on both in every session
 
 This step is essential. `replicare` canonicalises these settings on every connection, and row
 text has to render identically on both sides(an old source and a newer target), otherwise there
@@ -27,7 +27,7 @@ SET bytea_output = 'hex';
 SET client_encoding = 'UTF8';
 ```
 
-## 1. Row counts per table (run on both)
+## 1. Row counts per table, run on both
 
 This gets exact counts for every base table in a schema, using a session-local helper(anything
 in `pg_temp.*` is dropped automatically at disconnect). A hot table reads a few rows ahead on the
@@ -47,7 +47,7 @@ END $$ LANGUAGE plpgsql;
 SELECT * FROM pg_temp.rc_counts('public') ORDER BY table_name;
 ```
 
-## 2. Content digest per table (run on both; digests must match)
+## 2. Content digest per table, run on both; the digests must match
 
 This is the real integrity check. It's order-independent, matches columns by name and excludes
 `GENERATED … STORED` columns, so an identical `digest` for a table means it's logically
@@ -93,7 +93,7 @@ SELECT * FROM pg_temp.rc_verify('public') ORDER BY table_name;
 diff /tmp/rc_src.txt /tmp/rc_tgt.txt   # no output = fully converged
 ```
 
-## 3. Hot-table digest over a stable key range (run on both)
+## 3. Hot-table digest over a stable key range, run on both
 
 Actively-written tables won't match as a whole, since the source runs ahead. Instead, hash an
 immutable historical window - a key range below the active tail - which must match exactly.
@@ -106,7 +106,7 @@ FROM public.user_answer t
 WHERE id BETWEEN 1000000 AND 1010000;
 ```
 
-## 4. Referential integrity (run on target)
+## 4. Referential integrity, run on the target
 
 This catches any FK breakage from the copy. The query below generates one anti-join per foreign
 key; run it, then paste and run the emitted `SELECT … UNION ALL …`. Every `orphans` count should

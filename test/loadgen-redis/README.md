@@ -100,7 +100,7 @@ differ even for identical data; `replicare` deliberately preserves each side's o
 compared as presence only(has a TTL or doesn't), since the exact remaining seconds legitimately
 differ by the replication delay.
 
-## Active-active (multi-master) load testing
+## Active-active, multi-master load testing
 
 The same harness drives a Redis `clusters:` mesh, using disjoint key namespaces. Each writer node
 gets `--node-id K`, which moves every key it writes into a private segment right after the
