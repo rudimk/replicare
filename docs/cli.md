@@ -1,13 +1,20 @@
-# CLI reference
+# CLI Reference
 
-Most commands take the config file as an argument. Exit codes: `0` success,
-`1` runtime error **or a pre-flight BLOCK** (see `validate`), `2` usage/config
-error (bad flags, or a config that won't load — unknown engine, unknown field,
-unset `${VAR}`, cross-engine sync).
+This page is the reference for the `replicare` command line, which runs the daemon and is also
+how an operator checks on it, validates a config, compares a source with its targets, and
+handles one-off jobs like a reseed. It goes through each command in turn, with its flags, what
+it does, and what its exit codes mean.
+
+Most commands take the config file as an argument:
 
 ```
 replicare <command> [args]
 ```
+
+The exit codes are the same across commands. `0` means success, and `1` means a runtime error
+*or* a pre-flight BLOCK(see `validate`). `2` means a usage / config error - bad flags, or a
+config that won't load, such as an unknown engine, an unknown field, an unset `${VAR}`, or a
+cross-engine sync.
 
 ## `help` / `version`
 
@@ -22,17 +29,17 @@ replicare version       # also: --version, -v — version, commit, build date, G
 replicare validate config.yml
 ```
 
-Loads the config and runs **pre-flight** for every (sync, target): connects
-read-only, introspects both sides, and classifies every column pair —
-identical/widening (ok), risky/lossy (warn), incompatible or missing type
-(**block**). Also reports FK components, a giant-component warning, dangling FK
-edges, and skipped no-key tables. Makes **no changes**. Fix all BLOCK findings
-before running.
+This loads the config and runs pre-flight for every(sync, target) pair. It connects read-only,
+introspects both sides, and classifies every column pair: identical / widening is ok,
+risky / lossy is a warning, and an incompatible or missing type is a BLOCK. It also reports FK
+components, a giant-component warning, dangling FK edges, and tables skipped for having no
+key. It makes *no* changes, and every BLOCK finding needs fixing before running.
 
-**Exit codes are meaningful for scripting:** `0` = clean (ok/warn only), `1` = at
-least one **BLOCK** finding (a clean "incompatible" verdict, *not* a crash), `2` =
-the config didn't load or a connection failed. So `replicare validate ... && replicare run ...`
-gates a start on a block-free pre-flight.
+The exit codes are meaningful for scripting. `0` means clean(ok / warn only), `1` means at
+least one BLOCK finding, which is a clean "incompatible" verdict and *not* a crash, and `2`
+means the config didn't load or a connection failed. That means
+`replicare validate ... && replicare run ...` only starts the daemon after a block-free
+pre-flight.
 
 ## `run <config>`
 
@@ -40,13 +47,13 @@ gates a start on a block-free pre-flight.
 replicare run config.yml
 ```
 
-Runs the daemon: starts the observability endpoints, then brings up and streams
-every sync until `SIGINT`/`SIGTERM`. On a signal it shuts down **gracefully** —
-finishes the in-flight drain pass, checkpoints, and exits `0`.
+This runs the daemon. It starts the observability endpoints, then brings up and streams every
+sync until it gets `SIGINT`/`SIGTERM`. On a signal it shuts down gracefully; it finishes the
+in-flight drain pass, checkpoints, and exits `0`.
 
-Each sync runs under a single-active ownership lock; a second daemon pointed at
-the same sync stands by. State is checkpointed, so a restarted process resumes
-from where it left off.
+Each sync runs under a single-active ownership lock, so a second daemon pointed at the same
+sync stands by rather than competing with the first. State is checkpointed, so a restarted
+process resumes from where it left off.
 
 ## `status <config> [--json] [--sync <name>] [--no-live] [--watch <dur>]`
 
@@ -58,8 +65,8 @@ replicare status config.yml --no-live          # state store only (no source/tar
 replicare status config.yml --watch 5s         # re-render every 5s until Ctrl-C
 ```
 
-Each sync prints a one-line **health headline** followed by a per-(table, target)
-grid, read from the **state store** (so it works whether or not a daemon is running):
+Each sync prints a one-line health headline, followed by a grid with a row per(table, target),
+read from the state store - so it works whether or not a daemon is running:
 
 ```
 sync: app-to-warehouse
@@ -68,42 +75,44 @@ sync: app-to-warehouse
   public.orders   done  ...  2s    ...  40s ago     1240   -
 ```
 
-Two **different** time signals — the distinction that makes a caught-up sync legible:
+The grid shows two *different* time signals, and telling them apart is what makes a caught-up
+sync legible.
 
-- **`SEEN`** — time since the last *healthy streaming pass* (a liveness heartbeat). The
-  daemon refreshes it every pass whether or not data moved, so a small `SEEN` means
-  "running and current"; a large `SEEN` means the daemon is stopped or stalled. (This
-  is what the old `LAG` column was, renamed — it was never "how far behind".)
-- **`LAST_SYNC` / `ROWS`** — time since the last pass that actually *applied rows* to
-  this (target, table), and how many it applied. A healthy, idle sync shows a recent
-  `SEEN` but a growing `LAST_SYNC` — that's normal (nothing to apply), not lag. `-`
-  until the first data-moving pass. (These come from the state store, so they show in
-  `--no-live` too.)
+`SEEN` is the time since the last healthy streaming pass, which makes it a liveness heartbeat.
+The daemon refreshes it on every pass whether or not any data moved, so a small `SEEN` means
+the sync is running and current, while a large `SEEN` means the daemon is stopped or stalled.
+(This is what the old `LAG` column was, renamed; it was never a measure of how far behind a
+target is.)
 
-The headline aggregates these across the sync: phase, most-recent `SEEN`, most-recent
-data movement + total rows applied, and (live) the backlog rollup.
+`LAST_SYNC` / `ROWS` are the time since the last pass that actually applied rows to this(target,
+table) pair, and how many rows it applied. A healthy, idle sync shows a recent `SEEN` but a
+growing `LAST_SYNC`, which is normal - there's simply nothing to apply - and isn't lag. Both
+show `-` until the first pass that moves data. They come from the state store, so they show
+with `--no-live` too.
 
-**Live by default.** Unless you pass `--no-live`, `status` also connects to the
-sync's source and targets to add signals that live only in the databases — the
-visibility you'd otherwise get from Grafana:
+The headline rolls these up across the sync: its phase, the most recent `SEEN`, the most recent
+data movement along with the total rows applied, and(when live) the backlog rollup.
 
-- **`SRC_ROWS` / `TGT_ROWS`** — live source and target row counts (Redis: key
-  counts). During initial copy `TGT_ROWS` climbs toward `SRC_ROWS`; while streaming
-  they track each other.
-- **`BACKLOG`** — the per-target unconsumed **delta backlog** as `rows (oldest-age)`.
-  It distinguishes three states: **`0`** = caught up (healthy — the common steady
-  state); **`N (age)`** = that many deltas waiting; **`-`** = *unknown*, not zero — the
-  signal couldn't be read (a table not captured, Redis's capture-less engine, or a
+`status` is live by default. Unless `--no-live` is passed, it also connects to the sync's
+source and targets to add signals that only live in the databases, which is the visibility
+an operator would otherwise get from Grafana:
+
+- `SRC_ROWS` / `TGT_ROWS` are the live source and target row counts(key counts on Redis).
+  During the initial copy, `TGT_ROWS` climbs towards `SRC_ROWS`; while streaming, the two track
+  each other.
+- `BACKLOG` is the per-target unconsumed delta backlog, shown as `rows (oldest-age)`. It
+  distinguishes three states. `0` means caught up, which is healthy and the common steady
+  state. `N (age)` means that many deltas are waiting. `-` means *unknown*, not zero - the
+  signal couldn't be read(a table that isn't captured, Redis's capture-less engine, or a
   transient error), and a `live: partial (…)` note says why.
 
-Live collection is **best-effort and read-only** (it installs nothing): if the
-source or a target is unreachable, the row still renders from the state store and a
-`live: partial (…)` note explains what was missing. `--no-live` skips all
-source/target connections (useful if you only have state-store access, or want the
-cheapest possible check).
+Live collection is best-effort and read-only, and installs nothing. If the source or a target
+is unreachable, the row still renders from the state store, and a `live: partial (…)` note
+explains what was missing. `--no-live` skips every source / target connection, which is
+useful with only state-store access, or for the cheapest possible check.
 
-`--watch <dur>` re-renders on the given interval (e.g. `10s`, `1m`) until
-`SIGINT`; combine with `--json` to stream snapshots.
+`--watch <dur>` re-renders on the given interval(for example `10s` or `1m`) until `SIGINT`;
+combine it with `--json` to stream snapshots.
 
 ## `verify <config> [--json] [--sync <name>] [--watch <dur>]`
 
@@ -114,32 +123,31 @@ replicare verify config.yml --json             # machine-readable
 replicare verify config.yml --watch 30s        # re-check every 30s until Ctrl-C
 ```
 
-A **read-only** source↔target convergence spot-check. For every replicated unit it
-counts and content-fingerprints the source and each target and compares. It writes
-nothing and installs nothing, so it is safe to run against a source you may not own
-and against live targets. Per table it reports one of:
+This is a read-only convergence spot-check between a source and its targets. For every
+replicated unit, it counts and content-fingerprints the source and each target, then compares
+them. It writes nothing and installs nothing, so it's safe to run against a source we may not
+own, and against live targets. For each table it reports one of:
 
-- **`ok`** — row counts *and* content checksums match.
-- **`drift-count`** — row counts differ (the target is missing/extra rows).
-- **`drift-checksum`** — counts match but content differs (a value diverged).
-- **`count-only-ok`** — counts match; the engine compares membership only (see below).
-- **`error`** — a table could not be compared (e.g. missing on the target).
+- `ok` - the row counts *and* the content checksums match.
+- `drift-count` - the row counts differ(the target is missing rows / has extra rows).
+- `drift-checksum` - the counts match but the content differs(a value has diverged).
+- `count-only-ok` - the counts match, and the engine only compares membership(see below).
+- `error` - a table couldn't be compared(for example, it's missing on the target).
 
-The content fingerprint is an **order-independent** hash over a name-matched column
-projection, so it is robust to physical column-order differences and streams in
-constant server memory. Relational engines (Postgres, MySQL) hash row content;
-**Redis** compares the **key set** (count + membership), which catches missing/extra
-keys — the dominant Redis divergence — since transport is value-faithful
-`DUMP`→`RESTORE` (per-value Redis content diffing is a documented follow-up).
+The content fingerprint is an order-independent hash over a name-matched column projection, so
+it isn't thrown by differences in physical column order, and it streams in constant server
+memory. The relational engines(Postgres and MySQL) hash row content. Redis compares the key
+set(count plus membership), which catches missing / extra keys, the most common way Redis
+diverges, since transport is a value-faithful `DUMP` then `RESTORE`. Per-value content diffing
+for Redis is a documented follow-up.
 
-**Exit codes:** `0` = every selected sync converged; `1` = drift or an endpoint
-could not be reached; `2` = usage/config. So `replicare verify config.yml` is
-scriptable as a convergence gate. In `--watch` mode the exit code reflects the last
-completed pass.
+The exit codes make `replicare verify config.yml` scriptable as a convergence gate. `0` means
+every selected sync converged, `1` means drift or an endpoint that couldn't be reached, and `2`
+means a usage / config error. In `--watch` mode, the exit code reflects the last completed pass.
 
-> Note: replication has lag — a `drift-count`/`drift-checksum` immediately after a
-> burst of source writes usually just means the target hasn't caught up yet.
-> Re-run (or use `--watch`); persistent drift is the real signal.
+> ⚠️ Replication has lag, so a `drift-count`/`drift-checksum` straight after a burst of source
+> writes usually just means the target hasn't caught up yet. Re-run it(or use `--watch`);
+> drift that persists is the real signal.
 
 ## `capture install|remove <config> [--sync <name>]`
 
@@ -148,14 +156,14 @@ replicare capture install config.yml            # all syncs
 replicare capture remove config.yml --sync app-to-warehouse
 ```
 
-Installs or removes the trigger-based CDC machinery on a sync's source, over its
-selected tables. `run` installs capture automatically, so this is for
-pre-provisioning or manual teardown.
+This installs or removes the trigger-based capture machinery on a sync's source, over its
+selected tables. `run` installs capture automatically, so this command is for pre-provisioning
+or for manual teardown.
 
-**Note:** `install` needs only `TRIGGER` (plus `SELECT`/`USAGE` and schema
-creation). `remove` additionally needs **table ownership** to drop the triggers —
-if the replicare role doesn't own the tables, removal of the trigger fails
-(reported), though replicare's own delta/track tables are still dropped.
+> ⚠️ `install` only needs `TRIGGER`(plus `SELECT`/`USAGE` and schema creation), but `remove`
+> also needs table ownership to drop the triggers. If the `replicare` role doesn't own the
+> tables, removing the trigger fails(and is reported), though `replicare`'s own delta / track
+> tables are still dropped.
 
 ## `reseed <config> --sync <name> --target <name>`
 
@@ -163,15 +171,14 @@ if the replicare role doesn't own the tables, removal of the trigger fails
 replicare reseed config.yml --sync app-to-warehouse --target warehouse
 ```
 
-Flags a target for a full re-copy. It signals the **running** daemon (via the
-state store) to re-copy that target from current source state on its next pass,
-then resume streaming — honoring single-active ownership rather than acting
-directly. Use it after out-of-band divergence, or to recover a target that fell
-behind.
+This flags a target for a full re-copy. Rather than acting directly, it signals the *running*
+daemon through the state store to re-copy that target from the current source state on its
+next pass, then resume streaming; this way it respects single-active ownership. Use it after
+the target has diverged out-of-band, or to recover a target that's fallen behind.
 
-If the target has **no cursors yet** (you ran `reseed` before the sync's first
-run), there is nothing to flag: replicare reports that the target will full-copy on
-its first run anyway and exits `0`. That is expected, not a failure.
+If the target has no cursors yet(because `reseed` was run before the sync's first run),
+there's nothing to flag. `replicare` reports that the target will do a full copy on its first
+run anyway, and exits `0`. That's expected, and isn't a failure.
 
 ## `reseed-sequences <config> --sync <name> [--target <name>] [--dry-run]`
 
@@ -181,34 +188,39 @@ replicare reseed-sequences config.yml --sync app-to-warehouse --target warehouse
 replicare reseed-sequences config.yml --sync app-to-warehouse --dry-run  # report, write nothing
 ```
 
-Advances each replicated table's owned identity/serial/`AUTO_INCREMENT` counter on a
-**promoted one-way (DR) target** to `max(id)+1`, so after a failover cutover the node
-never re-issues an id already present in the replicated data. replicare replicates row
-*values* faithfully but not the sequence *object's* counter (data-only); for a passive replica that is harmless, but a promoted node's `nextval()` would
-collide with the copied rows. Postgres uses `setval`, MySQL `ALTER TABLE …
-AUTO_INCREMENT`. Tables with no owned counter (UUID / natural / composite PK) are
-skipped; `--dry-run` reports the target values and writes nothing.
+`replicare` replicates row *values* faithfully, but not the sequence *object's* counter, since
+it only copies data. For a passive replica that's harmless, but on a promoted node `nextval()`
+would collide with the copied rows. This command advances each replicated table's owned
+identity / serial / `AUTO_INCREMENT` counter on a promoted one-way(DR) target to `max(id)+1`,
+so after a failover cutover the node never re-issues an id that's already in the replicated
+data. Postgres uses `setval`, and MySQL uses `ALTER TABLE … AUTO_INCREMENT`. Tables with no
+owned counter(a UUID, natural or composite PK) are skipped, and `--dry-run` reports the target
+values without writing anything.
 
-- **Not the same as `reseed`.** `reseed` re-copies a target's *data*; `reseed-sequences`
-  only bumps its sequence counters.
-- **Run order:** stop replication into the node, run this, *then* open it to writes — a
-  write in the gap could still grab a colliding id.
-- **Passive / one-way / DR only.** It **refuses** a target that is an active-active
-  cluster member: there the same `max(id)+1` collapses every node onto one counter and
-  silently drops rows via last-write-wins. Active-active id allocation is a schema
-  concern — use globally-unique keys (UUID v7 / ULID); see
-  [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids).
-- **Privilege:** a DR-only grant beyond the DML set — Postgres `UPDATE` on each
-  sequence, MySQL `ALTER` on each table (reads only the target's own `max(id)`; no
-  source privilege). See [operations → Sequences & identity counters](operations.md#sequences--identity-counters-dr--promotion).
-- **Exit codes:** `0` done; `1` runtime error (unreachable / missing grant / engine
-  without the capability); `2` usage/config, or a refused mesh target.
+It's not the same thing as `reseed`. `reseed` re-copies a target's *data*, while
+`reseed-sequences` only bumps its sequence counters.
+
+The order matters: stop replication into the node, run this, and *then* open the node up to
+writes, since a write in the gap could still grab a colliding id.
+
+It needs a DR-only grant beyond the usual DML set - Postgres `UPDATE` on each sequence, MySQL
+`ALTER` on each table. It only reads the target's own `max(id)`, and needs no privilege on the
+source. See [sequences & identity counters in operations](operations.md#sequences--identity-counters-dr--promotion).
+
+The exit codes are `0` when it's done, `1` for a runtime error(an unreachable target, a missing
+grant, or an engine without the capability), and `2` for a usage / config error, or a refused
+mesh target.
+
+> ⚠️ This command is for passive / one-way / DR setups only, and it refuses a target that's a
+> member of an active-active cluster. There, the same `max(id)+1` collapses every node onto one
+> counter and silently drops rows through last-write-wins. In active-active, allocating ids is a
+> schema concern, and the answer is globally-unique keys(UUID v7 / ULID); see
+> [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids).
 
 ## Signals
 
-`run` responds to:
+`run` responds to `SIGTERM` / `SIGINT` with a graceful shutdown; it drains the in-flight pass,
+checkpoints, and exits 0.
 
-- `SIGTERM` / `SIGINT` — graceful shutdown (drain in-flight pass, checkpoint, exit 0).
-
-An ungraceful kill is also safe: state is checkpointed and applies are
-idempotent, so a fresh `run` resumes and converges without duplicates.
+An ungraceful kill is safe too. State is checkpointed and applies are idempotent, so a fresh
+`run` resumes and converges without duplicates.
