@@ -89,6 +89,15 @@ type Table struct {
 	// per-component atomic apply and source consume/track atomicity, so pre-flight
 	// blocks them (mysql-plan §0.5). Empty for engines without this concept.
 	StorageEngine string
+	// NullCollidingCols lists this table's columns for which NULL values can COLLIDE in
+	// a non-primary UNIQUE index: a key column of a `UNIQUE … NULLS NOT DISTINCT` index
+	// (Postgres 15+), or — conservatively — any column referenced by a unique index that
+	// has an expression or a partial-index filter. Setting such a column NULL on many
+	// rows at once can make otherwise-distinct rows violate the index. Constraint-backed
+	// and bare unique indexes are both covered. It is used ONLY to decide whether the
+	// cyclic-FK NULL-then-fill load may empty a column — never for replication identity
+	// (that is PrimaryKey/UniqueKeys). Postgres-only; nil for other engines.
+	NullCollidingCols []string
 }
 
 // HasUsableKey reports whether the table has a PK or any unique key usable as a

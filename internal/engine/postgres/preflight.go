@@ -121,13 +121,25 @@ func buildPreflight(syncName string, srcVersion, tgtVersion int, source, target 
 			fmt.Sprintf("FK %s references unselected table %s; the target must already satisfy it", fk.Name, fk.Parent))
 	}
 
-	// Cyclic-FK load classification.
-	p.CyclicFKs = classifyCyclicFKs(replicable)
+	// Cyclic-FK load classification. The FK graph comes from the source, but whether
+	// emptying a cyclic column would collide depends on the TARGET's unique indexes, so
+	// fold those in first (withTargetNullColliding).
+	p.CyclicFKs = classifyCyclicFKs(withTargetNullColliding(replicable, target))
 	for _, c := range p.CyclicFKs {
-		if c.Blocked() {
+		switch {
+		case c.Blocked():
 			p.add(engine.SevBlock, c.FK.Child, "cyclic-fk",
 				fmt.Sprintf("FK %s: %s", c.FK.Name, c.Reason))
-		} else {
+		case c.NullFillUnsafe && !c.SelfReference():
+			// Neither emptying the column (a unique index would collide) nor keeping it
+			// real (the FK points at a table loaded separately) works: refuse up front
+			// rather than fail with a duplicate-key error mid-copy.
+			p.add(engine.SevBlock, c.FK.Child, "cyclic-fk",
+				fmt.Sprintf("FK %s: %s", c.FK.Name, c.Reason))
+		case c.NullFillUnsafe:
+			p.add(engine.SevInfo, c.FK.Child, "cyclic-fk",
+				fmt.Sprintf("FK %s cyclic; %s", c.FK.Name, c.Reason))
+		default:
 			p.add(engine.SevInfo, c.FK.Child, "cyclic-fk",
 				fmt.Sprintf("FK %s cyclic; load strategy: %s", c.FK.Name, c.Strategy))
 		}
