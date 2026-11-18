@@ -1,19 +1,19 @@
 # Active-Active Replication
 
-This page describes active-active replication in replicare, where several databases accept
-writes at the same time and replicare keeps all of them carrying the same data. It covers why
-it exists, how to set a cluster up, how replicare settles two nodes changing the same row, where
+This page describes active-active replication in `replicare`, where several databases accept
+writes at the same time and `replicare` keeps all of them carrying the same data. It covers why
+it exists, how to set a cluster up, how `replicare` settles two nodes changing the same row, where
 things currently stand, as well as the two rules a cluster has to follow to stay safe.
 
 ## Why would anyone need this?
 
-Most replicare setups are one-way - a single source, and one or more targets that only ever
+Most `replicare` setups are one-way - a single source, and one or more targets that only ever
 receive changes. That works well for migrations, read replicas and analytics copies, but it
 falls apart once an application needs to write in more than one place, say an app running in
 two regions with a database in each.
 
 Active-active covers that case. Every database in the cluster(we call these nodes) accepts
-writes, and replicare carries each change to every other node, so they all end up holding the
+writes, and `replicare` carries each change to every other node, so they all end up holding the
 same data. It's supported for Postgres, MySQL and Redis, with each node replicating to nodes of
 the same engine.
 
@@ -21,18 +21,18 @@ It's more demanding than one-way replication, and there are two things that'll b
 
 1. IDs that collide across nodes. If two nodes each hand out id `100` to two *different* rows,
    one of those rows is lost the moment they sync.
-2. Schema changes that reach one node before the others. replicare only copies data, never
+2. Schema changes that reach one node before the others. `replicare` only copies data, never
    structure, so a column that exists on one node and not on another stalls replication in
    that direction until they match.
 
-Both are decisions that live in the database and in the deployment process, before replicare
-ever sees a row. replicare is built to stop loudly rather than corrupt anything, but it can't
+Both are decisions that live in the database and in the deployment process, before `replicare`
+ever sees a row. `replicare` is built to stop loudly rather than corrupt anything, but it can't
 fix either of these on its own; the two rules at the end of this page are how to avoid them.
 
 ## Setting up a cluster
 
 Each node is listed under `nodes:`, and the nodes that belong together are grouped in a
-`clusters:` entry. The table structure has to exist on every node already(replicare copies
+`clusters:` entry. The table structure has to exist on every node already(`replicare` copies
 data, not structure), and the daemon needs a Postgres `state_store` for its own progress,
 which can live on any of the nodes or on a separate database:
 
@@ -67,11 +67,11 @@ as it did before. Every field is listed in the
 
 ### Permissions each node needs
 
-Every node is both read from and written to, so its replicare user needs the source grants
+Every node is both read from and written to, so its `replicare` user needs the source grants
 *and* the target grants together:
 
 - Postgres: `TRIGGER` and `SELECT` on the replicated tables, `CREATE`(or a pre-created
-  `replicare` schema owned by the replicare user), plus `INSERT`, `UPDATE` and `DELETE` on the
+  `replicare` schema owned by the `replicare` user), plus `INSERT`, `UPDATE` and `DELETE` on the
   replicated tables. See
   [`grants-source.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source.sql) and
   [`grants-target.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target.sql).
@@ -84,13 +84,13 @@ Every node is both read from and written to, so its replicare user needs the sou
 None of the engines need a superuser, a `REPLICATION` role, binlog access or a `wal_level`
 change.
 
-## How replicare runs a cluster
+## How `replicare` runs a cluster
 
-For every pair of nodes, replicare runs one job in each direction(`us` to `eu`, and `eu` to
+For every pair of nodes, `replicare` runs one job in each direction(`us` to `eu`, and `eu` to
 `us`). Each job works much like a one-way sync: it captures changes on one node, re-reads their
 current values, and applies them on the other.
 
-When replicare writes a change into a node, that write is marked as replicare's own, so the
+When `replicare` writes a change into a node, that write is marked as `replicare`'s own, so the
 node doesn't capture it again and send it back. This is what stops changes from echoing around
 the cluster; a change travels once, from the node where it was made to every other node, and
 stops there.
@@ -101,10 +101,10 @@ present on the receiving node is simply overwritten with the same values.
 ## When two nodes change the same row
 
 If the same row is changed on two nodes at about the same time, the later change wins, on
-every node. replicare decides which change is "later" using a timestamp it keeps for each row,
+every node. `replicare` decides which change is "later" using a timestamp it keeps for each row,
 so all the nodes end up with the same value regardless of the order the changes arrive in.
 
-Nothing is added to the application's own tables for this. The timestamps live in replicare's
+Nothing is added to the application's own tables for this. The timestamps live in `replicare`'s
 own `replicare` schema on Postgres and MySQL, and in separate hidden keys on Redis; the cost is
 roughly one small extra row(or key) per replicated row. If two changes carry exactly the same
 timestamp, the tie is broken by node name(its `node_id`, which defaults to its key under
@@ -127,15 +127,15 @@ Redis, field by field).
 
 ## Engine-specific notes
 
-On Postgres, replicare marks its own writes with a transaction-level setting, which needs no
+On Postgres, `replicare` marks its own writes with a transaction-level setting, which needs no
 special privilege.
 
-On MySQL, replicare marks its own writes with a session variable, and keeps its timestamps in a
+On MySQL, `replicare` marks its own writes with a session variable, and keeps its timestamps in a
 plain table updated by ordinary SQL rather than a stored function; a stored function that
 writes data would need extra privileges on managed MySQL services, which we don't want to
 require.
 
-Redis has no triggers, so replicare spots local changes by comparing each key against a
+Redis has no triggers, so `replicare` spots local changes by comparing each key against a
 fingerprint it stored on the previous pass. Each data key gets a hidden companion key holding
 its timestamp and fingerprint; the data key itself is never wrapped or changed, and the
 companion sits in the same Redis Cluster slot, so both are written together in one step. This
@@ -180,7 +180,7 @@ A few clarifications on this:
 - Natural keys are fine. A key that's already unique in the real world(an email address, an ISO
   country code, an id assigned by the application itself) has no collision problem; the rule is
   specifically about letting the *database* hand out sequential numbers.
-- It's a schema decision, not a setting. replicare doesn't and won't invent ids or "sync the
+- It's a schema decision, not a setting. `replicare` doesn't and won't invent ids or "sync the
   counters" between nodes, since that approach can't be made safe. The fix lives in the table
   design.
 - One-way replication isn't affected. This rule only applies to active-active, and a normal
@@ -188,7 +188,7 @@ A few clarifications on this:
   step is a separate, one-way concern, covered in
   [operations](operations.md#sequences--identity-counters-dr--promotion).
 
-Before it'll run an active-active cluster, replicare inspects every table it's about to
+Before it'll run an active-active cluster, `replicare` inspects every table it's about to
 replicate. If it finds an auto-counting integer used as a primary key or a unique key, it
 refuses to start, names the offending table and column, and points at this rule, which stops a
 colliding setup from ever going live.
@@ -200,23 +200,23 @@ colliding setup from ever going live.
 
 ## Rule 2: push schema changes to every node first
 
-replicare never replicates schema changes. It copies the data(the rows) between nodes, but not
+`replicare` never replicates schema changes. It copies the data(the rows) between nodes, but not
 changes to the structure of a table - adding, dropping or renaming a column, changing a column's
 type, or adding a new table. These structure changes are often called DDL. This is deliberate
-and permanent; replicare is a data replicator, not a schema manager. So a structure change made
+and permanent; `replicare` is a data replicator, not a schema manager. So a structure change made
 on one node doesn't reach the other nodes on its own, and has to be applied to each node
 separately.
 
 Here's what happens when the nodes disagree. Say nodes A and B both have a `users` table, and a
 `phone` column is added to A only. A new user is then written on A, with a phone number.
-replicare tries to copy that row to B, B has no `phone` column, and the copy fails. replicare
+`replicare` tries to copy that row to B, B has no `phone` column, and the copy fails. `replicare`
 doesn't guess, doesn't drop the phone number, and doesn't corrupt anything - it stops copying in
 that direction, says so loudly in its logs and status, and holds on to the row. Once the `phone`
-column is added to B as well, replicare resumes on its own and delivers everything it was
+column is added to B as well, `replicare` resumes on its own and delivers everything it was
 holding.
 
 That stall is safe, but it isn't free. While a node is behind, the changes meant for it are
-piling up rather than flowing, and replicare only waits so long(about a day by default) before
+piling up rather than flowing, and `replicare` only waits so long(about a day by default) before
 giving up and re-copying that node from scratch. So every node needs the change promptly; nodes
 shouldn't stay mismatched for long.
 
@@ -240,10 +240,10 @@ A few changes need a different order:
   example widening a number. An incompatible change stalls that node loudly, so do it the
   add-a-new-column-and-migrate way instead.
 - Adding a new table: besides creating it on every node(with globally-unique ids, per Rule 1),
-  replicare has to be told to start replicating it, which is a config change plus a restart on
+  `replicare` has to be told to start replicating it, which is a config change plus a restart on
   each node. It's a coordinated step, not a one-line migration.
 
 > ⚠️ Online schema change tools like `gh-ost` and `pt-online-schema-change` rebuild a table
-> behind the scenes and swap it in, which doesn't play well with how replicare captures changes.
+> behind the scenes and swap it in, which doesn't play well with how `replicare` captures changes.
 > We'd recommend the database's native, in-place `ALTER` for simple additive changes, and testing
 > carefully before using an online schema change tool against a replicated cluster.
