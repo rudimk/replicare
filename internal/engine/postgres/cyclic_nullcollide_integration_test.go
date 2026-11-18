@@ -111,10 +111,15 @@ func TestCyclicCopySelfRefNullCollidingUnique(t *testing.T) {
 			}
 			mustExecTarget(t, ctx, sink, "TRUNCATE rc_it.acct")
 
-			if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{acct}); err != nil {
+			var copied int64
+			if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{acct}, func(_ engine.TableRef, n int64) { copied += n }); err != nil {
 				t.Fatalf("CopyCyclicComponent: %v", err)
 			}
 			requireConverged(t, ctx, src, sink)
+			// The whole-table, one-statement load reports its rows once it commits.
+			if want := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.acct"); copied != int64(want) {
+				t.Errorf("reported rows copied = %d, want %d", copied, want)
+			}
 		})
 	}
 }
@@ -130,7 +135,7 @@ func TestCyclicCopySelfRefRetryOverLeftovers(t *testing.T) {
 	src, sink := setupAcct(t, ctx, acctSrcConstraintDDL, acctTgtConstraintDDL, "ASC")
 	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.acct (id, email, name) VALUES (101,'e1','n101'), (201,'e2','n201'), (301,'e3','n301')")
 
-	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.acct")}); err != nil {
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.acct")}, nil); err != nil {
 		t.Fatalf("CopyCyclicComponent over leftovers: %v", err)
 	}
 	requireConverged(t, ctx, src, sink)

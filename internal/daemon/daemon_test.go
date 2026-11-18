@@ -3,8 +3,11 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -567,6 +570,7 @@ func TestDaemonSelfRefNullCollidingUniqueCopiesAndStreams(t *testing.T) {
 		  SELECT g AS id, CASE WHEN g <= 3 THEN 'e'||g ELSE 'r'||g END AS email, NULL::int AS parent FROM generate_series(1,50) g
 		  UNION ALL SELECT g, 'e'||(g/50), (g % 50) + 1 FROM generate_series(51,500) g
 		) v ORDER BY id DESC`)
+	mustExec(t, ctx, src, "ANALYZE rc_it.acct") // gives the copy a row estimate to report
 	t.Cleanup(func() {
 		bg := context.Background()
 		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
@@ -613,6 +617,19 @@ syncs:
 		default:
 		}
 		t.Fatalf("initial copy did not converge: src rows=%d tgt rows=%d", count(t, ctx, src, "rc_it.acct"), count(t, ctx, tgt, "rc_it.acct"))
+	}
+
+	// The dashboard's initial-copy panels: this cyclic copy reports the rows it committed
+	// and the source's row estimate, and both ends report up from bring-up.
+	for _, want := range []string{
+		`replicare_rows_copied_total{sync="s1",table="rc_it.acct"} 500`,
+		`replicare_initial_copy_rows_target{sync="s1",table="rc_it.acct"} 500`,
+		`replicare_source_up{sync="s1"} 1`,
+		`replicare_target_up{sync="s1",target="dst"} 1`,
+	} {
+		if page := scrapeMetrics(t, d); !strings.Contains(page, want) {
+			t.Errorf("/metrics is missing %s", want)
+		}
 	}
 
 	// Live changes. (e1, 1) is free, but emptied it would be (e1, NULL) — root 1's value.
@@ -715,4 +732,12 @@ syncs:
 	if !converged {
 		t.Fatalf("daemon 2 did not resume+converge: target has %d rows", count(t, ctx, tgt, "rc_it.orders"))
 	}
+}
+
+// scrapeMetrics renders the daemon's /metrics page.
+func scrapeMetrics(t *testing.T, d *Daemon) string {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	d.metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	return rec.Body.String()
 }

@@ -117,21 +117,65 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 
 	// Publish every table's phase up front, so the metrics page shows the copy is under
 	// way from the first scrape — before this, nothing was reported until a table reached
-	// streaming, and a long copy (a large cyclic component especially, which reports no
-	// per-chunk progress) served an EMPTY /metrics page that looked broken. Tables
-	// already copied on an earlier run report streaming once their loop starts.
+	// streaming, and a long copy served an EMPTY /metrics page that looked broken.
+	// Tables already copied on an earlier run report streaming once their loop starts.
 	for _, comp := range s.Components {
 		for _, t := range comp.Order {
 			s.Tel.SetPhase(s.Name, t, string(state.PhaseInitialCopy))
 		}
 	}
+	// The dashboard's initial-copy and health panels need these during the copy too:
+	// how many rows each table is expected to hold, and that both ends are up (bring-up
+	// connected to both, or it would not be here).
+	s.publishCopyTargets(ctx)
+	s.Tel.SetSourceUp(s.Name, true)
+	s.Tel.SetTargetUp(s.Name, s.Target, true)
+	s.refreshDBSizes(ctx)
 
 	for _, comp := range s.Components {
 		if err := s.copyAndCutover(ctx, comp); err != nil {
 			return err
 		}
+		s.refreshDBSizes(ctx) // throttled; shows the target growing between components
 	}
 	return nil
+}
+
+// publishCopyTargets publishes replicare_initial_copy_rows_target — the source's own
+// row estimate — for every table this run still has to copy, so a dashboard can show
+// rows copied as a percentage. Tables already copied on an earlier run are skipped (this
+// run will not copy them, so a 0%-of-N series would mislead). Best-effort: an engine
+// without estimates, or a failed lookup, just leaves the series unset.
+func (s *Syncer) publishCopyTargets(ctx context.Context) {
+	est, ok := s.Source.(engine.RowEstimator)
+	if !ok {
+		return
+	}
+	var todo []engine.TableRef
+	for _, comp := range s.Components {
+		for _, t := range comp.Order {
+			if s.Store != nil {
+				if prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t); err == nil && prog.Done {
+					continue
+				}
+			}
+			todo = append(todo, t)
+		}
+	}
+	if len(todo) == 0 {
+		return
+	}
+	qctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+	rows, err := est.EstimateRows(qctx, todo)
+	if err != nil {
+		return
+	}
+	for _, t := range todo {
+		if n, ok := rows[t]; ok {
+			s.Tel.SetRowsCopiedTarget(s.Name, t, n)
+		}
+	}
 }
 
 // installCapture installs the appropriate capture variant for this syncer: origin-
@@ -245,7 +289,9 @@ const cyclicCopyMaxAttempts = 10
 func (s *Syncer) copyCyclicWithRetry(ctx context.Context, copier engine.CyclicComponentCopier, comp engine.Component) error {
 	var lastErr error
 	for attempt := 0; attempt < cyclicCopyMaxAttempts; attempt++ {
-		err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables)
+		err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables, func(t engine.TableRef, n int64) {
+			s.Tel.AddRowsCopied(s.Name, t, n)
+		})
 		if err == nil {
 			return nil
 		}

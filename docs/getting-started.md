@@ -53,9 +53,12 @@ curl -s localhost:9090/metrics | grep -E \
   'replicare_(rows_copied_total|apply_batch_seconds|throughput_rows_per_second|replication_lag_seconds|table_phase_info|target_up)'
 ```
 
-- `replicare_rows_copied_total` is set once the initial copy runs.
-- `replicare_apply_batch_seconds`, `replicare_replication_lag_seconds`, and
-  `replicare_table_phase_info` refresh on every streaming drain pass.
+- `replicare_table_phase_info` (one line per table, `initial_copy` then `streaming`),
+  `replicare_target_up` and the row estimate `replicare_initial_copy_rows_target`
+  appear as soon as the sync starts; `replicare_rows_copied_total` climbs as the
+  initial copy commits rows.
+- `replicare_apply_batch_seconds` and `replicare_replication_lag_seconds` refresh on
+  every streaming drain pass.
 - `replicare_throughput_rows_per_second` is only non-zero on a pass that actually
   applied deltas — make a change on the source (the `INSERT/UPDATE/DELETE` above)
   and re-scrape; a caught-up idle sync correctly reports `0` here.

@@ -149,8 +149,8 @@ locked in the observability contract, so a scrape of a running daemon matches th
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy. |
-| `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator). |
+| `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy, counted once they are committed on the target (a retried chunk counts once). Tables linked in a loop count too; rows re-copied only to catch up with a busy source do not. Restarts from 0 with the daemon. |
+| `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator), from the source's own statistics (Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy; left unset for a table never analyzed. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply/copy throughput. `0` on an idle, caught-up pass. |
 | `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table`, `component` | Replication lag — age of the oldest unconsumed delta (`0` when caught up). |
 | `replicare_delta_backlog_rows` | gauge | `sync`, `target`, `table`, `component` | Unconsumed delta rows (the queue depth). |
@@ -166,7 +166,7 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_target_replicated_bytes` | gauge | `sync`, `target` | Size in bytes of **just the replicated tables** on the target (same engine support). |
 | `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
 | `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
-| `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
+| `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`); exactly one series per table. Present from bring-up, so it is the series to key dashboards on. |
 | `replicare_delete_reconciliation_lag_seconds` | gauge | `sync`, `target`, `table` | **Redis only** — duration of the last completed delete sweep (staleness of capture-less deletes). Unset for Postgres/MySQL. |
 | `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | **Redis only** — keys `DEL`ed by the target-vs-source delete sweep. Unset for Postgres/MySQL. |
 

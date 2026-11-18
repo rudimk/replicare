@@ -278,6 +278,15 @@ type TombstoneGC interface {
 	GCTombstones(ctx context.Context, t TableRef) (int64, error)
 }
 
+// RowEstimator is an OPTIONAL Source capability: a cheap, APPROXIMATE row count per
+// table taken from the engine's own statistics (no table scan), published as the
+// initial-copy target so a dashboard can show copy progress as a percentage. Tables
+// with no usable estimate (never analyzed) are left out of the result rather than
+// reported as 0. Postgres: pg_class.reltuples; MySQL: information_schema.TABLES.
+type RowEstimator interface {
+	EstimateRows(ctx context.Context, tables []TableRef) (map[TableRef]int64, error)
+}
+
 // DBSizer is an OPTIONAL Source/Sink capability: report on-disk sizes the
 // pipeline emits as size metrics. Relational engines implement it (Postgres
 // pg_database_size / pg_total_relation_size, MySQL information_schema); an engine
@@ -379,8 +388,13 @@ type SequenceReseeder interface {
 // copy; a Sink that does not implement it falls back (CLAUDE.md §4.1). The paired
 // Source is passed because the copy reads from it (the implementation may require a
 // specific concrete Source type).
+//
+// progress (may be nil) receives the rows written per table as each part of a table's
+// load commits, for the initial-copy progress metrics. Rows written again only to
+// recover from live-source skew (re-copied parents) and the cyclic-column fill pass are
+// not reported, so a table's reported total never exceeds the rows it holds.
 type CyclicComponentCopier interface {
-	CopyCyclicComponent(ctx context.Context, src Source, tables []TableRef) error
+	CopyCyclicComponent(ctx context.Context, src Source, tables []TableRef, progress func(TableRef, int64)) error
 }
 
 // NullFillCyclicSink is an OPTIONAL Sink capability that streams a cyclic FK

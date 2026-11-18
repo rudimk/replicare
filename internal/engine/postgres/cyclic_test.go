@@ -124,8 +124,13 @@ func TestLoadCyclicDeferredMultiTable(t *testing.T) {
 
 	a := engine.TableRef{Schema: "rc_it", Name: "a"}
 	b := engine.TableRef{Schema: "rc_it", Name: "b"}
-	if err := LoadCyclicDeferred(ctx, src, sink, []engine.TableRef{a, b}); err != nil {
+	copied := map[engine.TableRef]int64{}
+	pctx := withCopyProgress(ctx, func(t engine.TableRef, n int64) { copied[t] += n })
+	if err := LoadCyclicDeferred(pctx, src, sink, []engine.TableRef{a, b}); err != nil {
 		t.Fatalf("LoadCyclicDeferred multi-table: %v", err)
+	}
+	if copied[a] != 1 || copied[b] != 1 {
+		t.Errorf("reported rows copied = %v, want a=1 b=1", copied)
 	}
 	for _, tbl := range []string{"a", "b"} {
 		var n int
@@ -215,8 +220,12 @@ func TestCopyCyclicComponentNullFillPrepopulated(t *testing.T) {
 
 	aRef := engine.TableRef{Schema: "rc_it", Name: "a"}
 	bRef := engine.TableRef{Schema: "rc_it", Name: "b"}
-	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{aRef, bRef}); err != nil {
+	copied := map[engine.TableRef]int64{}
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{aRef, bRef}, func(t engine.TableRef, n int64) { copied[t] += n }); err != nil {
 		t.Fatalf("CopyCyclicComponent into a populated target: %v", err)
+	}
+	if copied[aRef] != 5 || copied[bRef] != 5 {
+		t.Errorf("reported rows copied = %v, want a=5 b=5", copied)
 	}
 	for _, tbl := range []string{"a", "b"} {
 		fk := "b_id"
@@ -400,8 +409,13 @@ func TestCyclicCopyRecoversFromTwoLevelParentSkew(t *testing.T) {
 	parents := map[engine.TableRef][]engine.TableRef{credRef: {projRef}, projRef: {usrRef}}
 	recopy := transitiveRecopier(recopyOmitting(src, sink, byRef, map[engine.TableRef][]string{}), parents)
 
-	if err := copyChildWithParentRetry(ctx, src, sink, credRef, transportColumns(byRef[credRef]), parents[credRef], recopy); err != nil {
+	copied := map[engine.TableRef]int64{}
+	pctx := withCopyProgress(ctx, func(t engine.TableRef, n int64) { copied[t] += n })
+	if err := copyChildWithParentRetry(pctx, src, sink, credRef, transportColumns(byRef[credRef]), parents[credRef], recopy); err != nil {
 		t.Fatalf("did not recover from two-level parent skew: %v", err)
+	}
+	if copied[credRef] != 3 || len(copied) != 1 {
+		t.Errorf("reported rows copied = %v, want only cred=3 (re-copied parents must not count)", copied)
 	}
 	for _, sel := range []string{
 		"SELECT id::text, name FROM rc_it.usr ORDER BY id",
@@ -444,8 +458,15 @@ func TestCyclicCopyChunkedLargeTable(t *testing.T) {
 	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,300) g")
 	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%300), 'c'||g FROM generate_series(1,300) g")
 
-	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+	copied := map[engine.TableRef]int64{}
+	progress := func(t engine.TableRef, n int64) { copied[t] += n }
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, progress); err != nil {
 		t.Fatalf("chunked cyclic copy: %v", err)
+	}
+	// Rows copied, reported chunk by chunk: exactly the source rows (the pass-2 fill of
+	// hub.buddy_id moves the hub rows again and must not count).
+	if copied[ref("rc_it.hub")] != 300 || copied[ref("rc_it.child")] != 300 {
+		t.Errorf("reported rows copied = %v, want hub=300 child=300", copied)
 	}
 	for _, tc := range []struct{ tbl, sel string }{
 		{"hub", "SELECT id::text, coalesce(buddy_id::text,'<n>'), name FROM rc_it.hub ORDER BY id"},
@@ -492,7 +513,7 @@ func TestCyclicCopyChunkedPopulatedParentWithChildren(t *testing.T) {
 	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.hub SELECT g, NULL, 'stale' FROM generate_series(1,120) g")
 	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%120), 'stale' FROM generate_series(1,120) g")
 
-	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}); err != nil {
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, nil); err != nil {
 		t.Fatalf("chunked cyclic copy over a populated referenced parent: %v", err)
 	}
 	for _, tc := range []struct{ tbl, sel, staleCol string }{
@@ -545,5 +566,30 @@ func TestCyclicCopyParentSkewGivesUpTransient(t *testing.T) {
 	}
 	if !engine.IsTransientConstraint(err) {
 		t.Errorf("error is not classified transient: %v", err)
+	}
+}
+
+// TestEstimateRows: the initial-copy target comes from planner statistics. An
+// analyzed table reports its row count; a never-analyzed one is left out rather than
+// reported as 0 (a 0 target would read as a nonsense percentage on the dashboard).
+func TestEstimateRows(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src,
+		"CREATE TABLE rc_it.analyzed (id int PRIMARY KEY)",
+		"CREATE TABLE rc_it.fresh (id int PRIMARY KEY)")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.analyzed SELECT generate_series(1, 1000)")
+	mustExec(t, ctx, src.conn, "ANALYZE rc_it.analyzed")
+
+	got, err := src.EstimateRows(ctx, []engine.TableRef{ref("rc_it.analyzed"), ref("rc_it.fresh")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[ref("rc_it.analyzed")] != 1000 {
+		t.Errorf("analyzed estimate = %d, want 1000", got[ref("rc_it.analyzed")])
+	}
+	if _, ok := got[ref("rc_it.fresh")]; ok {
+		t.Errorf("a never-analyzed table must be left out, got %d", got[ref("rc_it.fresh")])
 	}
 }

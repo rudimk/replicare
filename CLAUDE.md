@@ -651,6 +651,15 @@ must never be visible in only one channel.
 Treat lag, queue depth, per-table progress, **target reachability, and delta backlog** as the
 headline signals.
 
+**The initial copy must be visible too, not only streaming (decision).** From bring-up the daemon
+publishes every table's phase (`replicare_table_phase_info`, one series per table), source/target
+up and sizes, and a per-table **rows-to-copy estimate** from the source's own statistics (optional
+`engine.RowEstimator`: PG `reltuples`, MySQL `TABLE_ROWS`; no scan). **Rows copied** are counted
+when committed on the target, on every copy path including the cyclic component copy (a retried
+chunk counts once; parent re-copies for live-source skew and the cyclic-column fill pass do not
+count). The shipped Grafana dashboard keys its sync/table filters on `replicare_table_phase_info`
+— filters fed by streaming-only metrics left every panel empty during a copy.
+
 **The CLI live surface — visibility without Grafana (decision).** Where the daemon must run somewhere a
 metrics stack can't reach it (e.g. *inside the source cluster*, the only path to the source
 datastores), the shipped binary is the dashboard. Two **read-only** commands read signals that live in

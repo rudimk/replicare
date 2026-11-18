@@ -121,6 +121,50 @@ WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
 	return b, nil
 }
 
+// EstimateRows implements engine.RowEstimator from planner statistics
+// (pg_class.reltuples; a partitioned parent sums its partitions). No table is
+// scanned. A table never analyzed (reltuples < 0 on 14+, 0 before) is left out.
+func (s *Source) EstimateRows(ctx context.Context, tables []engine.TableRef) (map[engine.TableRef]int64, error) {
+	if s.conn == nil {
+		return nil, errNotConnected("source")
+	}
+	out := make(map[engine.TableRef]int64, len(tables))
+	if len(tables) == 0 {
+		return out, nil
+	}
+	pairs := make([]string, len(tables))
+	args := make([]any, 0, len(tables)*2)
+	for i, t := range tables {
+		pairs[i] = fmt.Sprintf("($%d,$%d)", 2*i+1, 2*i+2)
+		args = append(args, t.Schema, t.Name)
+	}
+	q := fmt.Sprintf(`SELECT n.nspname, c.relname,
+       CASE WHEN c.relkind = 'p'
+            THEN COALESCE((SELECT SUM(GREATEST(k.reltuples, 0)) FROM pg_inherits i
+                           JOIN pg_class k ON k.oid = i.inhrelid WHERE i.inhparent = c.oid), 0)
+            ELSE c.reltuples END::bigint
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
+	rows, err := s.conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: estimate rows: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, name string
+		var n int64
+		if err := rows.Scan(&schema, &name, &n); err != nil {
+			return nil, fmt.Errorf("postgres: estimate rows: %w", err)
+		}
+		if n > 0 {
+			out[engine.TableRef{Schema: schema, Name: name}] = n
+		}
+	}
+	return out, rows.Err()
+}
+
+var _ engine.RowEstimator = (*Source)(nil)
+
 // ServerVersion returns the numeric source server version (e.g. 90600 for 9.6).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 	if err := s.requireConn(); err != nil {

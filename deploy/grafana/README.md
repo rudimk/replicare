@@ -43,14 +43,25 @@ current value or pass `DS_PROMETHEUS` via the import API.
 | Variable | Meaning |
 |---|---|
 | **Data source** (`datasource`) | Which Prometheus data source to query. Choose at import; change any time. |
-| **Sync** (`sync`) | Filter to one or more syncs (`label_values(replicare_target_up, sync)`). Defaults to *All*. |
+| **Sync** (`sync`) | Filter to one or more syncs (`label_values(replicare_table_phase_info, sync)` — a metric present from the moment a sync starts, so the filter works during the initial copy too). Defaults to *All*. |
 | **Target** (`target`) | Filter to one or more targets within the selected syncs. Defaults to *All*. |
-| **Table** (`table`) | Filter the per-table panels to one or more tables. Defaults to *All*. |
+| **Table** (`table`) | Filter the per-table panels to one or more tables (from `replicare_table_phase_info`, so every replicated table is listed from the start). Defaults to *All*. |
 | **Component** (`component`) | Filter the per-component panels to one or more FK components. Defaults to *All*. |
 
 ## Panels
 
 Organized into sections (Grafana rows):
+
+**Initial copy** (top, since it is the first thing a new sync does):
+
+| Panel | Query | Reading |
+|---|---|---|
+| Initial copy (overall) | `sum(replicare_rows_copied_total) / sum(replicare_initial_copy_rows_target)` | Percent of the rows this run has to copy. The target is the source database's own row estimate (statistics, no scan), so the end can read a little over or under 100% |
+| Tables still copying / Tables streaming | `count(replicare_table_phase_info{phase=…})` | How many tables are in each phase; copying reaches 0 when the whole sync is streaming |
+| Copy rate (rows/s) | `rate(replicare_rows_copied_total[2m])` | Current copy speed |
+| Progress % / Rows copied vs target (per table) | the same, `by (table)` | Which tables are done and which are still moving |
+
+Rows copied count only rows that have been committed on the target, so a retried chunk is never counted twice. A table that loads in one statement (a self-referencing table whose link column cannot be emptied, CLAUDE.md §4.1) jumps from 0 to done in one step. `replicare_rows_copied_total` restarts from 0 when the daemon restarts, and a restart re-copies whatever was not finished, so the percentage restarts with it.
 
 **Source** / **Target** — the controller checks both endpoints and emits their reachability and two size figures — the whole database and just the replicated tables:
 
@@ -78,7 +89,9 @@ Organized into sections (Grafana rows):
 | Replication lag (per component) | `max by (component) (replicare_replication_lag_seconds)` | Which FK component is behind |
 | Delta backlog (per component) | `sum by (component) (replicare_delta_backlog_rows)` | Queue depth per component |
 
-**Backlog detail (per table)**, **Initial copy**, **Throughput & apply latency**, **Errors & maintenance** — per-table backlog rows/bytes/oldest-age; copy progress % and rows-copied-vs-target; throughput and apply p95; error rate, purge rate, and reseeds. (Metrics as named.)
+**Backlog detail (per table)**, **Throughput & apply latency**, **Errors & maintenance** — per-table backlog rows/bytes/oldest-age; throughput and apply p95; error rate, purge rate, and reseeds. (Metrics as named.)
+
+The **Source** / **Target** health and size panels fill in as soon as a sync starts. The lag, backlog and throughput panels fill in once tables reach streaming — during an initial copy they are expected to read *No data*.
 
 ## Notes
 
