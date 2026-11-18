@@ -32,7 +32,7 @@ need arises, 5.6 support is additive.
 ### Why 8.4 is the target
 
 8.4 is the current LTS. It exercises the modern-target concerns the plan calls
-out: 8.0+ multi-trigger-per-event, `utf8mb4` defaults, `ROW_NUMBER()` window
+out: `utf8mb4` defaults, `ROW_NUMBER()` window
 functions for boundary discovery (MM4a), and the strict-`sql_mode`/zero-date
 interaction the faithful-transport path depends on (`mysql-plan.md` §0.4). The
 5.7→8.4 gap is where the old-source fidelity work earns its keep.

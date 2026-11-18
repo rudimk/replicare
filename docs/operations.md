@@ -176,9 +176,11 @@ check (12) is part of (6). MySQL versions of the rest, plus two MySQL-only items
    [the MySQL page](mysql.md#requirements)).
 - **(7) Materialized views** don't exist in MySQL; plain views are not replicated (they come over with
    the schema dump).
-- **(MySQL only) Existing triggers.** On MySQL 5.7 a table can have only one trigger per timing and event, so a
-   table that already has its own `AFTER INSERT/UPDATE/DELETE` trigger blocks capture (8.0+ allows
-   several):
+- **(MySQL only) Existing triggers.** Tables can keep their own triggers: from MySQL 5.7.2 a table may
+   have several triggers per timing and event, so replicare's triggers sit alongside the
+   application's and both fire. Only a source older than 5.7.2 (in practice a best-effort 5.6) allows
+   a single trigger per timing and event, and there a table with its own `AFTER INSERT/UPDATE/DELETE`
+   trigger blocks capture. Worth listing either way, to know what else runs on each write:
    ```sql
    SELECT event_object_table, trigger_name, action_timing, event_manipulation
    FROM information_schema.TRIGGERS WHERE trigger_schema = '<DB_NAME>';

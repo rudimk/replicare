@@ -196,11 +196,14 @@ keyset over MySQL introduces two traps the Postgres path never had:
   §3.3 "consume + track + purge in one atomic source transaction" guarantee (delta loss / double
   processing). MM1b reads `information_schema.TABLES.ENGINE` per table and **blocks (or loud-warns with
   documented degradation)** on non-transactional engines, source and target.
-- **DECISION (pre-8.0 single-trigger-per-event, Momus M4): detect + block.** MySQL &lt; 8.0 allows only
-  **one** trigger per (timing, event) per table; a selected source table that **already has** an
-  `AFTER INSERT` trigger blocks `CREATE TRIGGER` on the 5.7 floor. MM1b detects existing triggers on
-  selected tables and **blocks with an actionable error** (merging into a trigger we don't own is
-  rejected in v1 — documented tradeoff). 8.0+ multi-trigger is used where available.
+- **DECISION (single-trigger-per-event before 5.7.2, Momus M4): detect + block — CORRECTED.** MySQL
+  **before 5.7.2** allows only **one** trigger per (timing, event) per table, so a selected source table
+  that **already has** an `AFTER` trigger blocks `CREATE TRIGGER` there; MM1b detects it and **blocks
+  with an actionable error** (merging into a trigger we don't own is rejected in v1). *Correction
+  (2026-11): this originally said the limit lasted until 8.0. It ended in 5.7.2, so every GA 5.7 and
+  all 8.x allow several triggers per event; the block now applies only below 5.7.2 (in practice a
+  best-effort 5.6 source), and on 5.7+ replicare's triggers sit alongside the application's own. The
+  old rule needlessly refused 5.7 tables that had their own triggers.*
 - **DECISION (implicit COMMIT on DDL, Momus M1): idempotent checkpointed install/migration.** MySQL
   **auto-commits every `CREATE TABLE`/`CREATE TRIGGER`** — the Postgres "six DDL statements in one
   transaction" capture-install and the F4 migration runner's transactional rollback **do not hold**. A

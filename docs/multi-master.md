@@ -97,8 +97,9 @@ with file references, because the design has to work *with* them:
   the one timestamp signal a naive LWW might have used.
 - Delta rows are PK-only + `delta_id` + `rc_op` + `k1..kn` + `rc_at` — **no origin,
   no txid**.
-- Constraints that matter later: pre-8.0 allows only one trigger per (timing,event);
-  install already **blocks** if a non-replicare AFTER trigger exists; InnoDB has **no
+- Constraints that matter later: before MySQL 5.7.2 a table allows only one trigger per
+  (timing,event), so install **blocks** there if a non-replicare AFTER trigger exists (from 5.7.2
+  they coexist); InnoDB has **no
   deferrable FKs**; `FOREIGN_KEY_CHECKS` is session-level and non-transactional.
 
 **Redis capture/apply** (`internal/engine/redis/`, `internal/pipeline/delete.go`)

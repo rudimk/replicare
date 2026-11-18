@@ -85,8 +85,8 @@ must-haves. The queries for each item, for Postgres and MySQL, are in
 
 - [ ] Every table has a primary key or a `UNIQUE` constraint (tables without one are skipped).
 - [ ] Postgres: every extension the tables use exists on the target. MySQL: every table is InnoDB,
-      the target has `local_infile` on, and on MySQL 5.7 no table already has its own
-      `AFTER INSERT/UPDATE/DELETE` trigger.
+      the source is 5.7 or newer (older sources cannot add replicare's triggers next to a table's
+      own), and the target has `local_infile` on.
 - [ ] Materialized views and views are not replicated: plan to create and refresh them on the target.
       Postgres large objects are not replicated either.
 - [ ] Schema changes and migrations are frozen for the whole replication (including online

@@ -20,8 +20,8 @@
 services:
   source-mysql:
     # F3 floor: 5.7 is the oldest supported source — it has generated columns,
-    # JSON, and a usable information_schema, while predating 8.0's multi-trigger
-    # and utf8mb4 defaults (docs/mysql-version-support.md).
+    # JSON, and a usable information_schema, while predating 8.0's utf8mb4
+    # defaults (docs/mysql-version-support.md).
     image: mysql:5.7
     # 5.7 has no arm64 image; run under emulation on Apple Silicon. CI is amd64.
     platform: linux/amd64

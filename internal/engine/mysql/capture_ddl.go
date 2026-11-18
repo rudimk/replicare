@@ -9,9 +9,11 @@ import (
 // shape; InstallCapture executes them. MySQL differs from Postgres in three ways
 // that shape this file:
 //   - the capture "schema" is a MySQL DATABASE (`replicare`);
-//   - there are no trigger functions — logic is inline in the trigger body, and
-//     MySQL (< 8.0) allows only ONE trigger per (timing, event), so capture uses
-//     THREE triggers per table (AFTER INSERT / UPDATE / DELETE);
+//   - there are no trigger functions — logic is inline in the trigger body, and a
+//     MySQL trigger fires on exactly one event, so capture uses THREE triggers per
+//     table (AFTER INSERT / UPDATE / DELETE). Before 5.7.2 each (timing, event) slot
+//     held a single trigger, which is why an existing AFTER trigger blocks capture
+//     there (blockConflictingTrigger); from 5.7.2 they coexist;
 //   - delta_id is BIGINT AUTO_INCREMENT (no sequences), serving as both the
 //     delete-by-id handle (§3.3) and the ordering hint.
 // Triggers are created with DEFINER = CURRENT_USER so they run as the daemon role
