@@ -37,9 +37,22 @@ const (
 type CyclicFK struct {
 	FK       engine.ForeignKey
 	Strategy CyclicFKStrategy
-	Nullable bool   // at least one child column is nullable
-	Reason   string // human-readable explanation (esp. for Blocked)
+	Nullable bool // at least one child column is nullable
+	// NullFillUnsafe marks a NULL-then-fill edge whose child column(s) also
+	// participate in a UNIQUE key. NULL-fill pass 1 sets those columns NULL on
+	// every row at once; if the unique treats NULLs as not-distinct (PG15+
+	// `UNIQUE … NULLS NOT DISTINCT`, or any arrangement that collapses under NULL),
+	// rows that were distinct only by that column collide → a mid-copy duplicate-key
+	// failure. A SELF-REFERENTIAL (child==parent) such table is loaded whole in a
+	// single statement with real values instead (cyclic.go, loadSelfRefWhole); a
+	// cross-table cyclic edge with this property is genuinely unloadable without
+	// deferring and is blocked at pre-flight.
+	NullFillUnsafe bool
+	Reason         string // human-readable explanation (esp. for Blocked)
 }
+
+// SelfReference reports whether this cyclic FK is a table referencing itself.
+func (c CyclicFK) SelfReference() bool { return c.FK.Child == c.FK.Parent }
 
 // Blocked reports whether this cyclic FK prevents initial copy.
 func (c CyclicFK) Blocked() bool { return c.Strategy == CyclicBlocked }
@@ -92,8 +105,12 @@ func classifyOne(fk engine.ForeignKey, byRef map[engine.TableRef]engine.Table) C
 		return CyclicFK{FK: fk, Strategy: CyclicDeferred, Nullable: nullable,
 			Reason: "DEFERRABLE: load the component in one transaction with SET CONSTRAINTS DEFERRED"}
 	case nullable:
-		return CyclicFK{FK: fk, Strategy: CyclicNullThenFill, Nullable: true,
-			Reason: "nullable FK column(s): NULL-then-fill two-pass load"}
+		unsafe := childColInUniqueKey(fk, byRef)
+		reason := "nullable FK column(s): NULL-then-fill two-pass load"
+		if unsafe {
+			reason = "nullable FK column(s) that also participate in a UNIQUE key: NULL-fill would collide, so load whole (self-reference) or make the FK DEFERRABLE (cross-table cycle)"
+		}
+		return CyclicFK{FK: fk, Strategy: CyclicNullThenFill, Nullable: true, NullFillUnsafe: unsafe, Reason: reason}
 	default:
 		return CyclicFK{FK: fk, Strategy: CyclicBlocked, Nullable: false,
 			Reason: "NOT NULL and non-deferrable FK on a cycle: cannot load without disabling the constraint; make the FK DEFERRABLE or break the cycle"}
@@ -117,6 +134,34 @@ func anyChildColNullable(fk engine.ForeignKey, byRef map[engine.TableRef]engine.
 	for _, col := range fk.ChildCols {
 		if nullableByName[col] {
 			return true
+		}
+	}
+	return false
+}
+
+// childColInUniqueKey reports whether any of the FK's child columns participates
+// in a UNIQUE key on the child table (the primary key is excluded: PK columns are
+// NOT NULL, so a cyclic FK column in the PK is never nullable and never reaches the
+// NULL-fill branch). It is the NULL-fill-unsafe signal: NULLing such a column across
+// every row in pass 1 can collapse otherwise-distinct rows onto one key. We treat
+// participation in ANY unique key as unsafe (conservative) rather than probing the
+// index's NULLS-DISTINCT option — the whole-table load it routes to is always correct
+// regardless, so a false positive only loses chunking, never correctness. A column
+// absent from the introspected table is treated as not-in-a-unique.
+func childColInUniqueKey(fk engine.ForeignKey, byRef map[engine.TableRef]engine.Table) bool {
+	child, ok := byRef[fk.Child]
+	if !ok {
+		return false
+	}
+	inFK := make(map[string]bool, len(fk.ChildCols))
+	for _, c := range fk.ChildCols {
+		inFK[c] = true
+	}
+	for _, uk := range child.UniqueKeys {
+		for _, c := range uk.Columns {
+			if inFK[c] {
+				return true
+			}
 		}
 	}
 	return false

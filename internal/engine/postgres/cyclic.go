@@ -101,6 +101,27 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 		byRef[t.Ref] = t
 	}
 
+	// NULL-fill-unsafe edges: a cyclic FK whose child column(s) also sit in a UNIQUE
+	// key, so NULLing them in pass 1 can collide (e.g. a `parent` self-reference under
+	// a `(email, parent)` unique). A SELF-REFERENCE (child==parent) such table is loaded
+	// WHOLE in a single statement with real values — an immediate FK is checked at
+	// statement end, so a child row may precede its parent in the one stream. A
+	// cross-table cyclic edge with this property cannot be loaded that way (its FK points
+	// at a different table loaded in a separate statement) and must be DEFERRABLE —
+	// pre-flight blocks it, so reaching here is a loud internal error, never a silent
+	// NULL-fill that would corrupt.
+	wholeLoad := make(map[engine.TableRef]bool)
+	for _, c := range cyc {
+		if !c.NullFillUnsafe {
+			continue
+		}
+		if c.SelfReference() {
+			wholeLoad[c.FK.Child] = true
+			continue
+		}
+		return fmt.Errorf("postgres: cyclic copy: FK %s has a UNIQUE key on a nulled cyclic column across a multi-table cycle; make it DEFERRABLE (pre-flight should have blocked this)", c.FK.Name)
+	}
+
 	// Cyclic FK child columns per table (the columns to NULL then fill).
 	cyclicCols := cyclicColsByTable(cyc)
 	cyclicEdge := make(map[string]bool, len(cyc))
@@ -120,8 +141,19 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	// Empty target → a plain streaming COPY (light: no staging, no whole-table upsert);
 	// non-empty target → an idempotent staged upsert so a re-copy over existing rows
 	// converges instead of colliding on the PK. See copyOrUpsert.
+	//
+	// EXCEPTION: a wholeLoad (self-reference with a unique on the cyclic column) is copied
+	// WITH its cyclic columns at their real values, in a single statement, so the unique is
+	// never collapsed by a transient NULL. It still loads after its non-cyclic parents
+	// (the `order` respects those), so its non-cyclic FKs hold too.
 	for _, ref := range order {
 		table := byRef[ref]
+		if wholeLoad[ref] {
+			if err := s.loadSelfRefWhole(ctx, src, ref, table); err != nil {
+				return fmt.Errorf("postgres: cyclic whole-load (%s): %w", ref, err)
+			}
+			continue
+		}
 		cols := subtractCols(transportColumns(table), cyclicCols[ref])
 		if err := copyTableChunkedWithParentRetry(ctx, src, s, ref, cols, parents[ref], byRef, cyclicCols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
@@ -129,8 +161,12 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	}
 
 	// Pass 2: fill the cyclic FK columns of each table that has them, in the same
-	// order (every referenced row now exists, so the FK holds when filled).
+	// order (every referenced row now exists, so the FK holds when filled). A
+	// wholeLoad table already carries its real cyclic values, so it is skipped.
 	for _, ref := range order {
+		if wholeLoad[ref] {
+			continue
+		}
 		fkCols := cyclicCols[ref]
 		if len(fkCols) == 0 {
 			continue
@@ -144,6 +180,77 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 			return fmt.Errorf("postgres: cyclic null-fill pass 2 (%s): %w", ref, err)
 		}
 	}
+	return nil
+}
+
+// loadSelfRefWhole loads a self-referential table in a SINGLE statement with its real
+// cyclic FK values — the schema-change-free alternative to NULL-then-fill for when the
+// self-reference column also sits in a UNIQUE key (where NULLing it across every row in
+// pass 1 would collapse otherwise-distinct rows and collide). A non-deferrable FK is
+// checked at the END of the statement, not row-by-row, so one COPY (or one
+// INSERT … SELECT) that contains both a child and the parent it points at passes even
+// though the child appears first in the stream. The table is copied WHOLE (unchunked): a
+// documented tradeoff — a very large self-referential table under this constraint gives up
+// chunked copy for a correct load. (A future depth-ordered load could restore chunking by
+// loading parents-before-children across statements.)
+func (s *Sink) loadSelfRefWhole(ctx context.Context, src *Source, ref engine.TableRef, srcTable engine.Table) error {
+	cols := transportColumns(srcTable) // ALL columns, incl. the self-FK column(s)
+	empty, err := targetEmpty(ctx, s, ref)
+	if err != nil {
+		return err
+	}
+	if empty {
+		// Empty target: one streamed COPY. The self-FK is checked at statement end, so a
+		// child before its parent in the stream is fine; io.Pipe streams, so the whole
+		// table is never buffered in memory.
+		sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+		return pipeCopy(ctx, src, ref, cols, s, sql)
+	}
+	// Non-empty target (resume / re-run): stage the whole table, then ONE
+	// INSERT … ON CONFLICT DO UPDATE — NOT chunked, since chunking would split parent and
+	// child across statements and reintroduce the FK problem. Idempotent on the PK.
+	return s.stagedUpsertWhole(ctx, src, ref, cols)
+}
+
+// stagedUpsertWhole stages the whole source table into a TEMP table and upserts it with a
+// SINGLE INSERT … ON CONFLICT statement (no range chunking), so a self-referential FK —
+// checked at statement end — holds. It is the populated-target counterpart of
+// loadSelfRefWhole's empty-target direct COPY; the normal cyclic path chunks the upsert
+// (upsertFromStaging) because it does not need the single-statement guarantee.
+func (s *Sink) stagedUpsertWhole(ctx context.Context, src *Source, ref engine.TableRef, cols []string) error {
+	tgt, err := s.tableMeta(ctx, ref)
+	if err != nil {
+		return err
+	}
+	meta := buildRangeUpsertMeta(tgt, cols)
+	if len(meta.pk) == 0 {
+		return fmt.Errorf("target %s has no usable key for ON CONFLICT", ref)
+	}
+	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = s.conn.Exec(context.Background(), "ROLLBACK")
+		}
+	}()
+	const stg = "replicare_stg"
+	if _, err := s.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
+		quoteIdentifier(stg), meta.stgDDL)); err != nil {
+		return fmt.Errorf("staging: %w", err)
+	}
+	copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
+	if err := pipeCopy(ctx, src, ref, cols, s, copySQL); err != nil {
+		return fmt.Errorf("copy: %w", err)
+	}
+	if _, err := s.conn.Exec(ctx, mergeInsertSQL(ref, stg, cols, meta.pk, meta.pkSet, meta.identity)); err != nil {
+		return fmt.Errorf("upsert: %w", err)
+	}
+	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	committed = true
 	return nil
 }
 
