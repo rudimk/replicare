@@ -155,6 +155,22 @@ syncs:
     exclude: ["*_audit"]
 ```
 
+**Choosing tables.** `include` and `exclude` are lists of `schema.table` glob
+patterns, and `exclude` is applied on top of `include`. To drop **one specific table**,
+name it in full under `exclude`:
+
+```yaml
+    include: ["public.*"]            # everything in public…
+    exclude: ["public.audit_log"]    # …except this one table
+```
+
+Patterns work too — `*_audit` excludes every table whose name ends in `_audit`. A few
+notes: selection is read **at daemon start**, so change it and restart; excluding a table
+only stops replicating it (rows already on the target are left in place, not deleted); and
+if another replicated table has a foreign key pointing at the excluded one, replicare warns
+about the dangling reference (the target must already satisfy that parent). For Redis,
+selection uses key patterns instead of `schema.table`.
+
 Secrets like `${PW}` are read from the environment. Full field reference:
 [configuration.md](configuration.md).
 
