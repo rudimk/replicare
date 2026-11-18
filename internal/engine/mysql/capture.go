@@ -4,8 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
+	"time"
+
+	driver "github.com/go-sql-driver/mysql"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -85,17 +89,69 @@ func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, o
 		if err := s.blockConflictingTrigger(ctx, ref, ver); err != nil {
 			return err
 		}
-		if err := s.installOne(ctx, ref, cols, origin); err != nil {
+		if err := s.installOneRetrying(ctx, ref, cols, origin); err != nil {
 			return fmt.Errorf("mysql: install capture on %s: %w", ref, err)
 		}
 	}
 	return nil
 }
 
+// Trigger DDL takes an exclusive metadata lock on the USER's table. If an application
+// transaction that touched the table is still open (or "idle in transaction"), that lock
+// request waits — and while it waits MySQL queues every NEW query on the table behind it,
+// stalling the application (the same incident class seen on Postgres, §3.1). MySQL's
+// default lock_wait_timeout is a YEAR. So trigger DDL runs on a pinned connection with a
+// short lock wait, backs off and retries, and finally fails loud; and a restart leaves an
+// already-correct trigger untouched, so it needs no lock on the user's table at all.
+const captureLockWaitSeconds = 2
+
+var (
+	captureLockAttempts = 15
+	captureLockBackoff  = func(attempt int) time.Duration {
+		d := time.Duration(1<<attempt) * time.Second
+		if d > 30*time.Second {
+			d = 30 * time.Second
+		}
+		return d
+	}
+)
+
+// isLockWaitTimeout reports MySQL ER_LOCK_WAIT_TIMEOUT (1205): lock_wait_timeout elapsed.
+func isLockWaitTimeout(err error) bool {
+	var myErr *driver.MySQLError
+	return errors.As(err, &myErr) && myErr.Number == 1205
+}
+
+// installOneRetrying runs installOne, retrying with backoff when the table's metadata
+// lock is not available within captureLockWaitSeconds; between attempts replicare holds
+// and requests no lock, so the application is never queued behind it for longer.
+func (s *Source) installOneRetrying(ctx context.Context, ref engine.TableRef, cols []captureCol, origin bool) error {
+	var err error
+	for attempt := 0; attempt < captureLockAttempts; attempt++ {
+		err = s.installOne(ctx, ref, cols, origin)
+		if err == nil || !isLockWaitTimeout(err) {
+			return err
+		}
+		if attempt == captureLockAttempts-1 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(captureLockBackoff(attempt)):
+		}
+	}
+	return fmt.Errorf("could not get a lock on %s within %ds on any of %d attempts; another session is holding it "+
+		"(for example an open or idle transaction that touched the table, or a running ALTER). replicare gave up "+
+		"rather than queue the application's queries on that table behind its own lock request; it retries on restart: %w",
+		ref, captureLockWaitSeconds, captureLockAttempts, err)
+}
+
 // installOne installs capture for one table. Each statement is individually
 // idempotent (MySQL auto-commits DDL, so there is no wrapping transaction). origin
 // selects the loop-suppressing register-stamping trigger variant (cluster member) and
-// creates the per-table version register.
+// creates the per-table version register. The capture tables live in our own database;
+// only the triggers touch the user's table (see installTriggers).
 func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []captureCol, origin bool) error {
 	relID, err := s.upsertRegistry(ctx, ref, cols)
 	if err != nil {
@@ -108,19 +164,80 @@ func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []cap
 	if origin {
 		stmts = append(stmts, registerTableDDL(ref, cols))
 	}
-	for _, op := range []byte{'I', 'U', 'D'} {
-		trig := triggerDDL(relID, ref.Schema, ref.Name, op, cols)
-		if origin {
-			trig = meshTriggerDDL(relID, ref.Schema, ref.Name, op, cols)
-		}
-		stmts = append(stmts, dropTriggerDDL(relID, ref.Schema, op), trig)
-	}
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("exec: %w\n---\n%s", err, stmt)
 		}
 	}
+	return s.installTriggers(ctx, ref, relID, cols, origin)
+}
+
+// installTriggers (re)creates the three capture triggers on a pinned connection with a
+// bounded lock wait, skipping any trigger that already matches exactly.
+//
+// MySQL cannot replace a trigger atomically: DROP and CREATE each auto-commit, so between
+// them that event is not captured. Skipping current triggers means that window only
+// opens when a trigger really changed (an upgrade), never on a plain restart.
+func (s *Source) installTriggers(ctx context.Context, ref engine.TableRef, relID int, cols []captureCol, origin bool) (err error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", captureLockWaitSeconds)); err != nil {
+		return fmt.Errorf("bound lock wait: %w", err)
+	}
+	// The pinned connection goes back to the pool afterwards: restore the server default.
+	defer func() {
+		if _, rerr := conn.ExecContext(context.Background(), "SET SESSION lock_wait_timeout = DEFAULT"); rerr != nil && err == nil {
+			err = fmt.Errorf("restore lock_wait_timeout: %w", rerr)
+		}
+	}()
+
+	for _, op := range []byte{'I', 'U', 'D'} {
+		ddl := triggerDDL(relID, ref.Schema, ref.Name, op, cols)
+		if origin {
+			ddl = meshTriggerDDL(relID, ref.Schema, ref.Name, op, cols)
+		}
+		current, err := triggerCurrent(ctx, conn, ref, relID, op, ddl)
+		if err != nil {
+			return err
+		}
+		if current {
+			continue
+		}
+		for _, stmt := range []string{dropTriggerDDL(relID, ref.Schema, op), ddl} {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
+				return fmt.Errorf("exec: %w\n---\n%s", err, stmt)
+			}
+		}
+	}
 	return nil
+}
+
+// triggerCurrent reports whether the named capture trigger already exists on the table
+// with exactly the timing, event and body that ddl would create. MySQL stores the body
+// verbatim (information_schema.TRIGGERS.ACTION_STATEMENT), so comparing it detects any
+// change to the trigger, including the one-way vs cluster variant.
+func triggerCurrent(ctx context.Context, conn *sql.Conn, ref engine.TableRef, relID int, op byte, ddl string) (bool, error) {
+	_, wantBody, ok := strings.Cut(ddl, " FOR EACH ROW\n")
+	if !ok {
+		return false, nil // unexpected shape: never skip, always (re)create
+	}
+	var table, timing, event, body string
+	err := conn.QueryRowContext(ctx, `
+		SELECT EVENT_OBJECT_TABLE, ACTION_TIMING, EVENT_MANIPULATION, ACTION_STATEMENT
+		FROM information_schema.TRIGGERS
+		WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?`,
+		ref.Schema, triggerName(relID, op)).Scan(&table, &timing, &event, &body)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("inspect capture trigger: %w", err)
+	}
+	wantEvent := map[byte]string{'I': "INSERT", 'U': "UPDATE", 'D': "DELETE"}[op]
+	return table == ref.Name && timing == "AFTER" && event == wantEvent && body == wantBody, nil
 }
 
 // RemoveCapture tears down capture for the given tables, leaving the source
@@ -132,14 +249,38 @@ func (s *Source) RemoveCapture(ctx context.Context, tables []engine.TableRef) er
 	if s.db == nil {
 		return errNotConnected
 	}
+	// Look up every registry row BEFORE pinning a connection: the source pool holds a
+	// single connection, so a lookup through s.db while it is pinned would deadlock.
+	type captured struct {
+		ref   engine.TableRef
+		relID int
+	}
+	var todo []captured
 	for _, ref := range tables {
 		relID, _, ok, err := s.lookupRegistry(ctx, ref)
 		if err != nil {
 			return fmt.Errorf("mysql: remove capture on %s: %w", ref, err)
 		}
-		if !ok {
-			continue
+		if ok {
+			todo = append(todo, captured{ref, relID})
 		}
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = conn.Close() }()
+	// Same rule as install: never wait on the user's table long enough to queue the
+	// application behind us. A busy table fails loud; re-run once it is free.
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("SET SESSION lock_wait_timeout = %d", captureLockWaitSeconds)); err != nil {
+		return fmt.Errorf("mysql: remove capture: bound lock wait: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "SET SESSION lock_wait_timeout = DEFAULT") }()
+	for _, c := range todo {
+		ref, relID := c.ref, c.relID
 		stmts := []string{
 			dropTriggerDDL(relID, ref.Schema, 'I'),
 			dropTriggerDDL(relID, ref.Schema, 'U'),
@@ -149,7 +290,7 @@ func (s *Source) RemoveCapture(ctx context.Context, tables []engine.TableRef) er
 			fmt.Sprintf("DELETE FROM %s WHERE rel_id = %d", captureRef("captured"), relID),
 		}
 		for _, stmt := range stmts {
-			if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			if _, err := conn.ExecContext(ctx, stmt); err != nil {
 				return fmt.Errorf("mysql: remove capture on %s: exec: %w\n---\n%s", ref, err, stmt)
 			}
 		}

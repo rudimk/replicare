@@ -74,6 +74,24 @@ convergent (applies are idempotent upserts keyed on the PK), but a crash may
 re-apply the last batch. This is harmless by design; it's noted only so you don't
 expect exactly-once parity with a Postgres-target sync.
 
+## Installing capture on a busy source
+
+Adding or replacing a trigger needs an exclusive metadata lock on the table. If an
+application transaction that touched the table is still open, the trigger change has to
+wait, and **while it waits MySQL queues every new query on that table behind it**
+(`lock_wait_timeout` defaults to a year). replicare therefore:
+
+- **leaves a trigger alone on restart when its stored body already matches**, so a restart
+  takes no lock on any application table;
+- **creates its `replicare` database only when it is missing** (even `CREATE DATABASE IF NOT
+  EXISTS` waits behind open application transactions once capture is installed);
+- **waits at most 2 seconds for a lock** when it does need to change a trigger, then retries
+  with a growing pause, and after repeated failures **stops with an error naming the table**.
+
+MySQL cannot replace a trigger in one step (drop and create are separate), so changes to that
+table are not captured during the instant between them. That only happens when a trigger
+actually changes (an upgrade that alters its body), never on a plain restart.
+
 ## Configuration
 
 A MySQL sync is an engine-neutral envelope with a typed `mysql:` block per

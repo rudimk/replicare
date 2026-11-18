@@ -98,6 +98,22 @@ identical/widening.
     stops the sync before anything is copied and asks for the FK to be made
     `DEFERRABLE`.
 
+## Installing capture on a busy source
+
+Adding a trigger locks the table for an instant, but if something else already holds a
+conflicting lock — a long `VACUUM`, a migration, or an application session left *idle in
+transaction* — the trigger change has to wait, and **while it waits Postgres queues every new
+query on that table behind it**. replicare therefore:
+
+- **leaves an already-correct trigger alone on restart**, so a restart takes no lock on any
+  application table;
+- **waits at most 2 seconds for a lock** when it does need to add or replace a trigger, then
+  steps back, retries with a growing pause, and after repeated failures **stops with an error
+  that names the table**, rather than holding the application up.
+
+If that error appears, look for the session holding the table (`pg_stat_activity` /
+`pg_locks`), let it finish, and restart replicare.
+
 ## The Postgres advantage: effectively-exactly-once
 
 replicare's delivery is **at-least-once with idempotent apply** (CLAUDE.md §5). For

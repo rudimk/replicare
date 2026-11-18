@@ -99,6 +99,21 @@ We use **triggers**, modeled on how **Bucardo** works:
   may let the user designate identity columns explicitly.)*
 - Keep trigger functions and capture-table DDL in **broadly compatible PL/pgSQL / SQL** so they
   work against old source servers.
+- **Installing capture must never stall the application (decision, from a production incident).**
+  Adding/replacing a trigger locks the user's table, and while that lock request *waits* (behind a
+  VACUUM, a migration, or an app session left idle in transaction) Postgres queues **every new
+  query on that table behind it** — a restart once froze all queries on a busy table for minutes.
+  So: (1) a restart **does not touch a trigger that is already correct** (checked in `pg_trigger`:
+  name, function, AFTER ROW I/U/D, enabled, WHEN guard iff cluster) — the function body is
+  `CREATE OR REPLACE`d, which needs no lock on the user's table; (2) every install/remove
+  transaction runs with a **short lock wait** (`lock_timeout` 2s; `statement_timeout` before 9.3),
+  then backs off and retries, and after a bounded number of attempts **fails loud** naming the table
+  instead of ever parking a lock request in front of the application. **MySQL** has the same hazard
+  through metadata locks (default `lock_wait_timeout` is a year) and applies the same rule: a trigger
+  whose stored body already matches is left alone; trigger DDL runs on a pinned connection with
+  `lock_wait_timeout = 2`, retried then loud; and the `replicare` database is only `CREATE`d when
+  missing (even `CREATE DATABASE IF NOT EXISTS` waits behind any open app transaction that wrote a
+  captured table, because its trigger holds a lock on that database).
 
 **MySQL** will use the same trigger-based approach (we assume **no binlog access**, just as we
 assume no WAL access for Postgres). It is the MySQL implementation of the same `Source` interface.
@@ -780,6 +795,7 @@ invasive.
 |---|---|
 | CDC mechanism | **Trigger-based (Bucardo-style)** for PG & MySQL; assume **no WAL / no binlog**. Redis: **SCAN + reconciliation**, notifications optional accelerator only. |
 | Delta capture | **PK-only**, re-read current row at sync time. |
+| Capture install locks | **Never stall the app.** Restart skips a trigger that is already correct (no user-table lock); any trigger change runs with a **2s lock wait**, backs off, retries, then fails loud. Never queue the application behind a waiting lock request (§3.1). Same on MySQL (`lock_wait_timeout`, body-compare skip, `replicare` database created only when missing). |
 | Delta sequencing | **Dirty-key set**, NOT an ordered log. **No scalar high-water-mark cursor** (commit-order skew). Consume via **`delta MINUS track` set-difference**, **delete-by-`delta_id`**, per-PK coalescing. seq = lag metric only. See §3.3. |
 | Track location | **On the source DB**, atomic with delta consume + purge. StateStore holds copy-progress/lag/ownership only. |
 | Crash safety | read → apply to target → then track/purge on source. At-least-once, no 2PC. |
