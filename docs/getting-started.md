@@ -76,18 +76,18 @@ file, then load that file on each target.
 
 ```bash
 # Postgres — 1) dump the source structure (no ownership/privilege noise)
-pg_dump --schema-only --no-owner --no-privileges -h SRC_HOST -U USER -d DB > schema.sql
+pg_dump --schema-only --no-owner --no-privileges -h SRC_HOST -p SRC_PORT -U USER -d DB > schema.sql
 # 2) load it into the target
-psql -h TARGET_HOST -U USER -d DB -f schema.sql
+psql -h TARGET_HOST -p TARGET_PORT -U USER -d DB -f schema.sql
 
 # narrow it: -n public (one schema), -t public.orders (one table)
 ```
 
 ```bash
-# MySQL — 1) dump
-mysqldump --no-data -h SRC_HOST -u USER -p DB > schema.sql
+# MySQL — 1) dump  (-P is the PORT; lowercase -p is the password prompt)
+mysqldump --no-data -h SRC_HOST -P SRC_PORT -u USER -p DB > schema.sql
 # 2) load
-mysql -h TARGET_HOST -u USER -p DB < schema.sql
+mysql -h TARGET_HOST -P TARGET_PORT -u USER -p DB < schema.sql
 ```
 
 **Credentials.** These tools ask for a password when the server requires one: Postgres
