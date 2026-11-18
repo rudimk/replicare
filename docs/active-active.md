@@ -5,7 +5,7 @@ writes at the same time and replicare keeps all of them carrying the same data. 
 it exists, how to set a cluster up, how replicare settles two nodes changing the same row, where
 things currently stand, as well as the two rules a cluster has to follow to stay safe.
 
-## Why Would Anyone Need This?
+## Why would anyone need this?
 
 Most replicare setups are one-way - a single source, and one or more targets that only ever
 receive changes. That works well for migrations, read replicas and analytics copies, but it
@@ -29,7 +29,7 @@ Both are decisions that live in the database and in the deployment process, befo
 ever sees a row. replicare is built to stop loudly rather than corrupt anything, but it can't
 fix either of these on its own; the two rules at the end of this page are how to avoid them.
 
-## Setting Up a Cluster
+## Setting up a cluster
 
 Each node is listed under `nodes:`, and the nodes that belong together are grouped in a
 `clusters:` entry. The table structure has to exist on every node already(replicare copies
@@ -60,12 +60,12 @@ clusters:
 A cluster can have any number of nodes, from two upwards, and every node sends its changes
 directly to every other node. Like a sync, a cluster sticks to a single engine. There's nothing
 to configure for conflicts - no conflict setting, and no column to add to any table(see
-[When Two Nodes Change the Same Row](#when-two-nodes-change-the-same-row)). One-way syncs keep
+[when two nodes change the same row](#when-two-nodes-change-the-same-row)). One-way syncs keep
 working alongside clusters in the same config, and a config without `clusters:` behaves exactly
 as it did before. Every field is listed in the
 [configuration reference](configuration.md#active-active-clusters-nodes-and-clusters).
 
-### Permissions Each Node Needs
+### Permissions each node needs
 
 Every node is both read from and written to, so its replicare user needs the source grants
 *and* the target grants together:
@@ -84,7 +84,7 @@ Every node is both read from and written to, so its replicare user needs the sou
 None of the engines need a superuser, a `REPLICATION` role, binlog access or a `wal_level`
 change.
 
-## How replicare Runs a Cluster
+## How replicare runs a cluster
 
 For every pair of nodes, replicare runs one job in each direction(`us` to `eu`, and `eu` to
 `us`). Each job works much like a one-way sync: it captures changes on one node, re-reads their
@@ -98,7 +98,7 @@ stops there.
 The initial copy also runs in every direction, and it's safe to repeat - a row that's already
 present on the receiving node is simply overwritten with the same values.
 
-## When Two Nodes Change the Same Row
+## When two nodes change the same row
 
 If the same row is changed on two nodes at about the same time, the later change wins, on
 every node. replicare decides which change is "later" using a timestamp it keeps for each row,
@@ -125,7 +125,7 @@ Redis, field by field).
 > copy is still running, the other node's change wins, even if the copied value was newer. Once
 > the initial copy has finished, every conflict is settled normally.
 
-## Engine-Specific Notes
+## Engine-specific notes
 
 On Postgres, replicare marks its own writes with a transaction-level setting, which needs no
 special privilege.
@@ -145,7 +145,7 @@ new key written on another; deletes travel as delete records instead. When two n
 already hold different data are joined into a cluster, each key settles on one value, but a key
 deleted *before* a node joined isn't remembered as deleted.
 
-## Where Things Stand
+## Where things stand
 
 At the moment, clusters are full mesh only - every node talks directly to every other node.
 Ring or partial layouts aren't supported, and with N nodes there are N × (N - 1) jobs, so the
@@ -158,7 +158,7 @@ a hot standby that takes over on its own isn't available.
 Finally - the ID check described in Rule 1 runs when the daemon starts, and not as part of
 `replicare validate`.
 
-## Rule 1: Use Globally-Unique IDs
+## Rule 1: use globally-unique IDs
 
 Many tables give each row an id that the database counts up automatically - `1, 2, 3, 4…`(Postgres `serial` /
 `IDENTITY`, MySQL `AUTO_INCREMENT`). In active-active this breaks, because each node counts on
@@ -198,7 +198,7 @@ colliding setup from ever going live.
 > the next restart. Until a running check exists, it's on the operator not to add auto-counting
 > integer keys to replicated tables in a running cluster.
 
-## Rule 2: Push Schema Changes to Every Node First
+## Rule 2: push schema changes to every node first
 
 replicare never replicates schema changes. It copies the data(the rows) between nodes, but not
 changes to the structure of a table - adding, dropping or renaming a column, changing a column's
