@@ -343,7 +343,7 @@ func TestCyclicCopyRecoversFromParentSkew(t *testing.T) {
 	hubRef := ref("rc_it.hub")
 
 	err = copyChildWithParentRetry(ctx, src, sink, surveyRef,
-		transportColumns(byRef[surveyRef]), []engine.TableRef{hubRef}, byRef, map[engine.TableRef][]string{})
+		transportColumns(byRef[surveyRef]), []engine.TableRef{hubRef}, recopyOmitting(src, sink, byRef, map[engine.TableRef][]string{}))
 	if err != nil {
 		t.Fatalf("copyChildWithParentRetry did not recover from parent skew: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestCyclicCopyParentSkewGivesUpTransient(t *testing.T) {
 	}
 	surveyRef := ref("rc_it.survey")
 	err = copyChildWithParentRetry(ctx, src, sink, surveyRef,
-		transportColumns(byRef[surveyRef]), []engine.TableRef{ref("rc_it.hub")}, byRef, map[engine.TableRef][]string{})
+		transportColumns(byRef[surveyRef]), []engine.TableRef{ref("rc_it.hub")}, recopyOmitting(src, sink, byRef, map[engine.TableRef][]string{}))
 	if err == nil {
 		t.Fatal("expected a transient error for an unsatisfiable FK, got nil")
 	}

@@ -329,6 +329,33 @@ touching target constraints —
    `NOT NULL` column and never corrupt.
 During *streaming*, the §3.3 retry fallback remains the cyclic-dependency mechanism.
 
+**Exception to case 1 — a link column that cannot be emptied (decision, Postgres).** Emptying a
+link column (case 1) is only safe if rows that differ *only* by that column stay distinct once it
+is NULL. That is false when the column sits in a unique index where empty values count as equal:
+a `UNIQUE … NULLS NOT DISTINCT` index (PG15+), or any unique index with an expression (e.g.
+`COALESCE(parent, 0)`) or a `WHERE` filter (conservatively). Example: `UNIQUE NULLS NOT DISTINCT
+(email, parent)` lets two child accounts share an email under different parents; with `parent`
+emptied they become duplicates and the load fails with a duplicate-key error. An ordinary unique
+index (NULLs distinct) is fine and keeps the normal two-pass. Detection reads the unique
+**indexes** (`pg_index` + `pg_depend`), not just constraints — a bare `CREATE UNIQUE INDEX` throws
+the same error — and checks **both source and target** (the target's index is the one that
+fires). The schema is never changed; the handling depends on the shape of the loop:
+- **Self-reference** (the table points at itself): that column is **kept at its real value** and
+  the table is loaded in **one statement** (one `COPY` into an empty target; otherwise one
+  staged `INSERT … ON CONFLICT`). A non-deferrable FK is checked at the **end of a statement**, so
+  a child row arriving before its parent inside the same statement passes. Because a unique index
+  *is* checked row by row, the staged path inserts rows that already exist on the target first
+  (`ORDER BY EXISTS(…) DESC`), so a retry over left-over rows cannot clash. Other cyclic columns
+  of the same table (links to *other* tables in the loop) still use the two-pass. **Streaming**
+  keeps the self-link at its real value too (it is not emptied on new rows); a child that arrives
+  before its parent is caught by the normal retry. **Cost:** such a table is copied in one
+  statement — unchunked, no parallelism within it, one resume unit — and Postgres queues one FK
+  check per row until the statement ends (memory grows with the table). Acceptable for the usual
+  account/category-tree tables; a very large one is a known limit.
+- **Loop across tables:** one statement cannot load two tables, so there is no safe order without
+  emptying the column. **Pre-flight blocks the sync** and asks for the FK to be made `DEFERRABLE`
+  (case 2), exactly like case 3. Nothing is loaded wrong.
+
 **MySQL exception (engine-specific, decided in the MySQL plan MM4b; overrides case 3 above for
 MySQL only).** InnoDB has **no `DEFERRABLE` constraints**, so case 2 does not exist and case 3's
 "defer or break the cycle" instruction has no `DEFERRABLE` escape hatch — refusing all `NOT NULL`
@@ -763,7 +790,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
-| Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass**; **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |
+| Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass** (except a link column in a unique index where empty values collide — `NULLS NOT DISTINCT`, expression or filtered unique, detected from source+target indexes: a **self-reference** keeps it real and loads the table in **one statement**, existing rows first, and streaming keeps it real too; a **cross-table loop** is **blocked at pre-flight** → make it `DEFERRABLE`; never a schema change); **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |
 | Type fidelity | **Faithful transport, never transform** (verbatim text, both copy + apply). **No transform capability exists, ever.** See §4.2. |
 | Session GUCs | Pin `DateStyle=ISO,YMD`, `TimeZone=UTC`, `extra_float_digits=3`, `IntervalStyle=postgres`, `bytea_output=hex`, `client_encoding=UTF8` on all connections (formatting-only, no privilege). Warn against `money`. |

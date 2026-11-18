@@ -81,6 +81,22 @@ identical/widening.
   `SET CONSTRAINTS … DEFERRED`; a **`NOT NULL` non-deferrable cycle** is genuinely
   unloadable without disabling constraints (which replicare won't do), so pre-flight
   **fails loud** and asks you to make the FK `DEFERRABLE` or break the cycle.
+- **A link column inside a unique index where empty values count as equal** (for
+  example `UNIQUE NULLS NOT DISTINCT (email, parent)`, or a unique index on an
+  expression such as `COALESCE(parent, 0)`, or one with a `WHERE` filter) cannot be
+  emptied during the two-pass load — rows that differ only by that column would
+  clash and the copy would stop with a duplicate-key error. replicare spots these
+  indexes on both the source and the target (bare `CREATE UNIQUE INDEX` included)
+  and handles them without any schema change:
+  - **Table that points at itself** (an account tree, a category tree): the column is
+    kept at its real value and the whole table is copied in a single statement, which
+    Postgres accepts because it checks this kind of FK only when the statement ends.
+    Live changes keep the real value too. The trade-off: that one table is copied in
+    one piece rather than in parallel chunks, and a restart re-copies it from the
+    start.
+  - **Loop across two or more tables**: there is no safe load order, so pre-flight
+    stops the sync before anything is copied and asks for the FK to be made
+    `DEFERRABLE`.
 
 ## The Postgres advantage: effectively-exactly-once
 

@@ -23,6 +23,7 @@ import (
 const (
 	pg100000 = 100000 // partitioning, identity columns
 	pg120000 = 120000 // generated columns
+	pg150000 = 150000 // UNIQUE … NULLS NOT DISTINCT (pg_index.indnullsnotdistinct)
 )
 
 // introspectConn introspects the selected tables on an open connection. version
@@ -72,8 +73,67 @@ func introspectConn(ctx context.Context, conn *pgx.Conn, version int, sel engine
 	if err := loadForeignKeys(ctx, conn, oids, byOID); err != nil {
 		return nil, err
 	}
+	if err := loadNullCollidingCols(ctx, conn, version, oids, byOID); err != nil {
+		return nil, err
+	}
 
 	return &engine.Schema{Tables: tables}, nil
+}
+
+// loadNullCollidingCols fills each table's NullCollidingCols: the columns for which
+// NULL values can collide in a non-primary UNIQUE index (see engine.Table). It reads
+// pg_index directly rather than pg_constraint, so a bare unique INDEX — which Postgres
+// reports with the same "violates unique constraint" wording — is caught as well as a
+// declared constraint. Two shapes count:
+//
+//   - a plain unique index declared NULLS NOT DISTINCT (PG15+): its key columns;
+//   - a unique index with an expression or a partial-index filter: every column it
+//     references, conservatively — e.g. UNIQUE (email) WHERE parent IS NULL puts every
+//     row in the index once parent is emptied, and UNIQUE (email, COALESCE(parent, 0))
+//     maps every emptied parent to the same value. Expression/filter columns come from
+//     pg_depend, where Postgres records an index's column dependencies.
+//
+// An ordinary (NULLS DISTINCT) unique is not listed: emptied values never clash there,
+// so the cheaper chunked NULL-then-fill load stays safe. Catalog columns used here exist
+// on every supported major; indnullsnotdistinct is gated on PG15.
+func loadNullCollidingCols(ctx context.Context, conn *pgx.Conn, version int, oids []int64, byOID map[int64]*engine.Table) error {
+	nullsNotDistinct := "false"
+	if version >= pg150000 {
+		nullsNotDistinct = "i.indnullsnotdistinct"
+	}
+	q := fmt.Sprintf(`
+SELECT DISTINCT i.indrelid::bigint, a.attname
+FROM pg_index i
+JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum > 0 AND NOT a.attisdropped
+WHERE i.indrelid = ANY($1::oid[])
+  AND i.indisunique AND NOT i.indisprimary
+  AND (
+        ((i.indexprs IS NOT NULL OR i.indpred IS NOT NULL)
+          AND (a.attnum = ANY(i.indkey)
+               OR EXISTS (SELECT 1 FROM pg_depend d
+                          WHERE d.classid = 'pg_class'::regclass AND d.objid = i.indexrelid
+                            AND d.refclassid = 'pg_class'::regclass AND d.refobjid = i.indrelid
+                            AND d.refobjsubid = a.attnum)))
+        OR (%s AND a.attnum = ANY(i.indkey))
+      )
+ORDER BY 1, 2`, nullsNotDistinct)
+
+	rows, err := conn.Query(ctx, q, oids)
+	if err != nil {
+		return fmt.Errorf("postgres: introspect null-colliding unique columns: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var relid int64
+		var col string
+		if err := rows.Scan(&relid, &col); err != nil {
+			return fmt.Errorf("postgres: scan null-colliding column: %w", err)
+		}
+		if t := byOID[relid]; t != nil {
+			t.NullCollidingCols = append(t.NullCollidingCols, col)
+		}
+	}
+	return rows.Err()
 }
 
 // candidate carries the minimal listing info plus the oid for follow-up queries.

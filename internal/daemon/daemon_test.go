@@ -529,6 +529,116 @@ syncs:
 	}
 }
 
+// TestDaemonSelfRefNullCollidingUniqueCopiesAndStreams is the production failure
+// end-to-end: a self-referencing table (account -> parent account) whose TARGET has a
+// unique index where empty values collide — UNIQUE NULLS NOT DISTINCT (email, parent) —
+// and where the same email legitimately appears under different parents. The old
+// two-pass cyclic load emptied `parent` on every row and died with a duplicate key
+// (SQLSTATE 23505); streaming would likewise empty it on every NEW row. Both must now keep
+// the self-link real: the initial copy converges, and live source changes — a new child
+// whose email matches a parentless account, a rename, and a re-parent onto that new row —
+// replicate. The source (an old major in the harness) carries an ordinary unique.
+func TestDaemonSelfRefNullCollidingUniqueCopiesAndStreams(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
+	defer cancel()
+
+	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
+	defer src.Close(context.Background())
+	tgt := dial(t, ctx, envd("RC_DST_HOST", "127.0.0.1"), envd("RC_DST_PORT", "5441"), envd("RC_DST_DB", "replicare_dst"))
+	defer tgt.Close(context.Background())
+
+	for _, c := range []*pgx.Conn{src, tgt} {
+		mustExec(t, ctx, c, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		mustExec(t, ctx, c, "CREATE SCHEMA rc_it")
+	}
+	mustExec(t, ctx, src, "DROP SCHEMA IF EXISTS replicare CASCADE")
+	mustExec(t, ctx, tgt, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	mustExec(t, ctx, src, `CREATE TABLE rc_it.acct (id int PRIMARY KEY, email text NOT NULL,
+		parent int REFERENCES rc_it.acct(id), name text, CONSTRAINT acct_email_parent_unique UNIQUE (email, parent))`)
+	mustExec(t, ctx, tgt, `CREATE TABLE rc_it.acct (id int PRIMARY KEY, email text NOT NULL,
+		parent int REFERENCES rc_it.acct(id), name text, CONSTRAINT acct_email_parent_unique UNIQUE NULLS NOT DISTINCT (email, parent))`)
+	// 50 roots (1-3 use emails e1-e3) and 450 children reusing e1..e9 under different
+	// parents; stored children-first so the copy stream emits a child before its parent.
+	mustExec(t, ctx, src, `INSERT INTO rc_it.acct (id, email, parent, name)
+		SELECT id, email, parent, 'n'||id FROM (
+		  SELECT g AS id, CASE WHEN g <= 3 THEN 'e'||g ELSE 'r'||g END AS email, NULL::int AS parent FROM generate_series(1,50) g
+		  UNION ALL SELECT g, 'e'||(g/50), (g % 50) + 1 FROM generate_series(51,500) g
+		) v ORDER BY id DESC`)
+	t.Cleanup(func() {
+		bg := context.Background()
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = src.Exec(bg, "DROP SCHEMA IF EXISTS replicare CASCADE")
+		_, _ = tgt.Exec(bg, "DROP SCHEMA IF EXISTS rc_it CASCADE")
+		_, _ = tgt.Exec(bg, "DROP SCHEMA IF EXISTS replicare_state CASCADE")
+	})
+
+	// Order-independent content digest of the table (works on old sources too).
+	digest := func(c *pgx.Conn) string {
+		var d *string
+		err := c.QueryRow(ctx, `SELECT md5(string_agg(id||'|'||email||'|'||coalesce(parent::text,'-')||'|'||coalesce(name,'-'), ',' ORDER BY id)) FROM rc_it.acct`).Scan(&d)
+		if err != nil || d == nil {
+			return ""
+		}
+		return *d
+	}
+
+	syncBlock := `
+syncs:
+  - name: s1
+    source: src
+    targets: [dst]
+    include: ["rc_it.*"]
+    tuning: { drain_interval: 100ms }
+`
+	cfg, err := config.Load(writeConfig(t, harnessConfigYAML(syncBlock)))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	d, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("new daemon: %v", err)
+	}
+	runCtx, stop := context.WithCancel(ctx)
+	done := make(chan error, 1)
+	go func() { done <- d.Run(runCtx) }()
+
+	// Initial copy converges (before the fix: duplicate key in the cyclic copy).
+	if !pollUntil(t, copyTimeout, func() bool { s := digest(src); return s != "" && s == digest(tgt) }) {
+		select {
+		case err := <-done:
+			t.Fatalf("daemon exited during initial copy: %v", err)
+		default:
+		}
+		t.Fatalf("initial copy did not converge: src rows=%d tgt rows=%d", count(t, ctx, src, "rc_it.acct"), count(t, ctx, tgt, "rc_it.acct"))
+	}
+
+	// Live changes. (e1, 1) is free, but emptied it would be (e1, NULL) — root 1's value.
+	mustExec(t, ctx, src, "INSERT INTO rc_it.acct VALUES (9001, 'e1', 1, 'new child')")
+	mustExec(t, ctx, src, "UPDATE rc_it.acct SET name = 'renamed' WHERE id = 60")
+	mustExec(t, ctx, src, "UPDATE rc_it.acct SET parent = 9001 WHERE id = 199")
+	mustExec(t, ctx, src, "INSERT INTO rc_it.acct VALUES (9002, 'zz', NULL, 'new root')")
+
+	if !pollUntil(t, convergeTimeout, func() bool { return digest(src) == digest(tgt) }) {
+		var p199 *int
+		_ = tgt.QueryRow(ctx, "SELECT parent FROM rc_it.acct WHERE id = 199").Scan(&p199)
+		t.Fatalf("streaming did not converge: tgt has 9001=%d rows, 199.parent=%v",
+			count(t, ctx, tgt, "rc_it.acct WHERE id = 9001"), p199)
+	}
+
+	stop()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon Run returned %v, want nil on graceful shutdown", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("daemon did not stop within 15s of cancellation")
+	}
+}
+
 // TestDaemonResumesAfterRestart proves checkpoint-resume: after one daemon stops,
 // a fresh daemon on the same state resumes without re-copying (copy progress is
 // Done) and streams deltas queued in the interim to convergence — no duplicates.
