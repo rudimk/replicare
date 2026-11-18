@@ -18,6 +18,192 @@ Practical guidance for running replicare in production. Design rationale lives i
 5. **Purge / retention / reseed.** Consumed deltas are purged; a target that falls too far behind is
    reseeded (see below).
 
+## Before a migration: checklist
+
+Work through this before pointing replicare at a production source. Most items are information to
+gather (sizing, traffic, quiet windows); a few must be true before starting. Run the queries on the
+**source** unless stated otherwise. `replicare validate <config>` then checks the rest (types,
+foreign-key loops, keys) and reports anything that would block.
+
+### Postgres
+
+**Sizing and traffic**
+
+1. **Total database size.**
+   ```sql
+   SELECT pg_size_pretty(pg_database_size(current_database()));
+   ```
+2. **Row counts and sizes per table.** `row_estimate` comes from planner statistics; `-1` (or `0` on
+   older versions) means the table has never been analyzed — run `ANALYZE` first for real numbers.
+   ```sql
+   SELECT n.nspname AS schema, c.relname AS table_name,
+          c.reltuples::bigint                            AS row_estimate,
+          pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+          pg_size_pretty(pg_indexes_size(c.oid))        AS indexes
+   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p')
+     AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'replicare')
+     AND n.nspname NOT LIKE 'pg_toast%'
+   ORDER BY pg_total_relation_size(c.oid) DESC;
+   ```
+3. **Write volume over 24 hours.** The counters only ever go up, so run this twice, 24 hours apart,
+   and subtract. Every row inserted, updated or deleted in a replicated table adds one row to
+   replicare's change tracking, so `inserts + updates + deletes` per day is roughly the daily
+   change-tracking volume (and the work streaming has to keep up with).
+   ```sql
+   SELECT now() AS sampled_at,
+          sum(n_tup_ins) AS inserts, sum(n_tup_upd) AS updates, sum(n_tup_del) AS deletes,
+          (SELECT xact_commit + xact_rollback FROM pg_stat_database
+            WHERE datname = current_database()) AS transactions
+   FROM pg_stat_user_tables;
+   ```
+   For the busiest tables, `SELECT relname, n_tup_ins + n_tup_upd + n_tup_del AS writes FROM
+   pg_stat_user_tables ORDER BY writes DESC LIMIT 20;`.
+4. **Low-traffic windows** (daily and weekly). Busy periods followed by lulls let streaming catch up,
+   and a quiet window is the best time for the final cutover.
+
+**Must be true before starting**
+
+5. **Every table has a primary key or a `UNIQUE` constraint.** replicare tracks changes by key.
+   It uses the primary key, or else the first `UNIQUE` constraint; a bare `CREATE UNIQUE INDEX`
+   without a constraint does not count. Tables listed here are **skipped** (with a warning), not
+   replicated:
+   ```sql
+   SELECT n.nspname AS schema, c.relname AS table_name
+   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p')
+     AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'replicare')
+     AND n.nspname NOT LIKE 'pg_toast%'
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint k
+                     WHERE k.conrelid = c.oid AND k.contype IN ('p', 'u'))
+   ORDER BY 1, 2;
+   ```
+6. **Extensions.** List them on the source and confirm the **target** has every one the replicated
+   tables use (column types, defaults). replicare never installs extensions; a missing one fails
+   pre-flight.
+   ```sql
+   SELECT extname, extversion FROM pg_extension ORDER BY 1;
+   ```
+7. **Materialized views (and plain views) are not replicated** — only table data is. Create them on
+   the target from the schema dump, then `REFRESH MATERIALIZED VIEW` there after the initial copy
+   and again just before cutover.
+   ```sql
+   SELECT schemaname, matviewname FROM pg_matviews ORDER BY 1, 2;
+   ```
+8. **Large objects are not replicated.** Their contents live in `pg_largeobject`, not in a replicated
+   table; a table's `oid` column is copied but the object it points to is not. Anything above 0 here
+   needs a separate plan:
+   ```sql
+   SELECT count(*) FROM pg_largeobject_metadata;
+   ```
+9. **Schema changes are frozen for the whole replication.** DDL is not replicated, so a schema change
+   on the source has to be applied to the target by hand and can break the pipeline. During the
+   initial copy there is an extra reason: an `ALTER TABLE` waits for replicare's copy read of that
+   table to finish, and the application's queries on that table queue behind the `ALTER`.
+10. **Regular vacuum and maintenance jobs.** Find out what runs and when — autovacuum settings,
+    scheduled `VACUUM`, and especially heavy jobs that lock whole tables (`VACUUM FULL`, `CLUSTER`,
+    `pg_repack`). Plain `VACUUM` / autovacuum is fine at any time; the heavy jobs should be paused
+    during the initial copy and kept out of peak hours afterwards. See
+    [Vacuum and other maintenance](#vacuum-and-other-maintenance).
+    ```sql
+    SHOW autovacuum;
+    -- scheduled jobs, if pg_cron is installed:
+    SELECT jobid, schedule, command FROM cron.job;
+    -- recent vacuum activity and the tables with the most dead rows:
+    SELECT relname, last_vacuum, last_autovacuum, n_dead_tup
+    FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20;
+    ```
+    Also ask about jobs outside the database (cron, CI pipelines, the hosting provider's maintenance
+    windows).
+11. **No long-open transactions.** Sessions left open — especially `idle in transaction` — stop vacuum
+    from cleaning up (replicare's change-tracking tables bloat) and make trigger setup wait. This
+    should normally return nothing:
+    ```sql
+    SELECT pid, usename, state, now() - xact_start AS open_for, left(query, 80) AS last_query
+    FROM pg_stat_activity
+    WHERE xact_start < now() - interval '5 minutes' AND pid <> pg_backend_pid()
+    ORDER BY xact_start;
+    ```
+12. **Versions.** `SELECT version();` on both sides. The source can be old; the target should be the
+    same major version or newer.
+13. **Privileges and disk.** The source role needs the grants in
+    [Least-privilege grants](#least-privilege-grants), and the source needs room for the
+    change-tracking tables to grow with the write volume from item 3 (more if a target falls behind,
+    up to the retention cap).
+14. **Sequences at cutover.** Row values are copied, sequence counters are not. Plan
+    `replicare reseed-sequences` (or `sync_sequences: true`) before the target takes writes — see
+    [Sequences & identity counters](#sequences--identity-counters-dr--promotion).
+
+### MySQL
+
+Numbers match the Postgres list. Postgres items 4 (quiet windows), 9 (schema freeze), 13 (privileges
+and disk) and 14 (sequences) apply as written; large objects (8) don't exist in MySQL, and the version
+check (12) is part of (6). MySQL versions of the rest, plus two MySQL-only items:
+
+- **(1) Total size.**
+   ```sql
+   SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024) AS size_mb
+   FROM information_schema.TABLES WHERE table_schema = '<DB_NAME>';
+   ```
+- **(2) Row counts, sizes and storage engine per table.** `table_rows` is InnoDB's estimate.
+   ```sql
+   SELECT table_name, engine, table_rows AS row_estimate,
+          ROUND(data_length / 1024 / 1024)  AS data_mb,
+          ROUND(index_length / 1024 / 1024) AS index_mb
+   FROM information_schema.TABLES
+   WHERE table_schema = '<DB_NAME>' AND table_type = 'BASE TABLE'
+   ORDER BY data_length + index_length DESC;
+   ```
+   **Every table must be InnoDB** — pre-flight blocks MyISAM/MEMORY tables.
+- **(3) Write volume over 24 hours.** Server-wide counters (all databases on the server); run twice,
+   24 hours apart, and subtract.
+   ```sql
+   SHOW GLOBAL STATUS WHERE Variable_name IN
+     ('Innodb_rows_inserted', 'Innodb_rows_updated', 'Innodb_rows_deleted', 'Com_commit', 'Com_rollback');
+   ```
+- **(5) Every table has a primary key or a `UNIQUE` key** (tables without one are skipped):
+   ```sql
+   SELECT t.table_name FROM information_schema.TABLES t
+   WHERE t.table_schema = '<DB_NAME>' AND t.table_type = 'BASE TABLE'
+     AND NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS c
+                     WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name
+                       AND c.constraint_type IN ('PRIMARY KEY', 'UNIQUE'));
+   ```
+- **(6) Extensions** don't exist in MySQL. Instead check: MySQL **5.7 or newer** (`SELECT VERSION();`,
+   MariaDB is not supported); on the **target**, `local_infile` is `ON`
+   (`SHOW GLOBAL VARIABLES LIKE 'local_infile';`) and the target tables have **no extra `UNIQUE`
+   keys** beyond the one replicare uses (pre-flight blocks them — see
+   [the MySQL page](mysql.md#requirements)).
+- **(7) Materialized views** don't exist in MySQL; plain views are not replicated (they come over with
+   the schema dump).
+- **(MySQL only) Existing triggers.** On MySQL 5.7 a table can have only one trigger per timing and event, so a
+   table that already has its own `AFTER INSERT/UPDATE/DELETE` trigger blocks capture (8.0+ allows
+   several):
+   ```sql
+   SELECT event_object_table, trigger_name, action_timing, event_manipulation
+   FROM information_schema.TRIGGERS WHERE trigger_schema = '<DB_NAME>';
+   ```
+- **(9) Schema freeze also covers online schema-change tools** (`pt-online-schema-change`, `gh-ost`).
+   They rebuild a table and swap it in, and the swap leaves replicare's triggers behind on the old
+   table; `pt-online-schema-change` also adds triggers of its own.
+- **(10) Maintenance jobs (the MySQL counterpart of vacuum).** MySQL has no `VACUUM`; the jobs that
+    matter are table rebuilds — `OPTIMIZE TABLE`, `ALTER TABLE … FORCE` / `ENGINE=InnoDB` — run from
+    cron or the event scheduler. A rebuild locks the table briefly at the start and end; during the
+    initial copy it waits for replicare's copy read and the application queues behind it, so pause
+    rebuilds during the copy.
+    ```sql
+    SELECT event_schema, event_name, interval_value, interval_field, event_definition
+    FROM information_schema.EVENTS;
+    ```
+- **(11) No long-open transactions** — they hold back InnoDB's purge (the history list grows and
+    replicare's change-tracking tables bloat) and make trigger setup wait:
+    ```sql
+    SELECT trx_mysql_thread_id, trx_started, trx_state, LEFT(trx_query, 80) AS query
+    FROM information_schema.INNODB_TRX ORDER BY trx_started;
+    ```
+- **(MySQL only) A Postgres database for replicare's state** is still required for a MySQL→MySQL sync (see
+    [the MySQL page](mysql.md#1-a-mysql-sync-still-needs-a-postgres-for-state)).
+
 ## Tuning knobs (per sync, under `tuning:`)
 
 | Knob | Meaning | Default |
@@ -100,6 +286,54 @@ next sweep. `replicare_delete_reconciliation_lag_seconds` (sweep duration) and
 `replicare_deletes_reconciled_total` are the Redis-specific signals; tune cadence with
 `delete_sweep_interval`. Upserts converge faster via the rolling reconciliation scan. See
 [the Redis engine page](redis.md).
+
+## Vacuum and other maintenance
+
+**Plain `VACUUM` and autovacuum never conflict with streaming.** While streaming, replicare runs
+only ordinary statements on the source — the trigger's `INSERT` into its change-tracking table on
+every application write, `SELECT`s that read those tables and re-read changed rows, and batched
+`DELETE`s that clear changes every target has applied. None of them takes a lock that a plain
+vacuum blocks, or that blocks a plain vacuum. The same holds on the target, where replicare only
+inserts, updates and deletes rows.
+
+**Trigger setup is the one place a plain vacuum can get in the way** — only at startup, and only
+when a trigger actually has to be created or replaced (a new table, or a trigger someone removed).
+Adding a trigger needs a lock that a running vacuum holds. replicare waits at most 2 seconds for it,
+backs off and retries, and after repeated failures stops with an error naming the table, rather than
+holding the application up (see CLAUDE.md §3.1). A normal restart, with every trigger already in
+place, takes no lock on application tables at all.
+
+**Heavy maintenance that locks a whole table** — `VACUUM FULL`, `CLUSTER`, `pg_repack`,
+`ALTER TABLE`:
+
+- On an **application table**, it blocks replicare's reads of that table just like the
+  application's queries; replicare adds no extra harm. During streaming replicare's reads are
+  short, so the job waits only a moment for one to finish.
+- On one of **replicare's change-tracking tables** (for example a database-wide `VACUUM FULL`), it
+  briefly blocks the application's writes to the matching table, because the trigger cannot record
+  the change until the job finishes. These tables are small, so the pause is short; keep it out of
+  peak hours.
+
+**During the initial copy** two more things apply:
+
+- Copy reads are long: each chunk, and a table loaded in one statement (a self-referencing table
+  whose link column cannot be emptied, CLAUDE.md §4.1), keeps a read open for as long as it runs.
+  While it runs, vacuum cannot remove rows that read might still need to see, anywhere in the
+  database.
+- An `ALTER TABLE` (or `VACUUM FULL` / `CLUSTER`) on a table being copied waits for that read to
+  finish, and the application's queries on the table queue behind it. Pause heavy maintenance and
+  schema migrations during the initial copy, or run them with a `lock_timeout`.
+
+**Long-open transactions are the real vacuum problem.** replicare's change-tracking tables get
+constant inserts and deletes and rely on autovacuum to reclaim the space. A transaction left open on
+the source — typically an application session `idle in transaction` — stops vacuum from cleaning up
+after it anywhere in the database, so those tables grow even though replicare keeps clearing them
+(see [the `xmin`-horizon caveat](#source-footprint-the-thing-to-watch)). Streaming keeps working; the
+cost is disk. Ending the stuck session fixes it.
+
+**MySQL** has no `VACUUM`; the equivalents are table rebuilds (`OPTIMIZE TABLE`,
+`ALTER TABLE … FORCE`), which behave like the heavy jobs above, and long transactions holding back
+InnoDB's purge, which behave like the open-transaction problem.
 
 ## When a target goes down
 

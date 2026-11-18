@@ -68,6 +68,37 @@ The full list of every metric, its type, and its labels is in
 
 ## Point it at your own databases
 
+### 0. Run the pre-migration checklist
+
+Before pointing replicare at a production source, gather the facts below and confirm the
+must-haves. The queries for each item, for Postgres and MySQL, are in
+[operations.md → Before a migration: checklist](operations.md#before-a-migration-checklist).
+
+**Sizing and traffic**
+
+- [ ] Total database size, and row counts and sizes per table.
+- [ ] Write volume over 24 hours (inserts, updates and deletes): every change adds one row to
+      replicare's change tracking on the source.
+- [ ] Daily and weekly low-traffic windows, for catching up and for the final cutover.
+
+**Must be true before starting**
+
+- [ ] Every table has a primary key or a `UNIQUE` constraint (tables without one are skipped).
+- [ ] Postgres: every extension the tables use exists on the target. MySQL: every table is InnoDB,
+      the target has `local_infile` on, and on MySQL 5.7 no table already has its own
+      `AFTER INSERT/UPDATE/DELETE` trigger.
+- [ ] Materialized views and views are not replicated: plan to create and refresh them on the target.
+      Postgres large objects are not replicated either.
+- [ ] Schema changes and migrations are frozen for the whole replication (including online
+      schema-change tools such as `pt-online-schema-change` / `gh-ost` on MySQL).
+- [ ] Regular vacuum and maintenance jobs are known: plain `VACUUM` / autovacuum is fine; heavy jobs
+      that lock whole tables (`VACUUM FULL`, `CLUSTER`, `pg_repack`, MySQL `OPTIMIZE TABLE`) are paused
+      during the initial copy and kept out of peak hours afterwards.
+- [ ] No long-open (`idle in transaction`) sessions on the source.
+- [ ] Source and target versions checked (target the same major version or newer), grants in place,
+      and disk room on the source for the change-tracking tables to grow.
+- [ ] A plan for sequence / identity counters at cutover (`replicare reseed-sequences`).
+
 ### 1. Prepare the target schema
 
 replicare replicates **data only** — it never creates or migrates target tables.
