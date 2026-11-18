@@ -71,25 +71,31 @@ replicare replicates **data only** — it never creates or migrates target table
 Create/migrate the target tables yourself first, matching the source columns you
 want to replicate. (Types must be compatible; pre-flight will tell you if not.)
 
-The quickest way to match the source is to dump its **structure only** (no data) and
-load it on each target:
+The quickest way to match the source is to dump its **structure only** (no data) to a
+file, then load that file on each target.
 
 ```bash
-# Postgres — structure only, no ownership/privilege noise
+# Postgres — 1) dump the source structure (no ownership/privilege noise)
 pg_dump --schema-only --no-owner --no-privileges -h SRC_HOST -U USER -d DB > schema.sql
+# 2) load it into the target
 psql -h TARGET_HOST -U USER -d DB -f schema.sql
-# or pipe straight across:
-pg_dump --schema-only --no-owner --no-privileges -h SRC_HOST -U USER -d DB \
-  | psql -h TARGET_HOST -U USER -d DB
 
 # narrow it: -n public (one schema), -t public.orders (one table)
 ```
 
 ```bash
-# MySQL — structure only
+# MySQL — 1) dump
 mysqldump --no-data -h SRC_HOST -u USER -p DB > schema.sql
+# 2) load
 mysql -h TARGET_HOST -u USER -p DB < schema.sql
 ```
+
+**Credentials.** These tools ask for a password when the server requires one: Postgres
+prompts interactively (and `mysqldump -p` means "prompt me"). Don't put the password in
+the command — it leaks into your shell history and `ps`. Instead store it in `~/.pgpass`
+(Postgres, `chmod 600`) or `~/.my.cnf` (MySQL). If you prefer a one-step pipe
+(`pg_dump … | psql …`), note it **cannot prompt** — the password step and the data stream
+collide — so set up `~/.pgpass` / `PGPASSWORD` first, or stick with the two-step form above.
 
 For **active-active**, run this against **every node** before starting (and apply any
 later schema change to every node first — see [active-active.md](active-active.md)).
