@@ -1,47 +1,52 @@
-# loadgen-redis — a Redis load + verification harness for replicare
+# Redis Load Testing with `loadgen-redis`
 
-`loadgen-redis` is the Redis sibling of [`test/loadgen`](https://replicare.rudimk.com/load-testing-postgres.html). It
-is a manual, idempotent tool for exercising replicare's Redis engine against
-**broad, multi-type, high-volume** data. You run it against a **source** Redis; it
-seeds a rich keyspace the first time and applies random mutations on every
-subsequent run. Point replicare at the source and a target, and use
-`loadgen-redis verify` to assert the target converged.
+This page describes `loadgen-redis`, the harness we use to load-test `replicare`'s Redis engine,
+and the Redis sibling of [`test/loadgen`](https://replicare.rudimk.com/load-testing-postgres.html).
+It's a manual, idempotent tool that exercises `replicare` against broad, multi-type,
+high-volume data; the first run against a source Redis seeds a rich keyspace, and every run
+after that applies random mutations. With `replicare` pointed at the source and a target,
+`loadgen-redis verify` then checks that the target has converged. The page covers what the
+harness generates, how to run it(on its own, against an active-active mesh, as a complete
+end-to-end rig and against a Redis Cluster), as well as a few gotchas.
 
-It is a developer/test tool — **not** part of the shipped binary. Run it from a
-checkout with `go run ./test/loadgen-redis` (or `task loadgen-redis:*`).
+`loadgen-redis` is a developer / test tool, and isn't part of the shipped binary. Run it from a
+checkout with `go run ./test/loadgen-redis`(or `task loadgen-redis:*`).
 
-Unlike the Postgres harness there is **no `ddl` step**: Redis has no schema, and
-replicare `RESTORE`s keys straight into the target keyspace, which need not
-pre-exist.
+Unlike the Postgres harness, there's no `ddl` step. Redis has no schema, and `replicare`
+`RESTORE`s keys straight into the target keyspace, which doesn't need to exist beforehand.
 
 ## What it generates
 
-Keys are laid out as **`lg:{<bucket>}:<type>:<n>`**. Everything is chosen to
-exercise replicare's Redis paths, not just to hold data:
+Keys are laid out as `lg:{<bucket>}:<type>:<n>`, and every cohort is chosen to exercise one of
+`replicare`'s Redis paths rather than just to hold data:
 
 | Cohort | What it stresses |
 |---|---|
-| `str` | plain strings; ~20% carry a **TTL** (volatile keys → TTL replication) |
-| `hash` / `list` / `set` / `zset` | every collection type, through `DUMP`→`RESTORE` |
-| `stream` | streams **with consumer groups** — the trickiest `DUMP`/`RESTORE` payload |
-| `big` | deliberately **large keys** (~100 KB hashes) → the big-key path / `MEMORY USAGE` gate |
-| `lgskip:*` | written to the **source only**; replicare's `include: ["lg:*"]` must exclude it — the Redis analog of loadgen's keyless `audit_log`. `verify` asserts the target holds **none** of these. |
+| `str` | plain strings, about 20% of which carry a TTL(volatile keys, which exercise TTL replication) |
+| `hash` / `list` / `set` / `zset` | every collection type, going through `DUMP` and then `RESTORE` |
+| `stream` | streams with consumer groups, the trickiest `DUMP`/`RESTORE` payload |
+| `big` | deliberately large keys(hashes of about 100 KB), which take the big-key path / `MEMORY USAGE` gate |
+| `lgskip:*` | written to the source only, and `replicare`'s `include: ["lg:*"]` has to exclude it; it's the Redis analogue of `loadgen`'s keyless `audit_log`. `verify` checks that the target holds none of these. |
 
-The **`{bucket}` hash tag** is the cluster story: on a standalone/sentinel server
-the braces are inert literal bytes, but on a Redis Cluster they spread the keyspace
-across slots/shards (exercising replicare's per-master SCAN fan-out) **and** keep a
-`RENAME`'s old+new key in one slot (a cross-slot `RENAME` is an error).
+The `{bucket}` hash tag is what makes the harness work on a cluster. On a standalone / sentinel
+server the braces are inert literal bytes, but on a Redis Cluster they spread the keyspace across
+slots / shards(exercising `replicare`'s per-master SCAN fan-out) *and* keep a `RENAME`'s old and
+new key in one slot, since a cross-slot `RENAME` is an error.
 
-The churn mix includes the two cases replicare's Redis engine handles specially:
-- **`RENAME`** = delete-old + create-new — the analog of a PK change, and a stress
-  on the delete-reconciliation sweep.
-- **heavy `DEL`** — Redis has **no delete capture**, so deletes are only caught by
-  replicare's target-vs-source diff; this is the genuinely hard path.
+The churn mix includes the two cases `replicare`'s Redis engine handles specially:
 
-At `--scale 1.0` (default) the seed writes ~430k keys. Scale down for quick loops:
-`--scale 0.02` ≈ 8.6k keys in well under a second.
+1. `RENAME`, which is a delete of the old key plus a create of the new one. It's the analogue of
+   a PK change, and puts stress on the delete-reconciliation sweep.
+2. Heavy `DEL`. Redis has no delete capture, so deletes are only caught by `replicare`'s
+   target-vs-source diff, which makes this the genuinely hard path.
 
-## Usage
+At `--scale 1.0`(the default), the seed writes about 430k keys. For quick loops, scale it down;
+`--scale 0.02` writes about 8.6k keys in well under a second.
+
+## Using the harness
+
+The basic loop is to seed the source, start `replicare`, generate some change, then check the
+target has caught up:
 
 ```sh
 # 1. Seed the SOURCE (first run seeds; later runs churn).
@@ -57,79 +62,83 @@ go run ./test/loadgen-redis verify --source "$SOURCE" --target "$TARGET" --wait 
 
 ### Connection specs
 
-- **standalone / sentinel:** a `redis://` URL, e.g. `redis://:pw@localhost:6390/0`
-  (empty = `redis://localhost:6379/0`).
-- **cluster:** pass `--cluster` and a comma-separated seed list, e.g.
-  `--dsn "n1:6379,n2:6379,n3:6379"` (use `--password` for AUTH). One tool, both
-  topologies — see the hash-tag note above.
+For a standalone / sentinel server, pass a `redis://` URL, for example
+`redis://:pw@localhost:6390/0`; left empty, it defaults to `redis://localhost:6379/0`.
+
+For a cluster, pass `--cluster` and a comma-separated seed list, for example
+`--dsn "n1:6379,n2:6379,n3:6379"`, and use `--password` for AUTH. It's one tool for both
+topologies - see the hash-tag note above.
 
 ### Commands & flags
 
-- `run --dsn <src> [--scale F] [--ops N] [--seed S] [--cluster] [--node-id K]` —
-  **seed if empty** or **churn** `N` ops. `--seed` makes a run reproducible (op
-  selection + generated values). `--node-id K` (default 0) selects this writer's
-  **key namespace** for active-active testing — see
-  [Active-active](#active-active-multi-master-load-testing); 0 is the default
-  single-writer (active-passive) behaviour, unchanged.
-- `verify --source <src> --target <tgt> [--wait D] [--interval D] [--cluster] [--node-id K]` —
-  compares every `lg:*` key **version-independently**: a type-aware canonical
-  content hash (`GET` / sorted `HGETALL` / `LRANGE` / sorted `SMEMBERS` /
-  `ZRANGE WITHSCORES` / `XRANGE` + group last-ids) plus **TTL presence**. Also
-  asserts no `lgskip:*` leaked to the target. It is a pure **equality** check over
-  the whole `lg:*` keyspace, so it doubles as the active-active convergence oracle
-  (run it between any two mesh nodes — both hold the union). `--node-id K` is the
-  **source's** node index; it scopes the skip-leak check to that source's own
-  `lgskip:*` namespace (0 = the classic single-writer check). `--wait` polls until
-  converged or the timeout. Exits non-zero on drift.
-- `reset --dsn <db> --yes [--cluster]` — `DEL` every `lg:*`, `lgskip:*`, and the
-  `lgmeta:*` marker key (all nodes' namespaces). Scoped by prefix — it never runs
-  `FLUSHDB`.
+`run --dsn <src> [--scale F] [--ops N] [--seed S] [--cluster] [--node-id K]` seeds the source if
+it's empty, or churns `N` ops if it isn't. `--seed` makes a run reproducible, covering both op
+selection and the generated values. `--node-id K`(0 by default) selects this writer's key
+namespace for active-active testing - see
+[Active-active](#active-active-multi-master-load-testing). The default of 0 is the
+single-writer(active-passive) behaviour, unchanged.
 
-> **Why not compare `DUMP` bytes directly?** The harness runs an **old source
-> (6.2)** against a **modern target (7.4)**, whose RDB serializations differ even
-> for identical data (and replicare deliberately preserves each side's own
-> encoding). So `verify` compares a canonical *rendering* of each value, not its
-> serialized bytes. **TTL** is compared as presence only (has-TTL vs no-TTL) — the
-> exact remaining seconds legitimately differ by the replication delay.
+`verify --source <src> --target <tgt> [--wait D] [--interval D] [--cluster] [--node-id K]`
+compares every `lg:*` key version-independently, using a type-aware canonical content
+hash(`GET` / sorted `HGETALL` / `LRANGE` / sorted `SMEMBERS` / `ZRANGE WITHSCORES` / `XRANGE`
+plus group last-ids) together with TTL presence. It also checks that no `lgskip:*` key leaked
+to the target. Since it's a pure equality check over the whole `lg:*` keyspace, it doubles as
+the active-active convergence oracle; run it between any two mesh nodes, which both hold the
+union. `--node-id K` is the source's node index, and scopes the skip-leak check to that source's
+own `lgskip:*` namespace(0 is the classic single-writer check). `--wait` keeps polling until the
+keys converge or the timeout runs out, and the command exits non-zero on any drift.
 
-## Active-active (multi-master) load testing
+`reset --dsn <db> --yes [--cluster]` runs `DEL` on every `lg:*` and `lgskip:*` key, plus the
+`lgmeta:*` marker key, across all nodes' namespaces. It's scoped by prefix, and never runs
+`FLUSHDB`.
 
-The same harness drives a Redis `clusters:` mesh. The model is **disjoint key
-namespaces**: each writer node gets `--node-id K`, which moves every key it writes
-into a private segment right after the prefix — `lg:n<K>:{<bucket>}:<type>:<n>` (and
-`lgskip:n<K>:…` for the source-only cohort). Node segments never overlap, so nodes
-never collide on a key and the mesh converges to the clean **union** of all segments.
-`--node-id 0` is the default and is byte-for-byte the single-writer layout above
-(`lg:{<bucket>}:…`, no segment), so active-passive is unaffected.
+### Why not compare `DUMP` bytes directly?
 
-The segment sits **after** the `lg:`/`lgskip:` prefix, so a replicare
-`include: ["lg:*"]` selection still matches every node's data keys and still excludes
-every node's `lgskip:*` keys — no per-node config change is needed.
+The harness runs an old source(6.2) against a modern target(7.4), and their RDB serialisations
+differ even for identical data; `replicare` deliberately preserves each side's own encoding. So
+`verify` compares a canonical *rendering* of each value, never its serialised bytes. TTL is
+compared as presence only(has a TTL or doesn't), since the exact remaining seconds legitimately
+differ by the replication delay.
 
-What `--node-id K` changes on `run`:
-- **Seed** writes only this node's namespace (`lg:n<K>:…`), and the seeded/empty check
-  scans that namespace alone, so a node re-seeds only when *its own* slice is empty —
-  peers' replicated-in keys don't count as "already seeded".
-- **Churn** sets/updates/deletes only keys in this node's namespace, and a `RENAME`
-  keeps the new key in the same segment (and hash-tag bucket), so a node only ever
-  mutates what it wrote — no accidental cross-node conflict (resolving concurrent
-  *same-key* writes is the separate, planned **conflict-storm** mode; see below).
+## Active-active, multi-master load testing
 
-On `verify`, `--node-id K` is the **source's** node index: it scopes the skip-leak
-check to that source's own `lgskip:n<K>:*` namespace, so a mesh target — which is
-itself a source with its own `lgskip:*` — never false-positives on the peer's
-excluded cohort. The content comparison itself is a pure **equality** check over the
-whole `lg:*` keyspace, so it doubles as the convergence oracle: run it between any two
-mesh nodes and both must hold the identical union.
+The same harness drives a Redis `clusters:` mesh, using disjoint key namespaces. Each writer node
+gets `--node-id K`, which moves every key it writes into a private segment right after the
+prefix: `lg:n<K>:{<bucket>}:<type>:<n>`(and `lgskip:n<K>:…` for the source-only cohort). Node
+segments never overlap, so nodes never collide on a key, and the mesh converges to the clean
+union of all the segments. `--node-id 0` is the default, and is byte-for-byte the single-writer
+layout described above(`lg:{<bucket>}:…`, with no segment), so active-passive testing isn't
+affected.
 
-Always pass the same `--node-id` for a given node's DB. Keep `--scale` modest per node
-(Redis holds everything in RAM, and the mesh target holds every node's union).
+The segment sits *after* the `lg:`/`lgskip:` prefix, so a `replicare` `include: ["lg:*"]`
+selection still matches every node's data keys and still excludes every node's `lgskip:*` keys;
+there's no per-node config change needed.
+
+On `run`, `--node-id K` changes two things:
+
+1. Seeding writes only this node's namespace(`lg:n<K>:…`), and the seeded / empty check scans
+   that namespace alone. A node therefore re-seeds only when *its own* slice is empty, and keys
+   replicated in from its peers don't count as already seeded.
+2. Churn sets / updates / deletes only keys in this node's namespace, and a `RENAME` keeps the
+   new key in the same segment(and hash-tag bucket). A node only ever changes what it wrote, so
+   there's no accidental cross-node conflict. Resolving concurrent *same-key* writes is a
+   separate, planned conflict-storm mode(see below).
+
+On `verify`, `--node-id K` is the source's node index. It scopes the skip-leak check to that
+source's own `lgskip:n<K>:*` namespace, so a mesh target, which is itself a source with its own
+`lgskip:*` keys, never false-positives on the peer's excluded cohort. The content comparison
+itself is a pure equality check over the whole `lg:*` keyspace, so it doubles as the convergence
+oracle; run it between any two mesh nodes, and both have to hold the identical union.
+
+Always pass the same `--node-id` for a given node's database. Keep `--scale` modest per node,
+since Redis holds everything in RAM and the mesh target holds every node's union.
 
 ### Three-node mesh example
 
-Assume a running replicare `clusters:` mesh over three Redis nodes `A`, `B`, `C`
-(config per [Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)), with `$A`/`$B`/`$C` their
-connection specs. There is **no `ddl` step** — Redis has no schema.
+Take a `replicare` `clusters:` mesh running over three Redis nodes, `A`, `B` and `C`(configured
+as described in
+[Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)),
+with `$A`/`$B`/`$C` as their connection specs. There's no `ddl` step, since Redis has no schema:
 
 ```sh
 # 1. Seed each node into its own disjoint namespace.
@@ -149,31 +158,31 @@ go run ./test/loadgen-redis verify --source "$A" --target "$B" --node-id 0 --wai
 go run ./test/loadgen-redis verify --source "$A" --target "$C" --node-id 0 --wait 300s
 ```
 
-Convergence is transitive, so `A==B` and `A==C` imply all three agree. A pass ending
-`CONVERGED: … no skip leak` on every pair — with the daemon logs clean of `HALTED` /
-`stream pass error` — is a passing active-active load test.
+Convergence is transitive, so `A==B` and `A==C` mean all three agree. A run that ends with
+`CONVERGED: … no skip leak` on every pair, with no `HALTED` / `stream pass error` in the daemon
+logs, is a passing active-active load test.
 
-> **Not yet: conflict-storm mode.** The disjoint model above never has two nodes write
-> the same key, so it tests convergence of the *union*. A follow-up `--overlap` mode
-> will deliberately overlap node namespaces to exercise HLC last-write-wins under
-> concurrent same-key writes; there `verify` still asserts convergence (all nodes
-> equal), but not *which* value wins (the LWW winner is nondeterministic).
+> ⚠️ There's no conflict-storm mode yet. The disjoint model above never has two nodes write the
+> same key, so it only tests convergence of the *union*. A follow-up `--overlap` mode will
+> deliberately overlap node namespaces to exercise HLC last-write-wins under concurrent same-key
+> writes; there, `verify` will still check convergence(all nodes equal), but not which value
+> wins, since the last-write-wins winner is nondeterministic.
 
-> **Reset the state store per node when re-seeding** (see [Gotchas](#gotchas)) — in a
-> mesh this applies per node: clear each node's state-store entries alongside
-> `loadgen-redis reset` (which already removes every node's `lg:`/`lgskip:` namespace).
+> ⚠️ When re-seeding, reset the state store per node(see [Gotchas](#gotchas)). In a mesh this
+> applies to every node: clear each node's state-store entries alongside
+> `loadgen-redis reset`(which already removes every node's `lg:`/`lgskip:` namespace).
 
 ## Running a full load test end-to-end
 
-The commands above assume replicare is already running with "your own config". Here
-is the complete rig — two Redis instances, a Postgres state store, a config, the
-daemon, and a churn-and-verify loop — that this harness is meant to drive. This is
-the exact flow used to validate replicare's Redis copy + streaming under load.
+The commands above assume `replicare` is already running with an existing config. Here's the
+complete rig this harness is meant to drive - two Redis instances, a Postgres state store, a
+config, the daemon and a churn-and-verify loop. It's the exact flow we use to validate
+`replicare`'s Redis copy and streaming under load.
 
-**1. Two Redis instances + a Postgres state store.** The bundled harness is the
-quickest source/target pair (an old 6.2 source and a modern 7.4 target); the state
-store is Postgres (v1's only `StateStore` backend — the *replicated data* is Redis,
-the daemon's own progress/cursors live in Postgres):
+To start with, set up two Redis instances and a Postgres state store. The bundled harness is the
+quickest source / target pair, with an old 6.2 source and a modern 7.4 target. The state store
+is Postgres, since that's v1's only `StateStore` backend; the *replicated data* is Redis, while
+the daemon's own progress / cursors live in Postgres:
 
 ```sh
 task harness:redis:up          # source on :6390, target on :6391
@@ -184,8 +193,8 @@ export SOURCE="redis://localhost:6390/0"
 export TARGET="redis://localhost:6391/0"
 ```
 
-**2. A minimal replicare config** (`loadtest-redis.yaml`). `drain_interval` is short
-so the reconciliation SCAN + delete sweep keep up under churn:
+Next, write a minimal `replicare` config(`loadtest-redis.yaml`). The `drain_interval` is kept
+short so the reconciliation SCAN and the delete sweep keep up under churn:
 
 ```yaml
 logging: { level: info, format: text }
@@ -205,24 +214,24 @@ syncs:
     tuning: { drain_interval: 1s }
 ```
 
-**3. Seed the source, start replicare.** Redis CDC is capture-less; the initial
-copy SCANs the source, so seeding before the daemon starts is fine:
+Then seed the source and start `replicare`. Redis CDC is capture-less, and the initial copy
+SCANs the source, so seeding before the daemon starts is fine:
 
 ```sh
 go run ./test/loadgen-redis run --dsn "$SOURCE"          # seed the source
 go run ./cmd/replicare run loadtest-redis.yaml &         # start the daemon
 ```
 
-**4. Verify the initial copy converged:**
+Once it's running, check that the initial copy converged:
 
 ```sh
 go run ./test/loadgen-redis verify --source "$SOURCE" --target "$TARGET" --wait 120s
 # => CONVERGED: N replicated keys match, no skip leak
 ```
 
-**5. Churn-and-verify loop — this is the actual load test.** Each round applies a
-random burst of mutations (including `RENAME`s and heavy `DEL`s) and asserts the
-target re-converges while the daemon streams:
+Finally - the churn-and-verify loop, which is the actual load test. Each round applies a random
+burst of mutations(including `RENAME`s and heavy `DEL`s), and checks that the target converges
+again while the daemon streams:
 
 ```sh
 for r in 1 2 3 4; do
@@ -231,24 +240,23 @@ for r in 1 2 3 4; do
 done
 ```
 
-To stress the **delete-reconciliation sweep** and streaming backlog, churn several
-times back-to-back *before* verifying, so deletes and renames pile up while the
-sweep runs, then converge:
+To stress the delete-reconciliation sweep and the streaming backlog, churn several times
+back-to-back *before* verifying. Deletes and renames then pile up while the sweep runs, and
+converge afterwards:
 
 ```sh
 for r in $(seq 1 8); do go run ./test/loadgen-redis run --dsn "$SOURCE" --ops 800 --seed $r; done
 go run ./test/loadgen-redis verify --source "$SOURCE" --target "$TARGET" --wait 300s
 ```
 
-A run finishing with `CONVERGED: … no skip leak` — and the daemon log showing no
-`HALTED` / `stream pass error` — is a passing load test. Watch
-`replicare_deletes_reconciled_total` on `:19091/metrics` climb as `DEL`/`RENAME`
-churn is reconciled.
+A run that finishes with `CONVERGED: … no skip leak`, with no `HALTED` / `stream pass error` in
+the daemon log, is a passing load test. While it runs, watch `replicare_deletes_reconciled_total`
+on `:19091/metrics` climb as the `DEL`/`RENAME` churn is reconciled.
 
 ## Cluster mode
 
-The same tool drives a Redis Cluster target. Bring up the cluster harness and pass
-`--cluster` plus a seed list:
+The same tool drives a Redis Cluster target. Bring up the cluster harness, then pass `--cluster`
+plus a seed list:
 
 ```sh
 task harness:redis:cluster:up
@@ -256,24 +264,27 @@ go run ./test/loadgen-redis run    --dsn "127.0.0.1:7000,127.0.0.1:7001,127.0.0.
 go run ./test/loadgen-redis verify --source "…standalone source…" --target "127.0.0.1:7000,…" --cluster --wait 120s
 ```
 
-The `{bucket}` hash tags spread keys across the cluster's slots (so the per-master
-SCAN fan-out is genuinely exercised) while keeping each `RENAME` intra-slot.
+The `{bucket}` hash tags spread keys across the cluster's slots, so the per-master SCAN fan-out
+is genuinely exercised, while keeping each `RENAME` within a single slot.
 
 ## Gotchas
 
-- **Reset the state store when re-seeding from scratch.** replicare records
-  per-unit copy-progress in its state store; if you wipe and re-seed the source
-  without clearing that state, it may treat the unit as already copied. Use a fresh
-  `replicare_state` database (or clear the `replicare` schema in it) alongside
-  `loadgen-redis reset`.
-- **`RENAME` needs an existing source key.** The tool renames within the seeded
-  string range and silently skips a key that a prior op already renamed/deleted —
-  benign for the harness.
-- **`lgmeta:counts`** is a small bookkeeping key (per-type seeded counts, so churn
-  can address existing keys without scanning). It is neither `lg:*` nor `lgskip:*`,
-  so replicare and `verify` both ignore it; `reset` removes it.
+There are a few things that commonly trip up a load test:
+
+- Reset the state store when re-seeding from scratch. `replicare` records per-unit copy
+  progress in its state store; if the source is wiped and re-seeded without clearing that
+  state, it may treat the unit as already copied. Use a fresh `replicare_state` database(or
+  clear the `replicare` schema in it) alongside `loadgen-redis reset`.
+- `RENAME` needs an existing source key. The tool renames within the seeded string range, and
+  silently skips a key that an earlier op already renamed / deleted, which is harmless for the
+  harness.
+- `lgmeta:counts` is a small bookkeeping key, holding per-type seeded counts so churn can
+  address existing keys without scanning. It's neither `lg:*` nor `lgskip:*`, so `replicare`
+  and `verify` both ignore it, and `reset` removes it.
 
 ## Task shortcuts
+
+The same steps are also available as `task` targets:
 
 ```sh
 task loadgen-redis:seed   DSN="$SOURCE" SCALE=0.1          # seed / scale

@@ -1,25 +1,28 @@
-# Deploying on Kubernetes (Helm)
+# Deploying on Kubernetes with Helm
 
-replicare ships a Helm chart — `replicare-controller` — that runs the daemon
-(`replicare run`) on Kubernetes. This page is the deployment guide; the chart's own
-[README](helm-chart.md) is the exhaustive values
-reference.
+`replicare` ships a Helm chart, `replicare-controller`, that runs the daemon(`replicare run`) on
+Kubernetes. This page is the deployment guide - where the chart and image come from, how to
+install it, how the daemon's config and secrets get into the pod, how it's monitored and kept
+single-active, and a worked example. The chart's own [README](helm-chart.md) is the exhaustive
+values reference.
 
 ## Two GHCR packages
 
-Each `vX.Y.Z` release publishes two independent OCI artifacts to GHCR, stamped with
-the same version:
+Each `vX.Y.Z` release publishes two independent OCI artifacts to GHCR, stamped with the same
+version:
 
 | Artifact | Package | Pull |
 |---|---|---|
 | Daemon image | `ghcr.io/rudimk/replicare` | `docker pull ghcr.io/rudimk/replicare:0.1.1` |
 | Helm chart | `ghcr.io/rudimk/replicare-controller` | `helm pull oci://ghcr.io/rudimk/replicare-controller --version 0.1.1` |
 
-The chart's `appVersion` defaults `image.tag` to the matching daemon image, so a
-versioned chart install pulls a matched chart + image pair unless you override
-`image.tag`.
+The chart's `appVersion` is the default for `image.tag`, pointing at the matching daemon image, so
+a versioned chart install pulls a matched chart and image pair unless `image.tag` is overridden.
 
 ## Install
+
+Install from the published OCI chart(which we'd recommend, with the version pinned), or from a
+checkout of the repo:
 
 ```sh
 # From the published OCI chart (recommended) — pin the version:
@@ -30,17 +33,17 @@ helm install my-replicare oci://ghcr.io/rudimk/replicare-controller \
 helm install my-replicare deploy/helm/replicare-controller -f my-values.yaml
 ```
 
-`my-values.yaml` is where you put your config and point at your image and secrets.
-There is no separate config file to manage — the chart renders your `config` value
-into a ConfigMap at `/etc/replicare/config.yml` and runs the daemon against it.
+`my-values.yaml` holds the config, and points at the image and the secrets. There's no separate
+config file to manage; the chart renders the `config` value into a ConfigMap at
+`/etc/replicare/config.yml`, and runs the daemon against it.
 
 ## Configuring the daemon
 
-`config` is a **structured YAML object** (the ergonomic default): Helm merges and
-overrides it across `-f` files and `--set`, so `--set config.logging.level=debug`
-changes just that field and leaves the rest intact. It is the exact
-[replicare config](configuration.md) — any engines, any number of sources, targets,
-and syncs.
+`config` is a structured YAML object, which is the more ergonomic default. Helm merges and
+overrides it across `-f` files and `--set`, so `--set config.logging.level=debug` changes just
+that one field and leaves the rest intact. It's exactly the same as the
+[`replicare` config](configuration.md), with any engines and any number of sources, targets and
+syncs:
 
 ```yaml
 image:
@@ -74,74 +77,75 @@ secret:
   existingSecret: my-replicare-secrets   # provides STATE_PW / SRC_PW / EC_USER / EC_PW
 ```
 
-Two caveats for the structured form:
+There are two caveats with the structured form:
 
-- **Quote any all-digit scalar** you inline (e.g. a numeric-only password) so it
-  decodes as a string, not an int. `${VAR}` placeholders need **no** quoting here —
-  they render in block style.
-- Prefer a **verbatim string** for byte-exact control: set `config` to a
-  block-scalar string and the chart emits it unchanged (Helm can't merge a string,
-  but nothing is re-serialized either).
+1. Quote any all-digit scalar that's inlined(a numeric-only password, for example), so that it
+   decodes as a string and not an int. `${VAR}` placeholders need *no* quoting here, since they
+   render in block style.
+2. For byte-exact control, a verbatim string is the better choice. Set `config` to a block-scalar
+   string, and the chart emits it unchanged; Helm can't merge a string, but nothing is
+   re-serialised either.
 
 ## Secrets
 
-Keep passwords and tokens out of `config` with `${VAR}` placeholders — replicare
-expands env vars in **any** field. Supply them via a Secret, injected into the pod
-with `envFrom`:
+Passwords and tokens are kept out of `config` with `${VAR}` placeholders, since `replicare`
+expands env vars in *any* field. They're supplied through a Secret, injected into the pod with
+`envFrom`, in one of two ways.
 
-- **`secret.existingSecret`** — reference a Secret you manage (preferred for
-  production; the chart creates none, so secrets never live in Helm state).
-- **`secret.env`** — a map the chart renders into a Secret (fine for dev).
+`secret.existingSecret` references a Secret that's managed outside the chart. This is what we'd
+recommend for production; the chart creates none, so the secrets never live in Helm state. On the
+other hand, `secret.env` is a map the chart renders into a Secret itself, which is fine for dev.
 
 ## Endpoints & monitoring
 
-The pod serves the operator HTTP surface (see [operations](operations.md)):
+The pod serves the operator HTTP surface(described in [operations](operations.md)). `/healthz`
+is used for both liveness and readiness probes, on the status port. `/status` returns per-sync
+phase, progress and lag as JSON, and it's what `replicare status` renders. Finally - `/metrics` is
+the Prometheus scrape endpoint.
 
-- `/healthz` — liveness/readiness (both probes use it), on the status port.
-- `/status` — per-sync phase, progress, lag (JSON); what `replicare status` renders.
-- `/metrics` — Prometheus scrape.
+The Service exposes the status and metrics ports. Set `serviceMonitor.enabled: true` to scrape
+`/metrics` through the Prometheus Operator.
 
-The Service exposes the **status** and **metrics** ports. Set
-`serviceMonitor.enabled: true` to scrape `/metrics` via the Prometheus Operator.
+> ⚠️ `service.ports.status` / `.metrics` have to match the addresses the `config`
+> binds(`observability.status_addr`, `metrics_addr`). The defaults line up at `:8080` / `:9090`;
+> if one is changed, change both.
 
-> **Port alignment:** `service.ports.status` / `.metrics` **must match** the
-> addresses your `config` binds (`observability.status_addr`, `metrics_addr`). The
-> defaults line up at `:8080` / `:9090`; if you change one, change both.
+### Checking progress without Prometheus / Grafana
 
-### Checking progress without Prometheus/Grafana
-
-When you can't run a metrics stack next to the pod — e.g. the daemon runs **inside the source
-cluster** for network reasons — `exec` the CLI directly against the mounted config. The image is
-minimal, so target the binary rather than a shell (`kubectl exec` runs a command without needing
-`/bin/sh`):
+Sometimes there's no way to run a metrics stack next to the pod - for example, when the daemon
+runs inside the source cluster for network reasons. In that case, `exec` the CLI directly against
+the mounted config. There's no need for a shell here; `kubectl exec` runs the binary directly,
+without needing `/bin/sh`:
 
 ```sh
 kubectl exec deploy/replicare -- /usr/local/bin/replicare status /etc/replicare/config.yml   # live counts + delta backlog
 kubectl exec deploy/replicare -- /usr/local/bin/replicare verify /etc/replicare/config.yml   # source<->target convergence (exit 0 = converged)
 ```
 
-`status` is live by default (source/target row counts + per-target delta backlog); `verify` is a
-read-only convergence spot-check. Both accept `--json`, `--sync <name>`, and `--watch <dur>`. See the
-[CLI reference](cli.md) and [Checking progress from the CLI](operations.md#checking-progress-from-the-cli-no-grafana-required).
+`status` is live by default, showing source / target row counts and the per-target delta backlog,
+and `verify` is a read-only convergence spot-check. Both accept `--json`, `--sync <name>` and
+`--watch <dur>`. There's more in the [CLI reference](cli.md) and in
+[Checking progress from the CLI](operations.md#checking-progress-from-the-cli-no-grafana-required).
 
-The runtime image is Chainguard `wolfi-base`, which also ships `/bin/sh` if you want an interactive
-session for ad-hoc debugging (`kubectl exec -it deploy/replicare -- /bin/sh`) — but the direct-exec
-form above needs no shell.
+The runtime image is Chainguard `wolfi-base`, which also ships `/bin/sh` for an interactive
+session when debugging something ad hoc(`kubectl exec -it deploy/replicare -- /bin/sh`). The
+direct-exec form above doesn't need a shell, though.
 
 ## Single-active, rollouts & state
 
-- **Keep `replicaCount: 1`.** replicare is single-active per sync — a second daemon
-  just stands by on the state store's ownership lock, so extra replicas are wasted
-  and never run two writers. The chart uses a **`Recreate`** rollout so the old
-  daemon fully exits (releasing its lock) before the new one starts.
-- **Config changes roll the pod** automatically: a checksum annotation over the
-  rendered ConfigMap means `helm upgrade` after editing `config` restarts the daemon
-  cleanly.
-- **Pause one pipeline without touching the others** by setting `enabled: false` on that
-  sync (a per-pipeline switch; omit it or `true` to run). Because it's a config change,
-  the upgrade's pod rollout applies it — it is start-time, not a live command. **Prefer
-  editing the sync's block in your values file by name**, so you pause the pipeline you
-  mean to:
+There are four things to know about how the chart runs the daemon over time:
+
+- Keep `replicaCount: 1`. `replicare` is single-active per sync; a second daemon just stands by
+  on the state store's ownership lock, so extra replicas are wasted, and two writers never run at
+  once. The chart uses a `Recreate` rollout, so that the old daemon fully exits(releasing its
+  lock) before the new one starts.
+- Config changes roll the pod automatically. A checksum annotation over the rendered ConfigMap
+  means a `helm upgrade` after editing `config` restarts the daemon cleanly.
+- One pipeline can be paused without touching the others, by setting `enabled: false` on that
+  sync. It's a per-pipeline switch, and omitting it or setting it to `true` keeps the sync
+  running. Since it's a config change, the upgrade's pod rollout applies it - it's start-time,
+  not a live command. We'd recommend editing the sync's block in the values file by name, so that
+  the pipeline that's paused is the one that's meant to be:
   ```yaml
   config:
     syncs:
@@ -151,59 +155,66 @@ form above needs no shell.
       - name: redis-pipeline
         # ...                  # (no enabled / true) keeps running
   ```
-  then `helm upgrade -f values.yaml`. You *can* use `--set`, but it addresses syncs by
-  **array index**, not name — `config.syncs[0]` is the **first** sync in your list, which
-  may not be the one you want:
+  Then run `helm upgrade -f values.yaml`. `--set` works too, but it addresses syncs by array
+  index rather than by name; `config.syncs[0]` is the *first* sync in the list, which may not be
+  the one that should be paused:
   ```
   # WRONG target if redis-pipeline is the 2nd sync — this pauses syncs[0] (e.g. pg-pipeline):
   helm upgrade ... --set-string 'config.syncs[0].enabled=false'
   # Pause the second sync instead:
   helm upgrade ... --set-string 'config.syncs[1].enabled=false'
   ```
-  **Verify which sync actually paused** in the pod logs: `sync disabled (paused);
-  skipping sync=<name>` for the paused one, and `sync streaming sync=<name>` for each
-  still running. `replicare status` also shows `[PAUSED]` per sync. The paused sync's
-  source capture stays installed, so re-enabling it drains the queued backlog with no
-  data loss. Full semantics and the long-pause caveat (source-side delta growth):
-  [configuration.md → Pausing a sync](configuration.md#pausing-a-sync-enabled).
-- **The state store lives outside the chart, always.** Every sync needs a Postgres
-  state store (v1's only backend) — including Redis→Redis and MySQL→MySQL. Point
-  `state_store` at your own managed Postgres (e.g. RDS). The chart never bundles it;
-  it is control-plane bookkeeping, separate from your data.
+  Check which sync actually paused in the pod logs. The paused one logs
+  `sync disabled (paused); skipping sync=<name>`, and each one still running logs
+  `sync streaming sync=<name>`.
+  `replicare status` also shows `[PAUSED]` for each paused sync. The paused sync's source capture
+  stays installed, so re-enabling it drains the queued backlog with no data loss. The full
+  semantics, and the caveat about long pauses(source-side delta growth), are in
+  [Pausing a sync](configuration.md#pausing-a-sync-enabled) in the configuration reference.
+- The state store *always* lives outside the chart. Every sync needs a Postgres state
+  store(v1's only backend), including Redis to Redis and MySQL to MySQL. Point `state_store` at
+  a managed Postgres(RDS, for example). The chart never bundles it, since it's control-plane
+  bookkeeping, separate from the replicated data.
 
 ## Security
 
-The container runs **non-root** (uid 65534), with a **read-only root filesystem**
-and **all capabilities dropped** (a writable `emptyDir` is mounted at `/tmp`). Grant
-the daemon's database/Redis roles the least privilege documented in
-[`deploy/`](https://github.com/rudimk/replicare/tree/main/deploy) — [`grants-*.sql`](https://github.com/rudimk/replicare/tree/main/deploy) for Postgres/MySQL and
-[`acl-*-redis.txt`](https://github.com/rudimk/replicare/tree/main/deploy) for Redis (note the explicit `+restore` on Redis
-targets). Mount a CA bundle via `extraVolumes`/`extraVolumeMounts` if you use
-`tls: verify-full`.
+The container runs as non-root(uid 65534), with a read-only root filesystem and all capabilities
+dropped; a writable `emptyDir` is mounted at `/tmp`. Grant the daemon's database / Redis roles the
+least privilege documented in
+[`deploy/`](https://github.com/rudimk/replicare/tree/main/deploy) - [`grants-*.sql`](https://github.com/rudimk/replicare/tree/main/deploy) for Postgres / MySQL, and
+[`acl-*-redis.txt`](https://github.com/rudimk/replicare/tree/main/deploy) for Redis(note the
+explicit `+restore` on Redis targets). Mount a CA bundle through `extraVolumes` /
+`extraVolumeMounts` when using `tls: verify-full`.
 
-## Worked example: in-cluster Redis → ElastiCache
+## Worked example: in-cluster Redis to ElastiCache
 
-A common shape is replicating a self-managed Redis running in EKS to ElastiCache.
-Run replicare **as a pod in the same cluster** — with the AWS VPC CNI the pod gets a
-VPC IP, so it can reach both the in-cluster Redis (via its Service DNS) and
-ElastiCache (only reachable inside the VPC; open its security group to the node/pod
-SG). Watch-outs specific to that move:
+A common shape is replicating a self-managed Redis running in EKS to ElastiCache. For this, we'd
+run `replicare` as a pod in the same cluster; with the AWS VPC CNI the pod gets a VPC IP, so it
+can reach both the in-cluster Redis(through its Service DNS) and ElastiCache, which is only
+reachable inside the VPC(open its security group to the node / pod SG). There are a few things to
+watch out for that are specific to this move.
 
-- **Version direction:** `RESTORE` rejects a newer-than-target payload, so the
-  ElastiCache engine version must be **≥** the source version, or pre-flight blocks.
-- **`RESTORE` must be permitted** on the target (it is `@dangerous`; grant `+restore`
-  via RBAC). Run `replicare validate` against the real endpoint first — some managed
-  tiers restrict commands.
-- **TLS + AUTH:** set `tls: require` (or `verify-full`) and the RBAC `user`/`password`
-  on the target block. Redis `tls` defaults to `disable`, so set it explicitly.
-- **Cluster-mode ElastiCache:** use `mode: cluster` seeded with the configuration
-  endpoint (DB 0 only); cluster-mode-disabled connects as `standalone` to the primary
-  endpoint.
-- **Deletes lag** the sweep interval, and **big keys** briefly block the source on
-  `DUMP` — see the [Redis engine page](redis.md) and
-  [troubleshooting](troubleshooting.md).
+The first is version direction. `RESTORE` rejects a payload from a newer version than the
+target's, so the ElastiCache engine version has to be the same as or newer than the source
+version, otherwise pre-flight blocks.
+
+`RESTORE` also has to be permitted on the target. It's `@dangerous`, so grant `+restore` through
+RBAC, and run `replicare validate` against the real endpoint first, since some managed tiers
+restrict commands.
+
+For TLS and AUTH, set `tls: require`(or `verify-full`) and the RBAC `user` / `password` on the
+target block. Redis `tls` defaults to `disable`, so it has to be set explicitly.
+
+Cluster-mode ElastiCache uses `mode: cluster`, seeded with the configuration endpoint(DB 0 only);
+with cluster mode disabled, it connects as `standalone` to the primary endpoint.
+
+Finally - deletes lag behind by the sweep interval, and big keys briefly block the source on
+`DUMP`. The [Redis engine page](redis.md) and [troubleshooting](troubleshooting.md) cover both.
 
 ## Validate before applying
+
+Lint the chart and render it against the cluster with a client-side dry run before applying it
+for real:
 
 ```sh
 helm lint deploy/helm/replicare-controller

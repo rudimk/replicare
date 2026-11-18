@@ -1,27 +1,28 @@
-# Grafana dashboard for replicare
+# Grafana Dashboard
 
-`replicare-dashboard.json` is a ready-to-import Grafana dashboard for replicare's
-Prometheus metrics. It has a **configurable data source** — you
-pick which Prometheus data source it queries at import time (and can switch it
-later from the dashboard's **Data source** dropdown), so it is not tied to any one
-Prometheus.
+This page describes `replicare-dashboard.json`, a ready-to-import Grafana dashboard for
+`replicare`'s Prometheus metrics, along with how to import it, what each section shows, and how
+to read it. The dashboard has a configurable data source; the Prometheus data source it queries
+is picked at import time(and can be switched later from the dashboard's Data source dropdown),
+so it isn't tied to any one Prometheus.
 
-It assumes replicare's `/metrics` endpoint is being scraped into Prometheus. See
-`deploy/helm/replicare-controller` (the `serviceMonitor` option, or a raw scrape
-job) for how to wire that up.
+It assumes `replicare`'s `/metrics` endpoint is already being scraped into Prometheus. See
+`deploy/helm/replicare-controller`(the `serviceMonitor` option, or a raw scrape job) for how to
+wire that up.
 
-## Import
+## Importing the dashboard
 
-**Grafana UI**
+### Through the Grafana UI
 
-1. **Dashboards → New → Import**.
-2. Upload `replicare-dashboard.json` (or paste its contents).
-3. When prompted, select your **Prometheus data source** for the `Data source`
-   variable, then **Import**.
+1. Open Dashboards, then New, then Import.
+2. Upload `replicare-dashboard.json`(or paste its contents).
+3. When prompted, select the Prometheus data source for the `Data source` variable, then click
+   Import.
 
-**Provisioning (file-based)**
+### Through provisioning
 
-Drop the JSON into a provisioned dashboards folder and point a provider at it, e.g.:
+For file-based provisioning, drop the JSON into a provisioned dashboards folder and point a
+provider at it, for example:
 
 ```yaml
 # /etc/grafana/provisioning/dashboards/replicare.yaml
@@ -33,73 +34,99 @@ providers:
       path: /var/lib/grafana/dashboards/replicare
 ```
 
-The dashboard's data source is a template variable (`${datasource}`), so
-provisioning does not hard-code one; Grafana resolves it from the current value
-(default: your default Prometheus). To pin it, set the `datasource` variable's
-current value or pass `DS_PROMETHEUS` via the import API.
+The dashboard's data source is a template variable(`${datasource}`), so provisioning doesn't
+hard-code one; Grafana resolves it from the variable's current value, which defaults to the
+default Prometheus. To pin it, set the `datasource` variable's current value, or pass
+`DS_PROMETHEUS` via the import API.
 
 ## Variables
 
 | Variable | Meaning |
 |---|---|
-| **Data source** (`datasource`) | Which Prometheus data source to query. Choose at import; change any time. |
-| **Sync** (`sync`) | Filter to one or more syncs (`label_values(replicare_table_phase_info, sync)` — a metric present from the moment a sync starts, so the filter works during the initial copy too). Defaults to *All*. |
-| **Target** (`target`) | Filter to one or more targets within the selected syncs. Defaults to *All*. |
-| **Table** (`table`) | Filter the per-table panels to one or more tables (from `replicare_table_phase_info`, so every replicated table is listed from the start). Defaults to *All*. |
-| **Component** (`component`) | Filter the per-component panels to one or more FK components. Defaults to *All*. |
+| Data source(`datasource`) | Which Prometheus data source to query. Chosen at import; can be changed any time. |
+| Sync(`sync`) | Filters to one or more syncs(`label_values(replicare_table_phase_info, sync)` - a metric that's present from the moment a sync starts, so the filter works during the initial copy too). Defaults to *All*. |
+| Target(`target`) | Filters to one or more targets within the selected syncs. Defaults to *All*. |
+| Table(`table`) | Filters the per-table panels to one or more tables(from `replicare_table_phase_info`, so every replicated table is listed from the start). Defaults to *All*. |
+| Component(`component`) | Filters the per-component panels to one or more FK components. Defaults to *All*. |
 
 ## Panels
 
-Organized into sections (Grafana rows):
+The panels are organised into sections(Grafana rows).
 
-**Initial copy** (top, since it is the first thing a new sync does):
+### Initial copy
+
+This section sits at the top, since the initial copy is the first thing a new sync does:
 
 | Panel | Query | Reading |
 |---|---|---|
-| Initial copy (overall) | `sum(replicare_rows_copied_total) / sum(replicare_initial_copy_rows_target)` | Percent of the rows this run has to copy. The target is the source database's own row estimate (statistics, no scan), so the end can read a little over or under 100% |
-| Tables still copying / Tables streaming | `count(replicare_table_phase_info{phase=…})` | How many tables are in each phase; copying reaches 0 when the whole sync is streaming |
+| Initial copy (overall) | `sum(replicare_rows_copied_total) / sum(replicare_initial_copy_rows_target)` | Percent of the rows this run has to copy. The target is the source database's own row estimate(statistics, no scan), so the end can read a little over or under 100% |
+| Tables still copying / Tables streaming | `count(replicare_table_phase_info{phase=…})` | How many tables are in each phase; copying reaches 0 once the whole sync is streaming |
 | Copy rate (rows/s) | `rate(replicare_rows_copied_total[2m])` | Current copy speed |
-| Progress % / Rows copied vs target (per table) | the same, `by (table)` | Which tables are done and which are still moving |
+| Initial copy progress % (per table) / Rows copied vs target (per table) | the same, `by (table)` | Which tables are done, and which are still moving |
 
-Rows copied count only rows that have been committed on the target, so a retried chunk is never counted twice. A table that loads in one statement (a self-referencing table whose link column cannot be emptied) jumps from 0 to done in one step. `replicare_rows_copied_total` restarts from 0 when the daemon restarts, and a restart re-copies whatever was not finished, so the percentage restarts with it.
+Rows copied only counts rows that have been committed on the target, so a retried chunk is
+never counted twice. A table that loads in one statement(a self-referencing table whose link
+column can't be emptied) jumps from 0 to done in one step. `replicare_rows_copied_total` restarts
+from 0 when the daemon restarts, and a restart re-copies whatever wasn't finished, so the
+percentage restarts with it.
 
-**Source** / **Target** — the controller checks both endpoints and emits their reachability and two size figures — the whole database and just the replicated tables:
+### Source & target
 
-| Panel | Query (source metric) | Reading |
+The controller checks both endpoints, and emits their reachability along with two size
+figures - one for the whole database, and one for just the replicated tables:
+
+| Panel | Query(source metric) | Reading |
 |---|---|---|
-| Source up / Targets up | `min(replicare_source_up)` / `min(replicare_target_up)` | `UP` (green) / `DOWN` (red) — the controller's health-check of that endpoint |
-| Source / Target DB size | `replicare_source_db_bytes` / `replicare_target_db_bytes` | Whole-database on-disk size (Postgres/MySQL). The source usually runs larger — it carries replicare's capture schema + delta bloat and any unreplicated tables |
-| Source / Target replicated size | `replicare_source_replicated_bytes` / `replicare_target_replicated_bytes` | Size of **just the replicated tables** — the apples-to-apples comparison; on a caught-up sync the two converge even when the whole-DB sizes differ |
+| Source up / Targets up | `min(replicare_source_up)` / `min(replicare_target_up)` | `UP`(green) / `DOWN`(red), from the controller's health check of that endpoint |
+| Source / Target DB size | `replicare_source_db_bytes` / `replicare_target_db_bytes` | Whole-database on-disk size(Postgres / MySQL). The source usually runs larger, since it carries `replicare`'s capture schema + delta bloat and any unreplicated tables |
+| Source / Target replicated size | `replicare_source_replicated_bytes` / `replicare_target_replicated_bytes` | Size of just the replicated tables - the like-for-like comparison; on a caught-up sync the two converge, even when the whole-DB sizes differ |
 
-> Why two size figures? The whole-DB gauge counts everything in the database — including replicare's own `replicare` capture schema on the source and any tables you didn't select — so source > target is normal, not drift. The replicated-size gauge sums only the selected tables with the same function on both sides, so it's the series to watch for convergence. See [Whole-DB vs replicated size](operations.md#whole-db-vs-replicated-size).
+There are two size figures because the whole-DB gauge counts everything in the database,
+including `replicare`'s own `replicare` capture schema on the source and any tables that weren't
+selected, so a source that's bigger than its target is normal, and not drift. The
+replicated-size gauge only sums the selected tables, with the same function on both sides, so
+it's the series to watch for convergence. See
+[Whole-DB vs replicated size](operations.md#whole-db-vs-replicated-size).
 
-**Replication lag** — the headline lag section:
+### Replication lag
+
+This is the headline lag section:
 
 | Panel | Query | Reading |
 |---|---|---|
-| Max replication lag (SLO) | `max(replicare_replication_lag_seconds)` | Worst lag; green < 30s, amber < 5m, red beyond |
-| Catch-up ETA | `sum(delta_backlog_rows) / clamp_min(sum(throughput),1)` | Estimated seconds to converge at the current apply rate |
-| Inflow vs drain | `throughput` vs `throughput + rate(sum(delta_backlog_rows)[5m])` | Inflow above drain ⇒ the backlog is growing |
+| Max replication lag (SLO) | `max(replicare_replication_lag_seconds)` | Worst lag; green below 30s, amber below 5m, red beyond |
+| Catch-up ETA | `sum(replicare_delta_backlog_rows) / clamp_min(sum(replicare_throughput_rows_per_second), 1)` | Estimated seconds to converge at the current apply rate |
+| Inflow vs drain (rows/s) | `sum(replicare_throughput_rows_per_second)` vs `sum(replicare_throughput_rows_per_second) + sum(rate(replicare_delta_backlog_rows[5m]))` | Inflow above drain means the backlog is growing |
 | Replication lag / Total backlog | `replicare_replication_lag_seconds`, `sum(replicare_delta_backlog_rows)` | Per-table lag; total rows still to apply |
 
-**Per FK component** — rolled up by the `component` label:
+### Per FK component
+
+These panels are rolled up by the `component` label:
 
 | Panel | Query | Reading |
 |---|---|---|
 | Replication lag (per component) | `max by (component) (replicare_replication_lag_seconds)` | Which FK component is behind |
 | Delta backlog (per component) | `sum by (component) (replicare_delta_backlog_rows)` | Queue depth per component |
 
-**Backlog detail (per table)**, **Throughput & apply latency**, **Errors & maintenance** — per-table backlog rows/bytes/oldest-age; throughput and apply p95; error rate, purge rate, and reseeds. (Metrics as named.)
+### Backlog, throughput & errors
 
-The **Source** / **Target** health and size panels fill in as soon as a sync starts. The lag, backlog and throughput panels fill in once tables reach streaming — during an initial copy they are expected to read *No data*.
+The remaining sections are "Backlog detail (per table)", "Throughput & apply latency" and
+"Errors & maintenance". They cover per-table backlog rows / bytes / oldest age; throughput and apply p95;
+and the error rate, purge rate and reseeds, using the metrics as they're named.
 
-## Notes
+The Source / Target health and size panels fill in as soon as a sync starts. The lag, backlog
+and throughput panels only fill in once tables reach streaming, so during an initial copy
+they're expected to read *No data*.
 
-- Metrics refresh **once per drain pass** (your `drain_interval`, default 1s), so
-  series update at that cadence — the dashboard auto-refreshes every 30s by default.
-- The **backlog and lag series are the catch-up view**: after a churn burst they
-  rise, then fall back to baseline as streaming drains the queue. A backlog that
-  climbs while `Targets up` reads DOWN is the intended "target is unreachable and
-  falling behind" signal.
-- The dashboard `uid` is `replicare-overview`; re-importing the same file updates
-  the existing dashboard in place rather than creating a copy.
+## Things to know
+
+Metrics refresh once per drain pass(the sync's `drain_interval`, 1s by default), so the series
+update at that cadence; the dashboard itself auto-refreshes every 30s by default.
+
+The backlog and lag series are the catch-up view. After a burst of churn they rise, then fall
+back to baseline as streaming drains the queue. A backlog that keeps climbing while
+`Targets up` reads DOWN is the signal we intend for "this target is unreachable and falling
+behind".
+
+The dashboard's `uid` is `replicare-overview`, so re-importing the same file updates the
+existing dashboard in place, rather than creating a copy.

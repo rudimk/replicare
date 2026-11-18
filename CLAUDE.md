@@ -732,7 +732,13 @@ without changing the single-static-binary distribution.
   (milestones, design reviews, implementation status, "proposed design") never go in `docs/`;
   they live in `.sisyphus/` (e.g. `.sisyphus/multi-master-design.md`,
   `.sisyphus/reseed-state-machine.md`).** What a user needs from a design note is rewritten in
-  plain language on a user page (e.g. `docs/active-active.md`). Docs that live next to their code (the Helm chart README, the
+  plain language on a user page (e.g. `docs/active-active.md`). **Site docs voice:** always
+  British spelling for prose, the sentences we write (anything that's a name in code / tech -
+  HTTP bearer auth's `Authorization` header, a config key, an API - keeps its own spelling,
+  in inline code); page title in Title Case, **every subheading in sentence case**;
+  "we" for the project, never "you" or "I". **In this repo's docs the name is always written as
+  inline code, `replicare`** (not in URLs, paths or code blocks; a repo-specific rule, not part
+  of the general voice). Docs that live next to their code (the Helm chart README, the
   `test/loadgen*` READMEs, `CHANGELOG.md`) are pulled in with `{{#include}}` pages and must use
   absolute links (`https://replicare.rudimk.com/<page>.html`); links from `docs/` to other repo
   files go to GitHub (`https://github.com/rudimk/replicare/blob/main/...`). `internal/docscheck`

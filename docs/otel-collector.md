@@ -1,22 +1,24 @@
-# Scraping replicare metrics (OpenTelemetry Collector / Prometheus)
+# Scraping `replicare` Metrics
 
-replicare exposes Prometheus metrics on an HTTP endpoint:
+This page describes how to get `replicare`'s Prometheus metrics into an existing monitoring
+stack, either through the Prometheus Operator, or with a scrape job for an OpenTelemetry
+Collector or a plain Prometheus. `replicare` exposes its metrics on an HTTP endpoint:
 
 | | Default | Set by |
 |---|---|---|
 | Path | `/metrics` | fixed |
-| Port | `9090`, named **`metrics`** | chart `service.ports.metrics` / config `observability.metrics_addr` |
-| Metric names | `replicare_*` | the observability contract (see [`docs/operations.md`](operations.md#metrics-reference)) |
+| Port | `9090`, named `metrics` | chart `service.ports.metrics` / config `observability.metrics_addr` |
+| Metric names | `replicare_*` | the observability contract(see [`docs/operations.md`](operations.md#metrics-reference)) |
 
-The chart's Service/Pod also exposes `/status` and `/healthz` on the **`status`** port
-(`8080`), so a scrape must target the **`metrics`** port specifically — not just "the
-Service".
+The chart's Service / Pod also exposes `/status` and `/healthz` on the `status` port(`8080`), so
+a scrape has to target the `metrics` port specifically, and not just "the Service".
 
-There are two ways to get these metrics into your monitoring stack.
+There are two ways to get these metrics into a monitoring stack.
 
-## Option A — Prometheus Operator (simplest, if you run it)
+## Option A: the Prometheus Operator
 
-The Helm chart ships a `ServiceMonitor`. Just enable it:
+This is the simplest option, for anyone already running the operator. The Helm chart ships a
+`ServiceMonitor`, so all it takes is enabling it:
 
 ```sh
 helm upgrade --install replicare oci://ghcr.io/rudimk/replicare-controller \
@@ -24,15 +26,15 @@ helm upgrade --install replicare oci://ghcr.io/rudimk/replicare-controller \
   --set serviceMonitor.enabled=true
 ```
 
-That wires the operator to scrape the `metrics` port for you; nothing below is needed.
+That wires the operator up to scrape the `metrics` port, and nothing below is needed.
 
-## Option B — Prometheus scrape job (OTel Collector `prometheus` receiver, or plain Prometheus)
+## Option B: a Prometheus scrape job
 
-If you scrape with an **OpenTelemetry Collector** (its `prometheus` receiver embeds a
-Prometheus scrape config) or a **plain Prometheus**, add the scrape job below. It uses
-Kubernetes `endpointslice` service discovery and keeps only replicare's `metrics`
-endpoint, selected by the chart's stable label `app.kubernetes.io/name=replicare-controller`
-(release-independent — works regardless of your Helm release name).
+This option covers an OpenTelemetry Collector(its `prometheus` receiver embeds a Prometheus
+scrape config) as well as a plain Prometheus. Add the scrape job below; it uses Kubernetes
+`endpointslice` service discovery, and keeps only `replicare`'s `metrics` endpoint, selected by
+the chart's stable label `app.kubernetes.io/name=replicare-controller`. That label doesn't depend
+on the release, so it works whatever the Helm release is called.
 
 ```yaml
 - job_name: replicare
@@ -72,7 +74,7 @@ endpoint, selected by the chart's stable label `app.kubernetes.io/name=replicare
 
 ### Where it goes in an OpenTelemetry Collector
 
-The job slots into the `prometheus` receiver's embedded config, then feeds your normal
+The job slots into the `prometheus` receiver's embedded config, and then feeds the normal
 pipeline:
 
 ```yaml
@@ -90,23 +92,26 @@ service:
       exporters: [prometheusremotewrite]   # or otlp, etc. — whatever you already use
 ```
 
-For a **plain Prometheus**, the same block goes under `scrape_configs:` in `prometheus.yml`
+For a plain Prometheus, the same block goes under `scrape_configs:` in `prometheus.yml`,
 unchanged.
 
-## Notes
+## Things to know
 
-- **Port name over number.** The job keys on the port *name* (`metrics`), not `9090`, so it
-  keeps working if you change `service.ports.metrics`. If you match on the number instead,
-  use `__meta_kubernetes_endpointslice_port` with your configured value.
-- **No scrape annotations.** The chart sets no `prometheus.io/scrape` annotations by default,
-  so annotation-based discovery won't find replicare — use the label-based relabeling above
-  (or add your own annotations via `podAnnotations` if your collector discovers by annotation).
-- **RBAC.** The collector's ServiceAccount needs `list`/`watch` on `endpointslices` (and
-  `pods` if you set the `pod` target label) in the target namespace(s). Most Kubernetes
-  Collector deployments already grant this.
-- **Scrape interval.** replicare refreshes its gauges once per drain pass
-  (`tuning.drain_interval`, default `1s`), so a 15–30s scrape interval captures the movement
-  without over-sampling.
-- **What to build on top.** Once these metrics land in Prometheus, import the
-  [Grafana dashboard](grafana-dashboard.md) — it has a configurable data source and
-  covers per-table backlog/lag, catch-up, initial-copy progress, throughput, and errors.
+The job keys on the port's *name*(`metrics`), and not on `9090`, so it keeps working if
+`service.ports.metrics` is changed. To match on the number instead, use
+`__meta_kubernetes_endpointslice_port` with the configured value.
+
+The chart sets no `prometheus.io/scrape` annotations by default, so discovery based on
+annotations won't find `replicare`. Use the label-based relabelling above instead(or add
+annotations via `podAnnotations`, for a collector that discovers by annotation).
+
+The collector's ServiceAccount needs `list`/`watch` on `endpointslices`(and on `pods`, if the
+`pod` target label is set) in the target namespace(s). Most Kubernetes Collector deployments
+already grant this.
+
+`replicare` refreshes its gauges once per drain pass(`tuning.drain_interval`, `1s` by default),
+so a scrape interval of 15 to 30s captures the movement without over-sampling.
+
+Once these metrics land in Prometheus, the natural next step is to import the
+[Grafana dashboard](grafana-dashboard.md). It has a configurable data source, and covers
+per-table backlog / lag, catch-up, initial-copy progress, throughput and errors.
