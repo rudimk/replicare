@@ -52,10 +52,24 @@ func (d *DB) Lock(ctx context.Context, key string) (func(context.Context) error,
 
 // EnsureVersionTable creates the capture database and the version table if
 // absent. versionTable is "<db>.<table>"; the database is created too.
+//
+// The database is created only when it is actually missing: CREATE DATABASE needs an
+// exclusive metadata lock on the database name EVEN WITH IF NOT EXISTS, and once capture
+// is installed every application write to a captured table holds a shared lock on this
+// database (its trigger writes the delta table here). So an unconditional CREATE on every
+// start waited behind any open application transaction — and, while waiting, queued the
+// application's next writes to captured tables behind it.
 func (d *DB) EnsureVersionTable(ctx context.Context, versionTable string) error {
 	dbName, tbl := splitQualified(versionTable)
-	if _, err := d.db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)); err != nil {
-		return fmt.Errorf("mysqlmigrate: create database %s: %w", dbName, err)
+	var exists int
+	if err := d.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?", dbName).Scan(&exists); err != nil {
+		return fmt.Errorf("mysqlmigrate: check database %s: %w", dbName, err)
+	}
+	if exists == 0 {
+		if _, err := d.db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`", dbName)); err != nil {
+			return fmt.Errorf("mysqlmigrate: create database %s: %w", dbName, err)
+		}
 	}
 	stmt := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s (
 		version    INT PRIMARY KEY,
