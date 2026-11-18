@@ -33,7 +33,7 @@ type Config struct {
 	// source or target, a node is both read from (capture/snapshot) and written to
 	// (apply). It is a SEPARATE map from sources/targets so the one-way surface is
 	// untouched; a node is referenced by name from a cluster's members. Optional —
-	// present only for multi-master configs (see docs/multi-master.md).
+	// present only for multi-master configs (see .sisyphus/multi-master-design.md).
 	Nodes map[string]*Endpoint `yaml:"nodes"`
 	// Clusters are active-active (multi-master) replication groups. Optional and
 	// additive: a config with no clusters behaves exactly like a one-way daemon.
@@ -122,7 +122,7 @@ func (s *Sync) SyncsSequences() bool { return s.SyncSequences != nil && *s.SyncS
 // Cluster is one active-active (multi-master) replication group: a set of peer
 // nodes, each simultaneously a source and a target, kept converged with writes
 // accepted on any node. Conflict resolution is zero-config (replicare-managed HLC
-// last-write-wins; see docs/multi-master.md §5.3) — there is nothing to declare
+// last-write-wins; see .sisyphus/multi-master-design.md §5.3) — there is nothing to declare
 // beyond membership. Single-engine, like a sync. Additive and opt-in: a config with
 // no clusters is exactly today's one-way daemon.
 type Cluster struct {
@@ -130,7 +130,7 @@ type Cluster struct {
 	Engine  string   `yaml:"engine"`  // all members must share this engine
 	Members []string `yaml:"members"` // keys into Config.Nodes; each is source AND target
 	// Topology is the edge shape. v1 supports only "mesh" (full mesh, any N >= 2);
-	// "ring"/"explicit" partial topologies are deferred (docs/multi-master.md §5.2).
+	// "ring"/"explicit" partial topologies are deferred (.sisyphus/multi-master-design.md §5.2).
 	// Defaults to "mesh".
 	Topology string   `yaml:"topology"`
 	Include  []string `yaml:"include"` // selection globs, engine-interpreted (as syncs)
@@ -391,7 +391,7 @@ func (c *Config) Validate() error {
 			members := c.clusterMemberIdentities()
 			for _, ref := range s.Targets {
 				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
-					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (docs/multi-master.md)", s.Name, ref, id)
+					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/active-active.html)", s.Name, ref, id)
 				}
 			}
 		}
@@ -407,7 +407,7 @@ func (c *Config) Validate() error {
 	// ring). That topology loops changes forever and corrupts data (there is no origin
 	// filtering on the one-way path); before this check it was accepted silently. A
 	// genuine active-active topology must be declared as a cluster, which is exempt
-	// (clusters are not syncs). See docs/multi-master.md §4.
+	// (clusters are not syncs). See .sisyphus/multi-master-design.md §4.
 	if err := c.detectSyncCycles(); err != nil {
 		return err
 	}
@@ -497,7 +497,7 @@ func (c *Config) detectSyncCycles() error {
 	}
 	for n := range adj {
 		if color[n] == white && dfs(n) {
-			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (docs/multi-master.md)",
+			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (https://replicare.rudimk.com/active-active.html)",
 				strings.Join(cycle, " -> "))
 		}
 	}
@@ -521,13 +521,13 @@ func (c *Config) validateCluster(i int, cl *Cluster, seen map[string]bool) error
 		return fmt.Errorf("cluster %q: engine is required", cl.Name)
 	}
 	// Reject engines that can't do active-active here, at config time, instead of
-	// failing later at capture install with an opaque error. See docs/multi-master.md.
+	// failing later at capture install with an opaque error. See .sisyphus/multi-master-design.md.
 	if why, bad := clusterEngineUnsupported[cl.Engine]; bad {
-		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres and mysql do — use a one-way `syncs:` entry for this engine instead (see docs/multi-master.md)",
+		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres, mysql and redis do — use a one-way `syncs:` entry for this engine instead (see https://replicare.rudimk.com/active-active.html)",
 			cl.Name, cl.Engine, why)
 	}
 	if cl.Topology != topologyMesh {
-		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see docs/multi-master.md)",
+		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see https://replicare.rudimk.com/active-active.html)",
 			cl.Name, cl.Topology, topologyMesh)
 	}
 	if len(cl.Members) < 2 {

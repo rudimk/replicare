@@ -129,9 +129,8 @@ footprint is first-class: **per-table delta tables** (isolated
 bloat/contention), a **batched, consumption-gated `DELETE` purge** plus aggressive
 per-table autovacuum reloptions set at install time (no superuser, no global
 change), and **bounded retention (age/size) with forced reseed** of an over-cap
-target to protect the source. The reseed handoff — marking a target needs-reseed,
-resetting its track, re-copying, and resuming without gaps — is specified in
-[`reseed-state-machine.md`](reseed-state-machine.md). Per-target delta backlog,
+target to protect the source (see
+[operations → Source footprint](operations.md#source-footprint-the-thing-to-watch)). Per-target delta backlog,
 oldest-unconsumed age, purge rate, and reseed events are all surfaced as telemetry
 (see [operations](operations.md)).
 

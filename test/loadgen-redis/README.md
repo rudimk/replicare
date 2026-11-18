@@ -128,7 +128,7 @@ Always pass the same `--node-id` for a given node's DB. Keep `--scale` modest pe
 ### Three-node mesh example
 
 Assume a running replicare `clusters:` mesh over three Redis nodes `A`, `B`, `C`
-(config per [multi-master.md](https://replicare.rudimk.com/multi-master.html)), with `$A`/`$B`/`$C` their
+(config per [Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)), with `$A`/`$B`/`$C` their
 connection specs. There is **no `ddl` step** — Redis has no schema.
 
 ```sh

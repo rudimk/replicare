@@ -63,7 +63,7 @@ clusters:
 	if err == nil {
 		t.Fatal("expected the blocklisted engine's cluster to be rejected, got nil")
 	}
-	for _, want := range []string{"does not support active-active", "postgres and mysql", "docs/multi-master.md"} {
+	for _, want := range []string{"does not support active-active", "postgres, mysql and redis", "replicare.rudimk.com/active-active.html"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error = %q, want containing %q", err.Error(), want)
 		}

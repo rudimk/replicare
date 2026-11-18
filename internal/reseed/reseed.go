@@ -1,5 +1,5 @@
 // Package reseed is the engine-neutral M5c orchestration for bounded retention
-// and forced reseed (CLAUDE.md §3.4; docs/reseed-state-machine.md). It sits on
+// and forced reseed (CLAUDE.md §3.4; .sisyphus/reseed-state-machine.md). It sits on
 // the Source / Sink / StateStore interfaces and reuses the M4 copy driver and the
 // M5a/M5b drain, so it is engine-independent.
 //

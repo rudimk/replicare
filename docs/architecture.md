@@ -139,13 +139,15 @@ the whole keyspace each pass and deletes from diffing the target against the sou
   deletes by PK/key), checkpointed cursors. A crash replays from the last cursor;
   replays are harmless.
 - **Topology:** user choice — default single→single; **fan-out** (one source → many
-  targets) is supported for the relational engines; multi-master and HA/leader
-  election are on the roadmap. A sync is always **single-engine**.
+  targets) is supported for the relational engines; **active-active** (writes on any
+  node) is supported for Postgres, MySQL and Redis — see
+  [Active-active replication](active-active.md). A standby daemon that takes over
+  automatically is on the roadmap. A sync is always **single-engine**.
 - **Source bloat:** the delta tables are a high-churn queue on a source you may not
   own, so replicare bounds its footprint with per-table delta tables, a batched
   consumption-gated purge + aggressive autovacuum, and **bounded retention with forced
   reseed** of an over-cap target. See
-  [operations](operations.md) and the [reseed state machine](reseed-state-machine.md).
+  [operations](operations.md#source-footprint-the-thing-to-watch).
 
 ## Process & observability
 

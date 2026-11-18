@@ -25,7 +25,7 @@ func trackRowsFor(t *testing.T, ctx context.Context, src *Source, relID int, tar
 }
 
 // TestPurgeConsumptionGated: a delta is purged only once the target has consumed
-// it; unconfirmed deltas are retained (docs/reseed-state-machine.md §3.1).
+// it; unconfirmed deltas are retained (.sisyphus/reseed-state-machine.md §3.1).
 func TestPurgeConsumptionGated(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -74,7 +74,7 @@ func TestPurgeConsumptionGated(t *testing.T) {
 }
 
 // TestPurgeFanoutConsumedByAll: with two targets a delta is purgeable only once
-// EVERY target has consumed it (fan-out safe, docs/reseed-state-machine.md §3.1).
+// EVERY target has consumed it (fan-out safe, .sisyphus/reseed-state-machine.md §3.1).
 func TestPurgeFanoutConsumedByAll(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -123,7 +123,7 @@ func TestPurgeFanoutConsumedByAll(t *testing.T) {
 
 // TestPurgeRetentionAgeForcesReseed: an unconsumed backlog older than the age cap
 // sacrifices the laggard target — its track is reset, it is reported as reseeded,
-// and the now-unpinned deltas are purged (docs/reseed-state-machine.md §3.3).
+// and the now-unpinned deltas are purged (.sisyphus/reseed-state-machine.md §3.3).
 func TestPurgeRetentionAgeForcesReseed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

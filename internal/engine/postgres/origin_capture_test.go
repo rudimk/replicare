@@ -10,7 +10,7 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// Loop-suppression integration tests (CLAUDE.md §6, docs/multi-master.md §5.4).
+// Loop-suppression integration tests (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.4).
 // They require the multi-version harness (`task harness:up`): the target (17) node
 // doubles as a cluster member B — it has origin-aware capture installed AND receives
 // replicare applies — so we can prove the trigger suppresses replicare's own writes

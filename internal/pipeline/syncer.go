@@ -39,7 +39,7 @@ type Syncer struct {
 	// ClusterMode marks this syncer as one edge of an active-active cluster
 	// (multi-master): its source installs loop-suppressing origin-aware capture and
 	// its sink is origin-marking, so replicare's own applies are not re-captured and
-	// echoed back around the mesh (CLAUDE.md §6, docs/multi-master.md §5.4). Off (the
+	// echoed back around the mesh (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.4). Off (the
 	// default) is the one-way path, byte-identical to the pre-multi-master daemon.
 	ClusterMode bool
 

@@ -27,7 +27,7 @@ func (s *Source) InstallCapture(ctx context.Context, tables []engine.TableRef) e
 // InstallOriginCapture implements engine.OriginAwareCapturer: it installs capture
 // with the loop-suppression WHEN guard on the trigger, so replicare's own applies
 // (which set the applyMarkerGUC) are not re-captured on a cluster member (CLAUDE.md
-// §6, docs/multi-master.md §5.4). Everything else is identical to InstallCapture;
+// §6, .sisyphus/multi-master-design.md §5.4). Everything else is identical to InstallCapture;
 // the only difference is the guarded trigger, so a table's delta/track/function DDL
 // is unchanged and the one-way path (InstallCapture) is byte-identical.
 func (s *Source) InstallOriginCapture(ctx context.Context, tables []engine.TableRef, nodeID string) error {

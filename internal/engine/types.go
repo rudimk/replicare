@@ -40,7 +40,7 @@ type Column struct {
 	// the apply path emits `OVERRIDING SYSTEM VALUE` only for true Identity columns, so
 	// conflating serial into Identity would break copy/apply. Both Identity and
 	// DefaultSequence mean "the DB locally allocates this value" — the signal the
-	// active-active id-allocation pre-flight keys on (CLAUDE.md §6, docs/multi-master.md
+	// active-active id-allocation pre-flight keys on (CLAUDE.md §6, .sisyphus/multi-master-design.md
 	// §5.6). MySQL leaves this false (AUTO_INCREMENT is already Identity).
 	DefaultSequence bool
 	// AutoUpdate marks a column whose value the engine rewrites on every UPDATE

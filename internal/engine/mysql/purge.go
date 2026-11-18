@@ -11,7 +11,7 @@ import (
 )
 
 // Delta purge, bounded retention & forced reseed for MySQL (CLAUDE.md §3.4;
-// docs/reseed-state-machine.md), the MM5c bloat-control path. Source-side only:
+// .sisyphus/reseed-state-machine.md), the MM5c bloat-control path. Source-side only:
 // Purge touches the `replicare` delta and track tables, never the StateStore (§9),
 // and returns which targets it sacrificed so the neutral reseed orchestration can
 // mark needs-reseed. MySQL has no autovacuum reloptions — bloat control is
@@ -30,7 +30,7 @@ const defaultPurgeBatch = 10000
 // Purge removes deltas consumed by all configured targets, subject to retention.
 // If a target's pinned backlog exceeds a retention cap it is sacrificed: its
 // track is reset (so it will be reseeded from scratch) and the now-unpinned
-// deltas are purged. See docs/reseed-state-machine.md §3.
+// deltas are purged. See .sisyphus/reseed-state-machine.md §3.
 func (s *Source) Purge(ctx context.Context, t engine.TableRef, targets []engine.TargetID, ret engine.RetentionPolicy) (engine.PurgeStats, error) {
 	if s.db == nil {
 		return engine.PurgeStats{}, errNotConnected
@@ -59,7 +59,7 @@ func (s *Source) Purge(ctx context.Context, t engine.TableRef, targets []engine.
 
 	// Reset the sacrificed targets' track (they are reseeded from scratch, so their
 	// partial consumption record is void — reset to EMPTY, never a high-water mark,
-	// docs/reseed-state-machine.md §4.5), then purge the deltas now consumed by all
+	// .sisyphus/reseed-state-machine.md §4.5), then purge the deltas now consumed by all
 	// remaining targets (treating the reseeding ones as satisfied). For a
 	// single-target sync, remaining is empty and the queue drains fully.
 	inClause, inArgs := targetInClause(reseed)

@@ -26,7 +26,7 @@ maximum**. Therefore:
 - **newer source → older target: fails loud** (`DUMP payload version or checksum
   are wrong`).
 
-replicare's pre-flight (RM2) reads `INFO server` on both ends and **blocks a
+replicare's pre-flight check reads `INFO server` on both ends and **blocks a
 newer-source → older-target pair** with an actionable error, rather than failing
 mid-copy. Upgrade the target to at least the source's version, or replicate the
 other direction. This is the Redis analog of the relational "block on
@@ -50,6 +50,6 @@ for the MySQL engine.
 
 Module-defined types (RedisJSON `ReJSON-RL`, RedisBloom, RedisTimeSeries, …)
 produce **module-specific opaque DUMP payloads** that only `RESTORE` on a target
-loading the identical module. Pre-flight (RM2) compares `MODULE LIST` on both ends
+loading the identical module. The pre-flight check compares `MODULE LIST` on both ends
 and **blocks** when a source module type is absent on the target — there is no
 faithful native reconstruction of an opaque module value.

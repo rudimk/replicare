@@ -233,7 +233,7 @@ when on). Two Redis-specific metrics make this observable:
 | `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | Keys `DEL`ed by the target-vs-source sweep. |
 
 These are unset for Postgres/MySQL (whose deletes flow through the delta path). The
-reused F2 signals apply too, with `table` carrying the Redis **unit** (`redis.db0`);
+shared metrics apply too, with `table` carrying the Redis **unit** (`redis.db0`);
 note that `replicare_delta_backlog_*` stay ~empty for Redis (there is no source-side
 queue to bound).
 
@@ -261,7 +261,7 @@ mode, grant the same user on **every master** and add `+cluster|shards`/`|slots`
 
 Redis participates in an active-active `clusters:` mesh (writes accepted on **any**
 node, converging on all under HLC last-write-wins) — same config surface as the
-relational engines, detailed in [multi-master.md](multi-master.md). Because Redis is
+relational engines, described in [Active-active replication](active-active.md). Because Redis is
 capture-less, the `(hlc, node_id)` version register lives in a **parallel metadata
 keyspace**: for each data key `K`, a sibling hash `\x00rc:m:{…}K` (co-located in `K`'s
 cluster slot) holding its version + a logical-value fingerprint. The **value key is

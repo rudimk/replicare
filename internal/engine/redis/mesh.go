@@ -6,7 +6,7 @@ import (
 	"sync"
 )
 
-// MM6 — Redis active-active mesh foundations (docs/multi-master.md §5.4).
+// MM6 — Redis active-active mesh foundations (.sisyphus/multi-master-design.md §5.4).
 //
 // Redis is capture-less: a local application write to a key is invisible to
 // replicare (there is no trigger, no change stream). So the mesh maintains a
@@ -139,7 +139,7 @@ type version struct {
 
 // beats reports whether v strictly wins last-write-wins over other, under the total
 // order (phys, log, node). A zero/never-seen other always loses. node_id breaks
-// equal-HLC ties, so the order is total with no ties (docs/multi-master.md §5.3).
+// equal-HLC ties, so the order is total with no ties (.sisyphus/multi-master-design.md §5.3).
 // present distinguishes "other is a real stored version" from "no version at all"
 // (the latter always loses).
 func (v version) beats(other version, present bool) bool {

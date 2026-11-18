@@ -1,9 +1,9 @@
-# MySQL version support (the MF3 floor decision)
+# MySQL version support
 
-This records replicare's committed MySQL version floor and the MariaDB scope
-decision for the v1 MySQL engine. It is the MySQL counterpart to
-[Postgres version support](postgres-version-support.md), and it fixes the CI test pair every
-MySQL acceptance test runs against.
+This page covers the oldest MySQL version replicare supports as a source, the target
+version it is tested against, and why MariaDB is not supported. It is the MySQL counterpart to
+[Postgres version support](postgres-version-support.md), and it names the pair of versions every
+MySQL test runs against.
 
 ## The committed pair: **MySQL 5.7 source → MySQL 8.4 target**
 
@@ -20,20 +20,20 @@ old enough to genuinely exercise the "old source → modern target" path:
 
 | Capability | Introduced | Consequence if the floor were older (5.6) |
 |---|---|---|
-| **Generated columns** (`VIRTUAL`/`STORED` in `information_schema.COLUMNS.EXTRA`) | 5.7 | 5.6 has none; the generated-column exclusion path (MM4) would be untestable there. |
+| **Generated columns** (`VIRTUAL`/`STORED` in `information_schema.COLUMNS.EXTRA`) | 5.7 | 5.6 has none; the handling of generated columns (they are left for the target to compute) could not be tested there. |
 | **JSON type** | 5.7 | 5.6 lacks it; a headline fidelity-corpus type would be missing. |
 | **Usable `information_schema`** | 5.7 (materially faster than 5.6) | 5.6's `information_schema` is notoriously slow, degrading introspection. |
 | **`sys` schema, spatial indexes, etc.** | 5.7 | Not load-bearing, but part of why 5.7 is the practical floor. |
 
-5.6 is **best-effort only**: the engine may work against it, but no acceptance
-test is committed to it, and the features above are unverified there. If a future
+5.6 is **best-effort only**: the engine may work against it, but no test
+runs against it, and the features above are unverified there. If a future
 need arises, 5.6 support is additive.
 
 ### Why 8.4 is the target
 
-8.4 is the current LTS. It exercises the modern-target concerns the plan calls
-out: `utf8mb4` defaults, `ROW_NUMBER()` window
-functions for boundary discovery (MM4a), and the strict-`sql_mode`/zero-date
+8.4 is the current long-term-support release. It covers the modern-target concerns:
+`utf8mb4` defaults, `ROW_NUMBER()` window functions (used to split tables into chunks
+for the initial copy), and the strict-`sql_mode`/zero-date
 interaction the faithful-transport path depends on. The
 5.7→8.4 gap is where the old-source fidelity work earns its keep.
 
@@ -50,6 +50,6 @@ variant behind the same interface, not a v1 goal.
 ## What this pins
 
 - The CI job builds and tests only against `mysql:5.7` and `mysql:8.4`.
-- Every MySQL milestone's acceptance is verified on this pair.
-- If CI cannot run 5.7 (e.g. image unavailability), the plan requires listing which
-  fidelity claims become unverified rather than silently raising the floor.
+- Every MySQL test runs on this pair.
+- If CI ever cannot run 5.7 (for example, the image becomes unavailable), the value
+  checks that become unverified are listed, rather than the floor being raised quietly.
