@@ -2,10 +2,9 @@
 
 replicare's Redis engine replicates **Redis → Redis** using ordinary, grantable
 commands (`SCAN`, `DUMP`, `PTTL`, `RESTORE`, `DEL`) — no replication link, no
-RDB/AOF access, no `PSYNC` (CLAUDE.md §3.2). Transport is **`DUMP` → `RESTORE`**
+RDB/AOF access, no `PSYNC`. Transport is **`DUMP` → `RESTORE`**
 (value-faithful; the value's RDB-serialized bytes are moved and never
-transformed, §1.7). This page records the supported version range and fork stance
-(see `.sisyphus/redis-plan.md` for the full design).
+transformed). This page records the supported version range and fork stance.
 
 ## Version range
 
@@ -42,7 +41,7 @@ Detected from `INFO server`:
 | **Redis** | Supported | The reference implementation. |
 | **Valkey** | Supported | Shares Redis's RDB format and RESP protocol, so `DUMP`/`RESTORE` transport is compatible. |
 | **KeyDB** | Best-effort | Redis-protocol compatible; RDB compatibility generally holds but is not CI-verified. |
-| **Dragonfly** | **Blocked (v1)** | Its `DUMP`/`RESTORE` RDB-format compatibility with Redis is unverified; since transport is `DUMP`/`RESTORE`, replicare refuses it loudly rather than risk silent corruption (redis-plan RQ-1). |
+| **Dragonfly** | **Blocked (v1)** | Its `DUMP`/`RESTORE` RDB-format compatibility with Redis is unverified; since transport is `DUMP`/`RESTORE`, replicare refuses it loudly rather than risk silent corruption. |
 
 A non-Redis-family server is refused at connect, the same way MariaDB is refused
 for the MySQL engine.

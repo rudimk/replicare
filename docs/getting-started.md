@@ -13,7 +13,7 @@ a list of tables. It:
 3. streams every insert/update/delete continuously to keep the targets converged.
 
 No WAL access, no `REPLICATION` role, no `wal_level` change — just ordinary,
-grantable privileges. See [`../CLAUDE.md`](../CLAUDE.md) for the why.
+grantable privileges. [Architecture](architecture.md) explains why.
 
 ## Try the demo (2 minutes)
 
@@ -148,17 +148,17 @@ psql -v ON_ERROR_STOP=1 -v role=replicare -v db=warehouse -v app_schema=public \
 The source role needs only `CREATE`-on-db (or a pre-created owned `replicare`
 schema) plus `USAGE`/`TRIGGER`/`SELECT`; the target role needs only DML. See
 [configuration.md](configuration.md) and
-[`../deploy/`](../deploy/) for details.
+[`../deploy/`](https://github.com/rudimk/replicare/tree/main/deploy) for details.
 
-For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql)
-and [`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql)
+For **MySQL**, use [`../deploy/grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql)
+and [`../deploy/grants-target-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target-mysql.sql)
 instead: the source role needs `SELECT`+`TRIGGER` on the replicated tables and
 ownership of the `replicare` capture database; the target role needs the four DML
 verbs plus `CREATE TEMPORARY TABLES`. See [the MySQL engine page](mysql.md).
 
 For **Redis**, use the ACL presets
-[`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt) and
-[`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt): the source role
+[`../deploy/acl-source-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-source-redis.txt) and
+[`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt): the source role
 is read-only (`+scan +dump +pttl +exists +type +memory|usage`); the target role
 needs `+restore +del +scan +exists +module|list`. Note the foot-gun — `RESTORE` is
 `@dangerous` and must be granted explicitly with `+restore`. See
@@ -166,7 +166,7 @@ needs `+restore +del +scan +exists +module|list`. Note the foot-gun — `RESTORE
 
 ### 3. Write a config
 
-Copy [`../examples/replicare.yml`](../examples/replicare.yml) and edit the
+Copy [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml) and edit the
 connection blocks and the sync's table selection. Minimal example:
 
 ```yaml
@@ -211,7 +211,7 @@ Secrets like `${PW}` are read from the environment. Full field reference:
 For a **MySQL** sync, set `engine: mysql` with `mysql:` blocks (see the
 [MySQL connection block](configuration.md#mysql-connection-block)); the state
 store stays on Postgres. A ready-to-run example is in
-[`../examples/demo-mysql/config.yml`](../examples/demo-mysql/config.yml).
+[`../examples/demo-mysql/config.yml`](https://github.com/rudimk/replicare/blob/main/examples/demo-mysql/config.yml).
 
 For a **Redis** sync, set `engine: redis` with `redis:` blocks (see the
 [Redis connection block](configuration.md#redis-connection-block)); the state store
@@ -241,8 +241,8 @@ passive/DR only — it refuses an active-active mesh). See the [CLI reference](c
 
 ### 5. Deploy
 
-Install the binary and the sample [systemd unit](../deploy/replicare.service),
-run the [Docker image](../README.md#install), or deploy on Kubernetes with the
+Install the binary and the sample [systemd unit](https://github.com/rudimk/replicare/blob/main/deploy/replicare.service),
+run the [Docker image](https://github.com/rudimk/replicare#install), or deploy on Kubernetes with the
 Helm chart — see [Kubernetes (Helm)](kubernetes.md). See [operations.md](operations.md)
 for tuning, monitoring, retention/reseed, and troubleshooting.
 
@@ -254,5 +254,5 @@ for tuning, monitoring, retention/reseed, and troubleshooting.
 - [Troubleshooting](troubleshooting.md) — common problems and fixes.
 - [Architecture](architecture.md) — how the pipeline works end to end (capture → copy → stream → apply → checkpoint).
 - [Postgres engine](postgres.md) — the reference engine: trigger CDC, faithful `COPY`, FK components, least-privilege grants.
-- [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](../examples/demo-mysql/).
+- [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](https://github.com/rudimk/replicare/tree/main/examples/demo-mysql).
 - [Redis engine](redis.md) — Redis→Redis specifics: SCAN reconciliation, the delete sweep, TTL, cluster, and ACLs.

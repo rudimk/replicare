@@ -3,7 +3,7 @@
 Postgres is replicare's **first and reference engine** — the engine the
 engine-neutral copy / apply / delta / reseed / pipeline / observability layers were
 designed around. It replicates **Postgres → Postgres** with trigger-based,
-no-WAL CDC (CLAUDE.md §3.1). MySQL and Redis reuse those same neutral layers; this
+no-WAL CDC. MySQL and Redis reuse those same neutral layers; this
 page documents the Postgres specifics. The shared docs
 ([getting-started](getting-started.md), [configuration](configuration.md),
 [operations](operations.md), [troubleshooting](troubleshooting.md)) describe the
@@ -13,7 +13,7 @@ baseline behavior using Postgres, so treat them as this engine's extended manual
 > `COPY`), FK-ordered streaming apply (including cyclic components), delta
 > bloat/retention/reseed, full observability, and the daemon lifecycle all run end
 > to end, and Postgres syncs coexist with MySQL and Redis syncs in one daemon. Try
-> it with the [Postgres demo](../examples/demo/).
+> it with the [Postgres demo](https://github.com/rudimk/replicare/tree/main/examples/demo).
 
 ## Supported versions
 
@@ -22,15 +22,14 @@ baseline behavior using Postgres, so treat them as this engine's extended manual
   [`postgres-version-support.md`](postgres-version-support.md) for the rationale
   (float fidelity on pre-12, no-native-partition path, old PL/pgSQL portability).
 - Source SQL — trigger functions, capture DDL, introspection — stays **conservative
-  and version-tolerant** so it runs against genuinely old servers (CLAUDE.md §1.6).
+  and version-tolerant** so it runs against genuinely old servers.
   The target is assumed modern, so the apply path uses `INSERT … ON CONFLICT`.
 
 ## How CDC works (the relational baseline)
 
 Postgres has a durable change stream (the WAL), but replicare deliberately does
 **not** use it — logical replication needs a `REPLICATION` role and a `wal_level`
-change that managed and locked-down servers won't grant. Instead (CLAUDE.md §3.1,
-§3.3):
+change that managed and locked-down servers won't grant. Instead:
 
 1. **Capture** — in a dedicated `replicare` schema on the source, replicare installs
    per-table **delta** and **track** tables and `AFTER INSERT/UPDATE/DELETE`
@@ -43,7 +42,7 @@ change that managed and locked-down servers won't grant. Instead (CLAUDE.md §3.
    overlapping copy/stream windows converge naturally. Consumption is a
    **`delta MINUS track` set-difference** (a dirty-key set, *not* an ordered log),
    deleting by `delta_id` — which sidesteps the commit-order-≠-assignment-order
-   hazard that a scalar high-water-mark cursor would fall into (CLAUDE.md §3.3).
+   hazard that a scalar high-water-mark cursor would fall into.
 3. **Apply** — idempotent upserts keyed on the PK (`INSERT … ON CONFLICT DO UPDATE`)
    and deletes by PK, FK-dependency-ordered within each FK component (upserts
    parent→child, deletes child→parent), with a retry fallback for cycles.
@@ -52,14 +51,13 @@ change that managed and locked-down servers won't grant. Instead (CLAUDE.md §3.
 
 Capture is enabled **first**, then a chunked parallel initial copy runs while
 changes queue — so there is **no single frozen snapshot** and "too big to snapshot"
-is not a problem (CLAUDE.md §4).
+is not a problem.
 
 ## Faithful transport (never transform)
 
 Values move **verbatim** as text `COPY` and are validated by the target's own input
 functions — replicare never coerces, truncates, casts, or "repairs" data; on a
-type/constraint error it **halts loud** rather than corrupting silently (CLAUDE.md
-§1.7, §4.2). To keep text round-trippable it pins formatting-only session GUCs on
+type/constraint error it **halts loud** rather than corrupting silently. To keep text round-trippable it pins formatting-only session GUCs on
 every connection (no privilege needed): `DateStyle=ISO,YMD`, `TimeZone=UTC`,
 **`extra_float_digits=3`** (critical for float fidelity on pre-12 sources),
 `IntervalStyle=postgres`, `bytea_output=hex`, `client_encoding=UTF8`. A pre-flight
@@ -70,13 +68,12 @@ identical/widening.
 ## Requirements
 
 - **Every replicated table needs a primary key or usable unique key.** Tables
-  without one are **skipped with a loud warning** surfaced in logs and telemetry
-  (CLAUDE.md §3.1).
+  without one are **skipped with a loud warning** surfaced in logs and telemetry.
 - **The target schema must pre-exist.** replicare replicates **data only** — no live
-  DDL. You create/migrate target tables with your own tooling (CLAUDE.md §7); it
+  DDL. You create/migrate target tables with your own tooling; it
   introspects them to build correct, name-matched apply statements and never
   installs or alters target types/extensions/enum labels.
-- **Cyclic / self-referential FKs** are handled by case (CLAUDE.md §4.1): a nullable
+- **Cyclic / self-referential FKs** are handled by case: a nullable
   cycle uses a NULL-then-fill two-pass; a `DEFERRABLE` cycle loads under
   `SET CONSTRAINTS … DEFERRED`; a **`NOT NULL` non-deferrable cycle** is genuinely
   unloadable without disabling constraints (which replicare won't do), so pre-flight
@@ -116,8 +113,8 @@ If that error appears, look for the session holding the table (`pg_stat_activity
 
 ## The Postgres advantage: effectively-exactly-once
 
-replicare's delivery is **at-least-once with idempotent apply** (CLAUDE.md §5). For
-a **Postgres target**, there is a bonus (CLAUDE.md §9): when the StateStore *is* the
+replicare's delivery is **at-least-once with idempotent apply**. For
+a **Postgres target**, there is a bonus: when the StateStore *is* the
 target database, a cursor advance can ride the **same transaction** as its apply
 batch — yielding **effectively-exactly-once apply per batch**. This is unique to
 Postgres-target syncs: MySQL and Redis targets are strictly at-least-once because
@@ -128,7 +125,7 @@ last batch, which is harmless because applies are idempotent upserts.)
 ## Delta bloat, retention & reseed
 
 Because capture writes delta tables to a source you may not own, bounding the
-footprint is first-class (CLAUDE.md §3.4): **per-table delta tables** (isolated
+footprint is first-class: **per-table delta tables** (isolated
 bloat/contention), a **batched, consumption-gated `DELETE` purge** plus aggressive
 per-table autovacuum reloptions set at install time (no superuser, no global
 change), and **bounded retention (age/size) with forced reseed** of an over-cap
@@ -141,9 +138,9 @@ oldest-unconsumed age, purge rate, and reseed events are all surfaced as telemet
 ## Least privilege
 
 replicare needs **no superuser, no `REPLICATION` attribute, and no `wal_level`
-change** (CLAUDE.md §12). Ready-to-edit grant SQL ships in
-[`../deploy/grants-source.sql`](../deploy/grants-source.sql) and
-[`../deploy/grants-target.sql`](../deploy/grants-target.sql).
+change**. Ready-to-edit grant SQL ships in
+[`../deploy/grants-source.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source.sql) and
+[`../deploy/grants-target.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target.sql).
 
 - **Source:** `USAGE` on each replicated schema; `SELECT` + `TRIGGER` on each
   replicated table; and, to hold the capture machinery, either `CREATE` on the
@@ -192,11 +189,10 @@ syncs:
   use a `tls` field with the same spectrum.
 - `database` is the connection default; **selection globs are `schema.table`** and
   may span other schemas. FK components are computed over the selected tables and
-  copied/streamed with intra-component ordering and cross-component parallelism
-  (CLAUDE.md §8.1); a dominating "giant component" is warned about with a config
+  copied/streamed with intra-component ordering and cross-component parallelism; a dominating "giant component" is warned about with a config
   override available.
 - Extra libpq parameters can be passed via `params`.
-- The **single-engine rule** (§6) is enforced: a Postgres source's targets must all
+- The **single-engine rule** is enforced: a Postgres source's targets must all
   be Postgres — never cross-engine.
 - All neutral knobs (worker/connection caps, drain interval, batch sizes, retention,
   observability endpoints, logging, env-var overrides) are documented in

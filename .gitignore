@@ -22,3 +22,6 @@ coverage.html
 # Local env / secrets
 *.env
 .env
+
+# mdBook build output (task docs:build)
+/book/

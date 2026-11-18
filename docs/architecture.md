@@ -1,15 +1,14 @@
 # Architecture
 
-How replicare moves data, end to end. This is the newcomer-and-architect
-overview; the exhaustive decision log with rationale lives in
-[`../CLAUDE.md`](../CLAUDE.md), which this page distills. Everything here is
+How replicare moves data, end to end: the overview for newcomers and architects.
+Everything here is
 **engine-neutral** unless noted — Postgres, MySQL, and Redis all ride the same
 pipeline, differing only behind the `Source`/`Sink` driver interfaces.
 
 ## The one non-negotiable
 
 replicare assumes it will **never** have a privileged, durable change stream — no
-Postgres WAL, no MySQL binlog, no durable Redis change feed (CLAUDE.md §1). Change
+Postgres WAL, no MySQL binlog, no durable Redis change feed. Change
 capture must work with ordinary, grantable privileges. That single constraint
 shapes everything below.
 
@@ -32,7 +31,7 @@ them.
    target through an `io.Pipe` that never fully buffers a chunk. Because capture is
    already running and apply is idempotent, **any change during the copy window
    reconciles automatically** — there is **no single frozen snapshot**, which is how
-   replicare handles sources too large to snapshot (CLAUDE.md §4).
+   replicare handles sources too large to snapshot.
 3. **Cutover** flips each table to streaming once its copy completes.
 4. **Streaming** drains changes continuously and applies them idempotently, forever,
    until the daemon is stopped.
@@ -45,7 +44,7 @@ them.
 Most of replicare's design collapses into four decisions. Understand these and the
 rest follows.
 
-### 1. Capture is a *dirty-key set*, not an ordered log (§3.3)
+### 1. Capture is a *dirty-key set*, not an ordered log
 
 Triggers on the source record **only the changed row's primary key** (PK-only
 capture) into a per-table **delta** table — never the full row image. At sync time
@@ -64,7 +63,7 @@ would be **skipped forever**. The set-difference model can't skip: an uncommitte
 late-committing delta is simply "not yet in `track`," caught on the next pass. Rows
 are deleted by unique `delta_id` (never by PK) to survive the read-and-clear race.
 
-### 2. FK connected components are the unit of ordering, parallelism & consistency (§8.1)
+### 2. FK connected components are the unit of ordering, parallelism & consistency
 
 Within a sync, replicare auto-partitions the selected tables into **FK connected
 components** (from the source catalogs, over the selected tables only). No FK edge
@@ -81,7 +80,7 @@ crosses a component boundary, which gives three properties for free:
 A "giant component" (everything wired through a `users`/`tenant` hub table) erases
 parallelism, so replicare **warns** and lets you override.
 
-### 3. Faithful transport — never transform (§1.7, §4.2)
+### 3. Faithful transport — never transform
 
 replicare is a **pipe, not an interpreter**. Values move **verbatim**: the source
 server renders them, the target server's own input function validates them. It
@@ -98,7 +97,7 @@ it **halts loud** rather than corrupting silently. This is a hard product promis
   on incompatible/missing, **warn** on risky-lossy, ok on identical/widening — turning
   mid-stream failures into an actionable report before any sync starts.
 
-### 4. The StateStore is separate from source-side capture (§9)
+### 4. The StateStore is separate from source-side capture
 
 Two different kinds of state, often confused:
 
@@ -141,17 +140,17 @@ the whole keyspace each pass and deletes from diffing the target against the sou
   replays are harmless.
 - **Topology:** user choice — default single→single; **fan-out** (one source → many
   targets) is supported for the relational engines; multi-master and HA/leader
-  election are on the roadmap. A sync is always **single-engine** (§6).
+  election are on the roadmap. A sync is always **single-engine**.
 - **Source bloat:** the delta tables are a high-churn queue on a source you may not
   own, so replicare bounds its footprint with per-table delta tables, a batched
   consumption-gated purge + aggressive autovacuum, and **bounded retention with forced
-  reseed** of an over-cap target (CLAUDE.md §3.4). See
+  reseed** of an over-cap target. See
   [operations](operations.md) and the [reseed state machine](reseed-state-machine.md).
 
 ## Process & observability
 
 One **daemon** runs many named syncs as goroutine worker pools (one process, central
-observability). Everything is visible across **four channels at once** (§10): a
+observability). Everything is visible across **four channels at once**: a
 Prometheus `/metrics` endpoint, OpenTelemetry traces, structured `slog` logs, and a
 `/status` HTTP API. A degrading target must surface in metrics, logs, **and** traces
 simultaneously — see [operations](operations.md) for the metric/span/event

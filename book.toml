@@ -1,0 +1,23 @@
+# The replicare documentation site (https://replicare.rudimk.com), built with mdBook from docs/.
+# Build locally with `task docs:serve`; .github/workflows/docs.yml builds it on every PR and
+# publishes it to GitHub Pages on every push to main.
+
+[book]
+title = "replicare"
+description = "Open-source data replication for Postgres, MySQL and Redis, without a privileged change stream."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "book"
+# A page listed in SUMMARY.md that does not exist is a build error, never a silently created stub.
+create-missing = false
+
+[output.html]
+site-url = "/"
+cname = "replicare.rudimk.com"
+git-repository-url = "https://github.com/rudimk/replicare"
+edit-url-template = "https://github.com/rudimk/replicare/edit/main/{path}"
+
+[output.html.search]
+enable = true

@@ -1,30 +1,29 @@
-# Postgres version support (F3 floor decision)
+# Postgres version support
 
 This records replicare's committed Postgres version support floor and the
-rationale, per the M0 deliverable F3. It is load-bearing: several CLAUDE.md
-decisions hinge on genuinely old source behavior, so the floor is a decision, not
+rationale. It is load-bearing: several design decisions hinge on genuinely old
+source behavior, so the floor is a decision, not
 an afterthought.
 
 ## Decision
 
 | Role | Version in the test harness | Support statement |
 |------|------|-------------------|
-| **Source** | **PostgreSQL 9.6** | Best-effort support back to **9.6**. replicare reads from old sources using conservative, version-tolerant SQL (CLAUDE.md §1.6). |
+| **Source** | **PostgreSQL 9.6** | Best-effort support back to **9.6**. replicare reads from old sources using conservative, version-tolerant SQL. |
 | **Target** | **PostgreSQL 17** | Target should be a modern major (12+); apply uses modern features such as `INSERT ... ON CONFLICT`. |
 
 The CI integration matrix runs **source 9.6 → target 17**.
 
 ## Why 9.6 as the source floor
 
-- **Float fidelity (CLAUDE.md §4.2).** `extra_float_digits = 3` is *critical* for
+- **Float fidelity.** `extra_float_digits = 3` is *critical* for
   round-trippable `float4`/`float8` text on servers **older than 12**. A floor of
   9.6 actually exercises that regime; a floor of 12+ would leave the most
   important float-fidelity claim untested.
 - **No declarative partitioning.** Native partitioning arrived in PG 10, so 9.6
   exercises the "no native partitions" path and the ctid/keyset chunking
-  fallbacks (CLAUDE.md §4.1).
-- **Old PL/pgSQL.** Trigger functions and capture DDL must run on old servers
-  (CLAUDE.md §3.1); 9.6 is a realistic old target for that portability.
+  fallbacks.
+- **Old PL/pgSQL.** Trigger functions and capture DDL must run on old servers; 9.6 is a realistic old target for that portability.
 - **Availability.** `postgres:9.6` is still pullable from Docker Hub for CI.
 
 ## Caveats

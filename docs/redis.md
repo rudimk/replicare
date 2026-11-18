@@ -1,13 +1,12 @@
 # Redis engine
 
 replicare's third engine replicates **Redis → Redis** with the same
-no-privileged-change-stream philosophy as Postgres and MySQL (CLAUDE.md §3.2), but
+no-privileged-change-stream philosophy as Postgres and MySQL, but
 a very different mechanism: Redis has no WAL/binlog, no triggers, and no way for us
 to write capture state onto the source, so CDC is **full-keyspace `SCAN`
 reconciliation** rather than trigger deltas. It reuses the engine-neutral
 copy/apply/state/config/observability layers, plus **one additive delete-
-reconciliation seam** that the relational engines don't need. The design and
-milestone plan live in [`../.sisyphus/redis-plan.md`](../.sisyphus/redis-plan.md).
+reconciliation seam** that the relational engines don't need.
 
 > **Status: shipped.** The Redis engine runs end to end — value-faithful
 > `DUMP`/`RESTORE` copy, reconciliation-driven streaming upserts, a durable
@@ -41,8 +40,7 @@ There is no change stream to tail, so replicare **re-reads the source keyspace**
 
 replicare moves each value as its **RDB-serialized `DUMP` payload** and applies it
 with `RESTORE … REPLACE`. It never interprets, coerces, or reconstructs a value —
-the same faithful-transport promise as the relational text `COPY` path (CLAUDE.md
-§1.7). All six native types (string, list, set, zset, hash, stream) plus TTLs move
+the same faithful-transport promise as the relational text `COPY` path. All six native types (string, list, set, zset, hash, stream) plus TTLs move
 this way; a stream's consumer **groups and PEL are preserved** in the payload.
 
 Transport is **value-faithful, not byte-faithful**: `RESTORE` re-encodes on the
@@ -88,7 +86,7 @@ value-transport gates that pre-flight (`validate` and daemon startup) **blocks**
    replicare treats a blocked `MODULE LIST` as "no modules" and proceeds, rather
    than failing to start. Such servers can't load modules through `MODULE` anyway,
    so this only softens the pre-flight gate — a module-typed value, if somehow
-   present, still fails **loudly** at `RESTORE` (§1.7), never silently. `+module|list`
+   present, still fails **loudly** at `RESTORE`, never silently. `+module|list`
    in the target ACL preset is therefore best-effort: grant it where the provider
    supports it; where it's blocked, replicare degrades on its own.
 
@@ -100,8 +98,7 @@ Both follow from the v1 architecture and are worth knowing up front.
 
 replicare's own operational state — which syncs exist, per-unit copy progress,
 per-target cursors, and the single-active ownership lock — lives in a **Postgres**
-state store (`state_store.engine: postgres`), *regardless of the data engine*
-(CLAUDE.md §9). This is a real wart for an all-Redis shop: to replicate Redis→Redis
+state store (`state_store.engine: postgres`), *regardless of the data engine*. This is a real wart for an all-Redis shop: to replicate Redis→Redis
 you also point replicare at a small Postgres for its bookkeeping.
 
 Unlike the relational engines, though, Redis writes **nothing** to the source — its
@@ -164,7 +161,7 @@ The full `redis:` block reference is in
 | `notifications` | enable the lossy keyspace-notification accelerator (default off) |
 | `ttl_mode` | `relative` (default, skew-safe) \| `absttl` (opt-in, trusted clocks) |
 
-The **single-engine rule** (§6) is enforced: a Redis source's targets must all be
+The **single-engine rule** is enforced: a Redis source's targets must all be
 Redis — never cross-engine.
 
 ## Selection — key-pattern globs
@@ -245,10 +242,10 @@ queue to bound).
 Redis 6+ ACLs; no `@admin`/`@all`/`DEBUG`/`CONFIG`/`KEYS`/`FLUSH*` in the baseline.
 Ready-to-edit presets ship in the repo:
 
-- **Source** ([`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt)):
+- **Source** ([`../deploy/acl-source-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-source-redis.txt)):
   read-only — `+scan +type +dump +pttl +exists +memory|usage` (plus `+ping +info`).
   replicare writes **nothing** to the source.
-- **Target** ([`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt)):
+- **Target** ([`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt)):
   `+restore +del +scan +exists +module|list` (plus `+ping +info`).
 
 > **Foot-gun:** `RESTORE` is an `@dangerous` command, so it is **excluded from the
@@ -291,10 +288,10 @@ a one-way Redis sync is byte-for-byte unchanged:
   Single source → single target only (a mesh is different: each edge is its own job).
 - **Sentinel-hardened failover** — wired but not hardened/tested.
 - **Dragonfly** — blocked (RDB compat unverified).
-- **Command-reconstruction / big-key incremental transport** — refused (§1.7).
+- **Command-reconstruction / big-key incremental transport** — refused (it would transform values; transport is faithful only).
 - **Cross-key/group atomicity** — apply is per-key idempotent, **not** wrapped in
   `MULTI`/`EXEC` (a deliberate departure from the relational per-component
-  atomicity in §8.1). This holds in mesh mode too: each key's value+register pair is
+  atomicity). This holds in mesh mode too: each key's value+register pair is
   atomic, but there is no cross-key transaction.
 - **Cross-engine and point-in-time consistency** — never / deferred, as for the other
   engines. Redis converges eventually and self-heals. **Multi-master IS supported**
@@ -312,9 +309,9 @@ per-shard — all before any sync starts.
 
 ## Try it end-to-end
 
-[`examples/demo-redis/`](../examples/demo-redis/) is a runnable demo: an old 6.2
+[`examples/demo-redis/`](https://github.com/rudimk/replicare/tree/main/examples/demo-redis) is a runnable demo: an old 6.2
 source, a modern 7.4 target, a Postgres state-store sidecar, and replicare —
 replicating `app:*` keys. Build the image (`task docker`), then
 `cd examples/demo-redis && docker compose up` and watch the seeded keys, a live
 `SET`, and a `DEL` propagate. The config is
-[`examples/demo-redis/config.yml`](../examples/demo-redis/config.yml).
+[`examples/demo-redis/config.yml`](https://github.com/rudimk/replicare/blob/main/examples/demo-redis/config.yml).

@@ -7,7 +7,7 @@ schema is an engine-neutral envelope plus a typed per-engine connection block.
 unset) or `${VAR:-default}` (falls back to `default`) — not just secrets. Expanded
 scalars are re-typed on decode, so it works for ports, hosts, addresses, and
 booleans too (e.g. `port: ${PGPORT:-5432}`), matching the "env-var overrides for any
-field" goal (CLAUDE.md §11). Keeping passwords out of the file is the common case.
+field" goal. Keeping passwords out of the file is the common case.
 An unset `${VAR}` with no default is a hard config-load error (exit 2).
 
 Validate a config without connecting-and-running via `replicare validate <config>`.
@@ -331,7 +331,7 @@ declared as a `clusters:` entry, which is exempt.
 
 ## Full example
 
-See [`../examples/replicare.yml`](../examples/replicare.yml) for a fully annotated
+See [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml) for a fully annotated
 config. For one config that runs a Postgres pipeline and a Redis pipeline
 side by side (the per-sync single-engine model), see
-[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
+[`../examples/postgres-and-redis.yml`](https://github.com/rudimk/replicare/blob/main/examples/postgres-and-redis.yml).

@@ -13,7 +13,7 @@ user hits:
 - **unknown engine, or a missing engine block** → `engine: postgres|mysql|redis`
   must match a present typed block (`postgres:` / `mysql:` / `redis:`).
 - **a sync references an undefined source/target**, or **crosses engines** → a sync
-  is single-engine; its source and all targets must share one engine (§6).
+  is single-engine; its source and all targets must share one engine.
 
 `replicare validate <config>` reports these without connecting. Exit `2` is
 "config/usage"; exit `1` is a clean pre-flight **BLOCK** or a connection failure
@@ -135,7 +135,7 @@ operational wrinkles.
 - **Every apply fails loud with a `RESTORE` permission error.** `RESTORE` is an
   `@dangerous` ACL command and is **not** in the usual read-write presets — grant it
   explicitly with `+restore` on the target role (see
-  [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt)).
+  [`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt)).
 - **A copy refuses on a big key.** Above `big_key_refuse_bytes` replicare blocks
   loud rather than doing torn incremental transport (which would be unfaithful).
   Raise the cap if the key genuinely must replicate, or exclude it. Below the cap

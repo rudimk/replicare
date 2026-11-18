@@ -64,7 +64,7 @@ or keyword string; empty uses the standard `PG*` environment variables.
   (repeated `--ops` bursts) — run it **while replicare does its initial copy** to
   exercise the live-source cyclic-copy skew: parent rows (tenants/users) inserted
   mid-copy are referenced by children copied from a later snapshot, a transient FK
-  the cyclic copy must recover from (§3.3/§4) rather than crash-loop on. Pair with
+  the cyclic copy must recover from rather than crash-loop on. Pair with
   `--cyclic`. `--node-id K` (default 0) selects this writer's **key slice** for
   active-active testing — see [Active-active](#active-active-multi-master-load-testing);
   0 is the default single-writer (active-passive) behaviour, unchanged.
@@ -109,7 +109,7 @@ well under ~500M rows per node (the harness refuses a scale that approaches the 
 ### Three-node mesh example
 
 Assume a running replicare `clusters:` mesh over three Postgres nodes `A`, `B`, `C`
-(config per [multi-master.md](../../docs/multi-master.md)), with `$A`/`$B`/`$C` their DSNs.
+(config per [multi-master.md](https://replicare.rudimk.com/multi-master.html)), with `$A`/`$B`/`$C` their DSNs.
 
 ```sh
 # 1. Schema on every node (data-only replication; targets must pre-exist).

@@ -1,7 +1,7 @@
 # Operating replicare
 
-Practical guidance for running replicare in production. Design rationale lives in
-[`../CLAUDE.md`](../CLAUDE.md); this is the operator's view.
+Practical guidance for running replicare in production: the operator's view. How it
+works underneath is in [Architecture](architecture.md).
 
 ## Lifecycle of a sync
 
@@ -302,7 +302,7 @@ inserts, updates and deletes rows.
 when a trigger actually has to be created or replaced (a new table, or a trigger someone removed).
 Adding a trigger needs a lock that a running vacuum holds. replicare waits at most 2 seconds for it,
 backs off and retries, and after repeated failures stops with an error naming the table, rather than
-holding the application up (see CLAUDE.md §3.1). A normal restart, with every trigger already in
+holding the application up. A normal restart, with every trigger already in
 place, takes no lock on application tables at all.
 
 **Heavy maintenance that locks a whole table** — `VACUUM FULL`, `CLUSTER`, `pg_repack`,
@@ -319,7 +319,7 @@ place, takes no lock on application tables at all.
 **During the initial copy** two more things apply:
 
 - Copy reads are long: each chunk, and a table loaded in one statement (a self-referencing table
-  whose link column cannot be emptied, CLAUDE.md §4.1), keeps a read open for as long as it runs.
+  whose link column cannot be emptied), keeps a read open for as long as it runs.
   While it runs, vacuum cannot remove rows that read might still need to see, anywhere in the
   database.
 - An `ALTER TABLE` (or `VACUUM FULL` / `CLUSTER`) on a table being copied waits for that read to
@@ -362,7 +362,7 @@ caught-up single→single Postgres sync you will typically see `source_db_bytes`
 
 1. **Trigger CDC writes to the source.** replicare's own `replicare` schema lives on the *source*:
    per-table delta and track tables, plus trigger functions. Under churn those delta tables are a
-   high-write queue that bloats before autovacuum/purge reclaims it (CLAUDE.md §3.4). None of this
+   high-write queue that bloats before autovacuum/purge reclaims it. None of this
    exists on the target.
 2. **Unreplicated tables count too.** `pg_database_size` covers the *whole* database, so any table
    on the source you did not select (audit logs, staging tables, keyless tables skipped for lacking
@@ -407,7 +407,7 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | **Redis only** — keys `DEL`ed by the target-vs-source delete sweep. Unset for Postgres/MySQL. |
 
 The per-table backlog/lag gauges also carry a `component` label — the table's FK connected
-component (its first member; CLAUDE.md §8.1) — so you can roll lag and backlog up per component
+component (its first member) — so you can roll lag and backlog up per component
 (`max by (component) (replicare_replication_lag_seconds)`).
 
 The headline signals to watch are `replicare_source_up`, `replicare_target_up`, `replicare_delta_backlog_rows`,
@@ -417,7 +417,7 @@ and [When a target goes down](#when-a-target-goes-down)).
 
 A ready-to-import **Grafana dashboard** over these metrics — per-table backlog/lag, catch-up,
 initial-copy progress, throughput, and errors, with a configurable Prometheus data source — lives at
-[`deploy/grafana/`](../deploy/grafana/README.md).
+[Grafana dashboard](grafana-dashboard.md).
 
 ### Traces (OpenTelemetry)
 
@@ -434,7 +434,7 @@ fixed registry:
 | `replicare.preflight` | the start-up compatibility check |
 
 A drain/apply span against an **unreachable** target is recorded with **error status** plus the
-backlog/age attributes, so the stall and its blast radius are visible in the trace timeline (§3.4).
+backlog/age attributes, so the stall and its blast radius are visible in the trace timeline.
 
 ### Structured logs (slog)
 
@@ -450,7 +450,7 @@ can grep/alert on:
 | `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
 | `preflight.blocked` | ERROR | a sync refused to start on a blocking incompatibility |
 
-A degrading target surfaces in **metrics, traces, AND logs at once** — never just one channel (§3.4).
+A degrading target surfaces in **metrics, traces, AND logs at once** — never just one channel.
 
 ## The status HTTP API
 
@@ -510,7 +510,7 @@ kubectl exec <pod> -- /usr/local/bin/replicare status /etc/replicare/config.yml
 kubectl exec <pod> -- /usr/local/bin/replicare verify /etc/replicare/config.yml
 ```
 
-The runtime image is [Chainguard `wolfi-base`](../Dockerfile), which *does* include `/bin/sh` if you
+The runtime image is [Chainguard `wolfi-base`](https://github.com/rudimk/replicare/blob/main/Dockerfile), which *does* include `/bin/sh` if you
 want an interactive session (`kubectl exec -it <pod> -- /bin/sh`), but the direct-exec form above is
 all you need for a progress check.
 
@@ -522,7 +522,7 @@ share an engine, but a config may hold a Postgres sync and a Redis sync side by 
 runs them concurrently (each under its own single-active ownership lock).
 
 A complete, annotated version of the example below is at
-[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
+[`../examples/postgres-and-redis.yml`](https://github.com/rudimk/replicare/blob/main/examples/postgres-and-redis.yml).
 
 ```yaml
 state_store:                     # ALWAYS Postgres — even for a Redis-only deployment
@@ -599,7 +599,7 @@ ownership.
 replicare replicates row **values** faithfully — the integer `id` a sequence produced lands on the
 target verbatim (`OVERRIDING SYSTEM VALUE` on Postgres, the explicit value on MySQL). What it does
 **not** replicate is the sequence *object's counter* — Postgres `last_value`, MySQL's per-table
-`AUTO_INCREMENT` — because that is schema-object state and replicare is data-only (`CLAUDE.md` §7).
+`AUTO_INCREMENT` — because that is schema-object state and replicare is data-only.
 
 For a **passive replica this is harmless**: the target never calls `nextval()` for a replicated
 table (the applier always supplies explicit ids), so the stale counter just sits unused. It bites
@@ -702,21 +702,21 @@ wedge.
 
 ## Least-privilege grants
 
-See [`../deploy/grants-source.sql`](../deploy/grants-source.sql) and
-[`../deploy/grants-target.sql`](../deploy/grants-target.sql). Note the documented asymmetry:
+See [`../deploy/grants-source.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source.sql) and
+[`../deploy/grants-target.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target.sql). Note the documented asymmetry:
 installing capture needs only the `TRIGGER` privilege, but `capture remove` (dropping the trigger)
 requires table ownership. For the **true zero-database-grant** path, pre-create the `replicare`
 capture schema (and, if the state store lives there, the `replicare_state` schema) owned by the
 daemon role — the migration runner then issues no `CREATE SCHEMA` and needs no `CREATE`-on-database
-privilege (CLAUDE.md §12). See the [Postgres engine page](postgres.md#least-privilege).
+privilege. See the [Postgres engine page](postgres.md#least-privilege).
 
-For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql) and
-[`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql). MySQL has no such asymmetry
+For **MySQL**, use [`../deploy/grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql) and
+[`../deploy/grants-target-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target-mysql.sql). MySQL has no such asymmetry
 — the `TRIGGER` privilege covers both `CREATE TRIGGER` and `DROP TRIGGER`, so the daemon role can
 fully uninstall capture on its own.
 
-For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt)
-and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The source role is read-only
+For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-source-redis.txt)
+and [`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt). The source role is read-only
 (`+ping +info +scan +type +dump +pttl +exists +memory|usage`); the target role needs `+ping +info
 +restore +del +scan +exists +module|list`. Both roles need **`+info`** (pre-flight reads `INFO
 server`), and in **cluster** mode both also need `+cluster|shards +cluster|slots` and the same user
@@ -734,16 +734,16 @@ Three manual load-and-verify harnesses drive replicare against broad, high-volum
 assert the target **converges** with the source under continuous churn. They are developer/test
 tools, run from a checkout (`go run ./test/…`), **not** part of the shipped binary:
 
-- **Postgres** — [`test/loadgen`](../test/loadgen/README.md). Seeds a rich 10-table schema chosen to
+- **Postgres** — [`test/loadgen`](load-testing-postgres.md). Seeds a rich 10-table schema chosen to
   exercise the hard paths (FK components, composite/UUID/text PKs, PK-changing `SKU` renames,
   `GENERATED` columns, a keyless table it must skip; optional FK cycles under `--cyclic`), churns
   random inserts/updates/deletes, and `verify`s per-table row-count + ordered content checksum.
-- **MySQL** — [`test/loadgen-mysql`](../test/loadgen-mysql/README.md). The MySQL sibling of the
+- **MySQL** — [`test/loadgen-mysql`](load-testing-mysql.md). The MySQL sibling of the
   Postgres harness: the same 10-table schema in MySQL types (`AUTO_INCREMENT`, `JSON`, composite
   `VARCHAR` PK, `GENERATED … STORED`, a keyless table), generated with **MySQL-5.7-safe** SQL (no
   `generate_series`/CTE/window functions), churned the same way, and `verify`d with a cross-version,
   order-independent content checksum (`BIT_XOR`-folded per-row hashes).
-- **Redis** — [`test/loadgen-redis`](../test/loadgen-redis/README.md). Seeds every value type
+- **Redis** — [`test/loadgen-redis`](load-testing-redis.md). Seeds every value type
   (string/hash/list/set/zset/stream + big/TTL'd keys) plus a source-only `lgskip:*` cohort the sync
   must exclude, churns value mutations, `RENAME`s, and heavy `DEL`s (the delete-reconciliation
   stress), and `verify`s a version-independent, type-aware content hash + TTL presence. Standalone,

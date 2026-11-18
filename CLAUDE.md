@@ -723,6 +723,17 @@ without changing the single-static-binary distribution.
   container → restart loop). `replicare status` flags paused syncs with a `[PAUSED]` banner.
 - **Distribution:** single static binary + sample `systemd` unit now; **Helm chart later**
   (YAML injected via chart values — no rush).
+- **Docs site (decision).** User docs are an **mdBook** site served at **replicare.rudimk.com**:
+  `book.toml` at the repo root, source **`docs/`** (table of contents in `docs/SUMMARY.md`),
+  built on every PR and published to GitHub Pages on push to `main` by
+  `.github/workflows/docs.yml` (`task docs:serve` locally). **This file (CLAUDE.md) and the
+  `.sisyphus/` plans are never published and never mentioned or linked from the site** — write
+  site docs self-contained. Docs that live next to their code (the Helm chart README, the
+  `test/loadgen*` READMEs, `CHANGELOG.md`) are pulled in with `{{#include}}` pages and must use
+  absolute links (`https://replicare.rudimk.com/<page>.html`); links from `docs/` to other repo
+  files go to GitHub (`https://github.com/rudimk/replicare/blob/main/...`). `internal/docscheck`
+  enforces all of it in CI: every page in SUMMARY.md, every link and `#anchor` resolves, no
+  mention of CLAUDE.md or the plans.
 
 ---
 
@@ -844,6 +855,7 @@ invasive.
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
 | Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
+| Docs site | **mdBook from `docs/`**, GitHub Pages via `.github/workflows/docs.yml`, at replicare.rudimk.com. **Never publish, mention or link CLAUDE.md or `.sisyphus/`**; outside-`docs/` files via `{{#include}}` with absolute links; `internal/docscheck` enforces links, anchors and the ban (§11). |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
 | Compatibility | **Must read from very old source Postgres**; keep source SQL conservative; target may use modern features. |
 | Redis engine fit | **Overload the neutral vocabulary** (`TableRef`→ replication unit, `KeyValues`→ one `[]byte` key, text COPY→ private binary DUMP framing); **single-member acyclic components + a thin `ApplyTx`**; **near-zero neutral edits** — reuse copy/apply/state/config/observability, plus one additive optional `KeyLister`/`KeyExister` delete-reconciliation seam and a `Schema.Capabilities` field. |
