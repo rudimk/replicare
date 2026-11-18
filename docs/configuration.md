@@ -1,16 +1,22 @@
-# Configuration reference
+# Configuration Reference
 
-replicare is configured by a single YAML file (passed to every command). The
-schema is an engine-neutral envelope plus a typed per-engine connection block.
+This page is the reference for `replicare`'s configuration file. `replicare` is configured by a
+single YAML file, which is passed to every command; it's made up of an engine-neutral
+envelope(logging, observability, the state store and the syncs themselves) plus a typed
+connection block for each engine. The page goes through every section of that file in turn, lists each
+field with its type and default, and explains the behaviour behind the fields that need more
+than a line in a table.
 
-**Any** string value may reference the environment as `${VAR}` (required — errors if
-unset) or `${VAR:-default}` (falls back to `default`) — not just secrets. Expanded
-scalars are re-typed on decode, so it works for ports, hosts, addresses, and
-booleans too (e.g. `port: ${PGPORT:-5432}`), matching the "env-var overrides for any
-field" goal. Keeping passwords out of the file is the common case.
-An unset `${VAR}` with no default is a hard config-load error (exit 2).
+## Environment variables & validation
 
-Validate a config without connecting-and-running via `replicare validate <config>`.
+*Any* string value in the file can reference the environment, not just secrets. `${VAR}` is
+required and errors if it's unset, while `${VAR:-default}` falls back to `default`. Expanded
+scalars are re-typed on decode, so this works for ports, hosts, addresses and booleans too(for
+example `port: ${PGPORT:-5432}`); we built it this way so that env-var overrides work for any
+field, though keeping passwords out of the file is still the common case. An unset `${VAR}`
+with no default is a hard config-load error(exit 2).
+
+To check a config without connecting and running it, use `replicare validate <config>`.
 
 ## Top-level structure
 
@@ -25,7 +31,7 @@ nodes:          { ... }   # peer endpoints for active-active clusters (optional)
 clusters:       [ ... ]   # active-active (multi-master) groups (optional)
 ```
 
-`nodes` and `clusters` are **optional and additive** — a config with neither behaves
+`nodes` and `clusters` are optional and purely additive; a config with neither of them behaves
 exactly like a one-way daemon. See [Active-active clusters](#active-active-clusters-nodes-and-clusters)
 and [Active-active replication](active-active.md).
 
@@ -43,22 +49,22 @@ and [Active-active replication](active-active.md).
 | `metrics_addr` | listen addr, e.g. `:9090` | off | serves Prometheus `/metrics` |
 | `status_addr` | listen addr, e.g. `:8080` | off | serves `/status`, `/healthz`, and `/metrics` |
 | `otlp_endpoint` | host:port, e.g. `otel:4317` | off | exports OTel traces to an OTLP/gRPC collector |
-| `stall_timeout` | duration (`2m`, `0`, negative) | `2m` | how long a streaming loop may go without completing a pass before `/healthz` reports unhealthy (so Kubernetes restarts a wedged pod). Must exceed your slowest drain pass. Unset/`0` = `2m`; a negative value disables the check |
+| `stall_timeout` | duration(`2m`, `0`, negative) | `2m` | how long a streaming loop may go without completing a pass before `/healthz` reports unhealthy(so Kubernetes restarts a wedged pod). It has to be longer than the slowest drain pass. Unset / `0` means `2m`; a negative value disables the check |
 
-Leaving an address empty disables that endpoint. When `metrics_addr` and
-`status_addr` differ, `/metrics` is served on both.
+Leaving an address empty disables that endpoint. When `metrics_addr` and `status_addr` differ,
+`/metrics` is served on both.
 
-`/healthz` reflects **streaming liveness**, not target reachability: a loop that
-is cycling — even one retrying against a down target — stays healthy; only a loop
-that stops completing passes (a hung query on a dropped socket) trips
-`stall_timeout` and fails the probe. The daemon also reconnects a dropped
-source/target connection on its own between passes, so a transient blip recovers
-without a restart; the probe is the backstop for a true wedge.
+`/healthz` reflects streaming liveness, and not target reachability. A loop that's still
+cycling - even one that's retrying against a down target - stays healthy; only a loop that
+stops completing passes(say, a query hung on a dropped socket) trips `stall_timeout` and fails
+the probe. The daemon also reconnects a dropped source / target connection on its own between
+passes, so a transient blip recovers without a restart, and the probe is only there as the
+backstop for a true wedge.
 
 ## Endpoints: `state_store`, `sources`, `targets`
 
-An endpoint is an engine name plus a typed connection block. `sources` and
-`targets` are maps of name → endpoint; `state_store` is a single endpoint.
+An endpoint is an engine name plus a typed connection block. `sources` and `targets` are maps
+from a name to an endpoint, while `state_store` is a single endpoint.
 
 ```yaml
 sources:
@@ -77,86 +83,88 @@ sources:
 
 ### Postgres connection block
 
-Used when an endpoint's `engine` is `postgres`. See [the Postgres engine page](postgres.md)
-for the CDC model, FK-component handling, faithful `COPY` transport, and the
-effectively-exactly-once bonus when the state store *is* the target.
+This block is used when an endpoint's `engine` is `postgres`. See
+[the Postgres engine page](postgres.md) for the capture model, how FK components are handled,
+the faithful `COPY` transport, and the effectively-exactly-once bonus when the state store *is*
+the target.
 
 | Field | Type | Notes |
 |---|---|---|
 | `host` | string | |
 | `port` | int | usually 5432 |
 | `database` | string | |
-| `user` | string | the least-privilege replicare role |
+| `user` | string | the least-privilege `replicare` role |
 | `password` | string | use `${VAR}` |
-| `sslmode` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode (libpq semantics) |
+| `sslmode` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode(libpq semantics) |
 | `params` | map | extra key=value connection parameters |
 
 ### MySQL connection block
 
-Used when an endpoint's `engine` is `mysql`. See [the MySQL engine page](mysql.md)
-for the two operational wrinkles (a MySQL sync still keeps its state store on
-Postgres; MySQL syncs are strictly at-least-once).
+This block is used when an endpoint's `engine` is `mysql`. See [the MySQL engine page](mysql.md)
+for the two operational wrinkles: a MySQL sync still keeps its state store on Postgres, and
+MySQL syncs are strictly at-least-once.
 
 | Field | Type | Notes |
 |---|---|---|
 | `host` | string | |
 | `port` | int | default 3306 |
-| `database` | string | the DSN default database only — selection may reference other databases as `db.table` (a MySQL schema *is* a database) |
-| `user` | string | the least-privilege replicare role |
+| `database` | string | the DSN default database only - selection may reference other databases as `db.table`(a MySQL schema *is* a database) |
+| `user` | string | the least-privilege `replicare` role |
 | `password` | string | use `${VAR}` |
-| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode (same spectrum as Postgres `sslmode`); default `prefer` |
-| `local_infile` | bool | hint that the target permits `LOAD DATA LOCAL INFILE`, the copy/apply transport (**required** in v1). replicare probes it at connect and halts loud if off — no INSERT fallback yet. A server system variable, not a grant |
+| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | TLS mode(the same spectrum as Postgres `sslmode`); default `prefer` |
+| `local_infile` | bool | a hint that the target permits `LOAD DATA LOCAL INFILE`, which is the copy / apply transport(required in v1). `replicare` probes it at connect and halts loudly if it's off; there's no INSERT fallback yet. It's a server system variable, not a grant |
 | `params` | map | extra key=value DSN parameters |
 
 ### Redis connection block
 
-Used when an endpoint's `engine` is `redis`. See [the Redis engine page](redis.md)
-for how Redis CDC works (SCAN reconciliation + a target-vs-source delete sweep, not
-triggers) and its two wrinkles (a Redis sync still keeps its state store on
-Postgres; copy progress is coarse). Redis is topology-shaped rather than a single
-host, and carries engine-specific selection and CDC tuning.
+This block is used when an endpoint's `engine` is `redis`. Redis is shaped by its topology
+rather than by a single host, and its block also carries engine-specific selection and capture
+tuning. See [the Redis engine page](redis.md) for how Redis change capture works(SCAN
+reconciliation plus a target-vs-source delete sweep, rather than triggers) and for its two
+wrinkles: a Redis sync still keeps its state store on Postgres, and copy progress is coarse.
 
 | Field | Type | Notes |
 |---|---|---|
-| `mode` | `standalone`\|`cluster`\|`sentinel` | default `standalone`; `sentinel` is parsed but experimental (failover not hardened in v1) |
-| `host` / `port` | string / int | standalone seed (port default 6379) |
-| `nodes` | list of `host:port` | seed nodes for `cluster`/`sentinel` (also allowed for standalone) |
-| `db` | int | logical DB index (standalone only; **must be 0 in cluster**) |
-| `user` / `password` | string | ACL user (Redis 6+); use `${VAR}` for the password |
-| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | same spectrum as Postgres `sslmode`; **default `disable`** — note this diverges from Postgres/MySQL (`prefer`), so set it explicitly to avoid plaintext |
+| `mode` | `standalone`\|`cluster`\|`sentinel` | default `standalone`; `sentinel` is parsed but experimental(failover isn't hardened in v1) |
+| `host` / `port` | string / int | the standalone seed(port defaults to 6379) |
+| `nodes` | list of `host:port` | seed nodes for `cluster` / `sentinel`(also allowed for standalone) |
+| `db` | int | logical DB index(standalone only; it has to be 0 in cluster) |
+| `user` / `password` | string | ACL user(Redis 6+); use `${VAR}` for the password |
+| `tls` | `disable`\|`allow`\|`prefer`\|`require`\|`verify-ca`\|`verify-full` | the same spectrum as Postgres `sslmode`. The default is `disable`, which differs from Postgres / MySQL(`prefer`), so set it explicitly to avoid plaintext |
 | `sentinel_master` | string | required when `mode: sentinel` |
-| `read_from_replica` | bool | offload **value** reads to replicas; delete detection still reads the master (a lagging replica would cause false deletes) |
-| `types` | list | optional type filter: `string`/`list`/`set`/`zset`/`hash`/`stream` (needs Redis 6.0+ for server-side `SCAN … TYPE`) |
-| `scan_count` | int | `SCAN COUNT` hint per call (default 512); distinct from the neutral drain batch |
-| `reconcile_interval` | duration | cadence of the rolling upsert reconciliation scan |
-| `delete_sweep_interval` | duration | cadence of the target-vs-source delete sweep (bounds delete-propagation latency) |
-| `big_key_warn_bytes` | size | DUMP-and-warn above this (`MEMORY USAGE`); `0` = off |
-| `big_key_refuse_bytes` | size | block loud above this; must be ≥ `big_key_warn_bytes` |
-| `notifications` | bool | enable the lossy keyspace-notification latency accelerator (default off; never trusted for correctness) |
-| `ttl_mode` | `relative`\|`absttl` | `relative` (default) is clock-skew-safe; `absttl` is opt-in for trusted clocks |
+| `read_from_replica` | bool | offloads *value* reads to replicas; delete detection still reads the master, since a lagging replica would cause false deletes |
+| `types` | list | an optional type filter: `string`/`list`/`set`/`zset`/`hash`/`stream`(needs Redis 6.0+ for server-side `SCAN … TYPE`) |
+| `scan_count` | int | the `SCAN COUNT` hint per call(default 512); it's separate from the neutral drain batch |
+| `reconcile_interval` | duration | how often the rolling upsert reconciliation scan runs |
+| `delete_sweep_interval` | duration | how often the target-vs-source delete sweep runs(this bounds how long a delete takes to propagate) |
+| `big_key_warn_bytes` | size | DUMP and warn above this size(`MEMORY USAGE`); `0` turns it off |
+| `big_key_refuse_bytes` | size | block loudly above this size; it has to be at least `big_key_warn_bytes` |
+| `notifications` | bool | enables the lossy keyspace-notification latency accelerator(off by default, and never trusted for correctness) |
+| `ttl_mode` | `relative`\|`absttl` | `relative`(the default) is safe under clock skew; `absttl` is opt-in, for trusted clocks |
 | `params` | map | extra engine-internal params |
 
-Selection for a Redis sync is **key-pattern globs** (Redis `SCAN … MATCH`
-semantics), not `schema.table` — see [Selection](#selection) below.
+Selection for a Redis sync uses key-pattern globs(with Redis `SCAN … MATCH` semantics), and not
+`schema.table`; see [Selection](#selection) below.
 
-**`state_store`** is where replicare keeps its *own* operational state (sync
-progress, cursors, the ownership lock) — a dedicated `replicare_state` schema it
-creates and owns. It may point at the target DB, the source DB, or a separate
-Postgres. (This is distinct from the source-side delta/track tables, which always
-live on the source. Redis writes nothing to the source at all, so a Redis sync's
-*only* durable state is here — see [the Redis engine page](redis.md).)
+### The state store
+
+`state_store` is where `replicare` keeps its *own* operational state(sync progress, cursors and
+the ownership lock), in a dedicated `replicare_state` schema that it creates and owns. It can
+point at the target database, the source database or a separate Postgres. This is a different
+thing from the source-side delta / track tables, which always live on the source. Redis writes
+nothing to the source at all, so a Redis sync's *only* durable state lives here; see
+[the Redis engine page](redis.md).
 
 ## `syncs`
 
-A sync is one replication job: a source, one or more targets, and a table
-selection. All targets of a sync must use the same engine as the source
-(never cross-engine).
+A sync is one replication job: a source, one or more targets, and a table selection. Every
+target of a sync has to use the same engine as its source, since `replicare` never replicates
+across engines.
 
-**Fan-out** (a sync with several `targets`) copies and streams each target
-**independently**: initial-copy progress is checkpointed per `(sync, target, table)`,
-so one slow or restarted target never disturbs another's watermark, and each
-converges on its own. (This is also the per-node building block of an
-active-active [cluster](#active-active-clusters-nodes-and-clusters).)
+A sync with several `targets`(fan-out) copies and streams to each target independently.
+Initial-copy progress is checkpointed per `(sync, target, table)`, so one slow or restarted
+target never disturbs another's watermark, and each target converges on its own. This is also
+the per-node building block of an active-active [cluster](#active-active-clusters-nodes-and-clusters).
 
 ```yaml
 syncs:
@@ -172,133 +180,139 @@ syncs:
 
 ### Keeping DR counters warm (`sync_sequences`)
 
-`sync_sequences` is an opt-in, one-way/DR-only switch (default **off**). With it on, the
-daemon advances each replicated table's owned identity/serial/`AUTO_INCREMENT` counter on
-the target to `max(id)+1` on a lazy interval during streaming — the same mechanism as the
+`sync_sequences` is an opt-in switch for one-way / DR setups only, and it's off by default.
+With it on, the daemon advances each replicated table's owned identity / serial /
+`AUTO_INCREMENT` counter on the target to `max(id)+1`, on a lazy interval during streaming.
+It's the same mechanism as the
 [`reseed-sequences`](cli.md#reseed-sequences-config---sync-name---target-name---dry-run)
-command, kept running — so a promoted DR node has nothing sequence-related to do at cutover.
-Enabling it adds a steady-state **target** grant (Postgres `UPDATE` on each sequence, MySQL
-`ALTER` on each table); a missing grant is logged and retried, never fatal. It is **refused
-at config load** when the target is also an active-active cluster member (a mesh counter
-advance is silent data loss — use UUID/ULID keys there). See
-[operations → Sequences & identity counters](operations.md#keeping-counters-warm-continuously-sync_sequences).
+command, just kept running, so a promoted DR node has nothing sequence-related left to do at
+cutover.
+
+Turning it on adds a steady-state grant on the *target*(Postgres `UPDATE` on each sequence,
+MySQL `ALTER` on each table). A missing grant is logged and retried, and never fatal. The
+setting is refused at config load when the target is also a member of an active-active
+cluster, since advancing a counter across a mesh is silent data loss; use UUID / ULID keys
+there instead. See
+[sequences & identity counters in operations](operations.md#keeping-counters-warm-continuously-sync_sequences).
 
 ### Pausing a sync (`enabled`)
 
-`enabled` is a per-pipeline pause switch. It is a pure opt-out: **omit it (or set
-`true`) and the sync runs** — a config written before this field existed is
-unchanged. Set `enabled: false` to **pause** that one sync; other syncs (and
-clusters) in the same config keep running.
+`enabled` is a per-pipeline pause switch, and it's a pure opt-out. Leave it out(or set it to
+`true`) and the sync runs, so a config written before this field existed behaves exactly as it
+did. Setting `enabled: false` pauses that one sync, while other syncs(and clusters) in the
+same config keep running.
 
-| `enabled` | Behavior |
+| `enabled` | Behaviour |
 |---|---|
-| unset / `true` | The daemon brings the sync up and streams it (default). |
-| `false` | The daemon **skips it at startup** and does not take its ownership lock. No copy, no streaming, no capture install for a never-started sync. |
+| unset / `true` | The daemon brings the sync up and streams it(the default). |
+| `false` | The daemon skips it at startup, and doesn't take its ownership lock. There's no copy, no streaming, and no capture install for a sync that's never been started. |
 
-**Pause is data-loss-free, by design.** If a sync was already running when you pause
-it, its **source capture triggers are left in place**, so change deltas keep queuing
-on the source while it's paused. Setting `enabled: true` again (and restarting) resumes
-it and **drains the accumulated backlog** — the target catches up with nothing lost.
+Pausing is data-loss-free by design. If a sync was already running when it's paused, its
+source capture triggers are left in place, so change deltas keep queuing on the source the
+whole time it's paused. Setting `enabled: true` again(and restarting) resumes the sync and
+drains the accumulated backlog, so the target catches up with nothing lost.
 
-**The tradeoff:** while paused, the source-side delta tables keep growing, and the
-[retention/reseed source-protection](operations.md) does **not** run (it lives in the
-streaming loop, which is skipped). So a *long* pause on a busy source can grow the
-source's `replicare` schema unbounded. Pause for maintenance/cutover windows, not
-indefinitely; if you need to stop for a long time, prefer removing the sync (which you
-can teardown so capture is uninstalled) over an open-ended pause.
+That comes with a trade-off. While a sync is paused, its source-side delta tables keep growing,
+and the [retention / reseed source protection](operations.md) *doesn't* run, since it lives in
+the streaming loop, which is skipped. A long pause on a busy source can therefore grow the
+source's `replicare` schema without any bound. We'd recommend pausing for maintenance /
+cutover windows, and not indefinitely; to stop for a long time, it's better to remove the sync
+and tear it down(so capture is uninstalled) than to leave an open-ended pause.
 
-**It takes effect at daemon start**, so pausing or resuming is a **config change +
-restart**, not a live toggle. On Kubernetes/Helm, change the value and `helm upgrade` —
-the resulting pod rollout applies it. Set `enabled` on the sync **by name** in your
-config; if you use Helm `--set`, note it addresses syncs by **array index**
-(`config.syncs[0]` = the first sync), so with several pipelines it's easy to pause the
-wrong one — see [kubernetes.md](kubernetes.md#single-active-rollouts--state).
-**Verify which sync actually paused** in the daemon logs — `sync disabled (paused);
-skipping sync=<name>` for a paused sync, `sync streaming sync=<name>` for a running one —
-or with `replicare status` (the `[PAUSED]` banner). (Clusters have the same `enabled`
-flag; setting it `false` pauses all of that cluster's mesh edges.)
+The setting takes effect when the daemon starts, so pausing or resuming is a config change plus
+a restart, and not a live toggle. On Kubernetes / Helm, change the value and run `helm upgrade`;
+the pod rollout that follows applies it. Set `enabled` on the sync by name in the config. Helm
+`--set` addresses syncs by array index(`config.syncs[0]` is the first sync), so with several
+pipelines it's easy to pause the wrong one; see [kubernetes.md](kubernetes.md#single-active-rollouts--state).
+Check which sync actually paused in the daemon logs -
+`sync disabled (paused); skipping sync=<name>` for a paused sync,
+`sync streaming sync=<name>` for a running one - or with `replicare status`, which shows a
+`[PAUSED]` banner. Clusters have the same `enabled` flag,
+and setting it to `false` pauses all of that cluster's mesh edges.
 
-**Pausing every pipeline is fine — the daemon stays up.** With all syncs (and clusters)
-paused the daemon does **not** exit; it idles, keeps serving `/metrics`, `/status`, and
-`/healthz`, and stays a healthy pod (so a Kubernetes Deployment does not restart-loop it).
-`replicare status` then shows each paused sync with a **`[PAUSED]`** banner (and, live,
-its still-growing delta backlog) rather than a stale "streaming" phase.
+Pausing every pipeline is fine, too; the daemon stays up. With all syncs(and clusters) paused,
+the daemon *doesn't* exit. It idles, keeps serving `/metrics`, `/status` and `/healthz`, and
+stays a healthy pod, so a Kubernetes Deployment doesn't restart-loop it. `replicare status` then
+shows each paused sync with a `[PAUSED]` banner(and, when live, its still-growing delta backlog)
+rather than a stale "streaming" phase.
 
 ### Selection
 
-`include`/`exclude` are `schema.table` globs (`*` matches within a name segment).
-For MySQL, a schema *is* a database, so these are `db.table` globs and a single
-sync may span several databases. Tables without a primary key or usable unique key
-are **skipped with a warning** (they can't be captured). An FK pointing from a
-selected table to an *excluded* one triggers a dangling-FK warning — the target
-must already satisfy that parent.
+`include` and `exclude` are `schema.table` globs, where `*` matches within a single name
+segment. On MySQL a schema *is* a database, so these are `db.table` globs there, and a single
+sync can span several databases. Tables without a primary key or usable unique key are skipped
+with a warning, since they can't be captured. An FK pointing from a selected table to an
+*excluded* one triggers a dangling-FK warning, because the target has to already satisfy that
+parent on its own.
 
-For **Redis**, `include`/`exclude` are **key-pattern globs** using Redis `SCAN …
-MATCH` semantics (`*`, `?`, `[…]`, hash-tags), matched **exclude-wins**. There are
-no tables, keys, or FKs — the "unit" is the logical keyspace (one DB, or DB 0 in
-cluster). An optional `types` filter in the `redis:` block narrows selection to
+For Redis, `include` and `exclude` are key-pattern globs using Redis
+`SCAN … MATCH` semantics(`*`, `?`, `[…]`, hash-tags), matched so that an exclude always wins. There are
+no tables, keys or FKs to deal with; the "unit" is the logical keyspace(one DB, or DB 0 in
+cluster). An optional `types` filter in the `redis:` block narrows the selection down to
 specific value types.
 
 ### `tuning` (per sync)
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `drain_interval` | duration (`1s`, `500ms`) | `1s` | time between streaming drain passes; longer = more coalescing (less source load) but higher lag |
-| `drain_batch` | int | `1000` | max dirty deltas applied **per table per pass**; with `drain_interval` this is the per-table streaming ceiling (~`drain_batch/drain_interval` rows/s). Raise for a high-volume table that lags |
-| `apply_concurrency` | int (≥1) | `1` | how many of a component's tables apply **concurrently** during streaming. `1` is strictly sequential; higher fans the per-table apply across the copy-worker pool (bounded by `pool.max_*_connections`). Helps when **several** tables are backlogged at once |
-| `retention.max_age` | duration (`24h`, `0` = off) | `24h` | oldest unconsumed delta before a laggard target is reseeded |
-| `retention.max_bytes` | size (`512MB`, `0` = off) | off | delta-table on-disk size before reseed |
-| `pool.max_source_connections` | int | 4 | source connection cap (copy worker pool is sized from it) |
-| `pool.max_target_connections` | int | 4 | target connection cap |
+| `drain_interval` | duration(`1s`, `500ms`) | `1s` | the time between streaming drain passes; a longer interval coalesces more(less source load) but raises lag |
+| `drain_batch` | int | `1000` | the most dirty deltas applied per table, per pass. Together with `drain_interval` this sets the per-table streaming ceiling(roughly `drain_batch/drain_interval` rows/s). Raise it for a high-volume table that lags |
+| `apply_concurrency` | int(at least 1) | `1` | how many of a component's tables apply concurrently during streaming. `1` is strictly sequential; a higher value fans the per-table apply across the copy-worker pool(bounded by `pool.max_*_connections`). It helps when *several* tables are backlogged at once |
+| `retention.max_age` | duration(`24h`, `0` = off) | `24h` | the oldest unconsumed delta allowed before a lagging target is reseeded |
+| `retention.max_bytes` | size(`512MB`, `0` = off) | off | the delta table's on-disk size allowed before a reseed |
+| `pool.max_source_connections` | int | 4 | the source connection cap(the copy worker pool is sized from it) |
+| `pool.max_target_connections` | int | 4 | the target connection cap |
 
-Durations use Go syntax (`ms`, `s`, `m`, `h`); sizes accept `KB`/`MB`/`GB`/`TB`
-(×1000) or `KiB`/`MiB`/`GiB` (×1024), or a bare byte count. Defaults favor low
-source pressure — see [operations.md](operations.md) for tuning guidance.
+Durations use Go syntax(`ms`, `s`, `m`, `h`). Sizes accept `KB`/`MB`/`GB`/`TB`(multiples of
+1000), `KiB`/`MiB`/`GiB`(multiples of 1024), or a bare byte count. The defaults favour low
+pressure on the source; see [operations.md](operations.md) for tuning guidance.
 
-For **Redis**, the neutral `retention.*` knobs are inert (there is no source-side
-delta queue to bound); Redis pacing lives in the `redis:` block instead
-(`scan_count`, `reconcile_interval`, `delete_sweep_interval`).
+For Redis, the neutral `retention.*` knobs do nothing, since there's no source-side delta queue
+to bound. Redis pacing lives in the `redis:` block instead(`scan_count`, `reconcile_interval`,
+`delete_sweep_interval`).
 
 ## Active-active clusters (`nodes` and `clusters`)
 
-> A `clusters:` block runs a full active-active cluster on **Postgres, MySQL and Redis**:
-> writes accepted on any node — including changes to the **same row** on two nodes at
-> once — end up with the same value on every node, with nothing to configure and no change
-> to the application's tables. These keys are **optional and additive**: omit them and
-> replicare behaves exactly as a one-way daemon. Do not confuse a replicare **`clusters:`**
-> entry (a group of active-active peer databases) with a Redis endpoint's
-> `redis.mode: cluster` (one *sharded* Redis) — different things.
+A `clusters:` block runs a full active-active cluster on Postgres, MySQL and Redis. Writes
+accepted on any node - including changes to the *same* row on two nodes at once - end up with
+the same value on every node, with nothing to configure and no change to the application's
+tables. These keys are optional and purely additive; leave them out and `replicare` behaves
+exactly like a one-way daemon.
 
-An **active-active cluster** keeps N peer databases in step with writes accepted on
-**any** node. Conflicting changes are settled automatically (the later change wins,
-using a timestamp replicare keeps for each row; no column to add, nothing to declare);
-see [Active-active replication](active-active.md). A cluster is **single-engine**, like
-a sync.
+An active-active cluster keeps N peer databases in step, with writes accepted on *any* node.
+Conflicting changes are settled automatically: the later change wins, using a timestamp
+`replicare` keeps for each row, with no column to add and nothing to declare. See
+[Active-active replication](active-active.md) for how this works. Like a sync, a cluster sticks
+to a single engine.
+
+> ⚠️ A `replicare` `clusters:` entry(a group of active-active peer databases) and a Redis
+> endpoint's `redis.mode: cluster`(one *sharded* Redis) are two entirely different things, and
+> it's easy to mix them up.
 
 ### `nodes`
 
-A map of peer endpoints. A node has the **same shape as a source/target endpoint** (an
-`engine` + that engine's connection block) plus an optional `node_id`. Unlike a
-source/target, a node is both **read from and written to**.
+`nodes` is a map of peer endpoints. A node has the same shape as a source / target
+endpoint(an `engine` plus that engine's connection block), with an optional `node_id` on top.
+Unlike a source or a target, though, a node is both read from *and* written to.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `engine` | string | — | `postgres` \| `mysql` \| `redis`; must match the cluster's engine |
-| `node_id` | string | the map key | stable replication-origin identity, unique within a cluster; stamped into each change's version. Usually leave it to default to the key |
-| `<engine>:` | block | — | the engine connection block, exactly as for a source/target |
+| `engine` | string | none | `postgres` \| `mysql` \| `redis`; has to match the cluster's engine |
+| `node_id` | string | the map key | the stable replication-origin identity, unique within a cluster and stamped into each change's version. It's usually best left to default to the key |
+| `<engine>:` | block | none | the engine connection block, exactly as for a source / target |
 
 ### `clusters`
 
-A list of active-active groups.
+`clusters` is a list of active-active groups.
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `name` | string | — | unique across all syncs **and** clusters |
-| `engine` | string | — | the one engine all members share (single-engine rule) |
-| `members` | list of strings | — | keys into `nodes:`; **≥ 2**, each a distinct node with a distinct `node_id` |
-| `topology` | string | `mesh` | v1 supports only `mesh` (full mesh, any N ≥ 2); `ring`/partial are deferred |
-| `include` / `exclude` | list of globs | — | table/key selection, interpreted per engine exactly as for a sync |
-| `tuning` | block | sync defaults | same knobs as a sync's `tuning` |
+| `name` | string | none | unique across all syncs *and* clusters |
+| `engine` | string | none | the one engine all members share(the single-engine rule) |
+| `members` | list of strings | none | keys into `nodes:`; 2 or more, each a distinct node with a distinct `node_id` |
+| `topology` | string | `mesh` | v1 only supports `mesh`(full mesh, any N of 2 or more); `ring` / partial layouts are deferred |
+| `include` / `exclude` | list of globs | none | the table / key selection, interpreted per engine exactly as for a sync |
+| `tuning` | block | sync defaults | the same knobs as a sync's `tuning` |
 
 ```yaml
 nodes:
@@ -316,20 +330,23 @@ clusters:
     # No conflict block: HLC last-write-wins is automatic. Nothing to declare.
 ```
 
-A cluster has the same `enabled` opt-out as a sync ([above](#pausing-a-sync-enabled)):
-unset/`true` runs every mesh edge; `false` pauses the whole cluster (all edges skipped
-at startup). Per-edge pausing is not exposed.
+A cluster has the same `enabled` opt-out as a sync([above](#pausing-a-sync-enabled)). Unset /
+`true` runs every mesh edge, while `false` pauses the whole cluster, with all of its edges
+skipped at startup.
+
+> ⚠️ At the moment, there's no way to pause a single edge of a cluster; `enabled` pauses all of
+> them or none.
 
 ### Cycle safety for one-way syncs
 
-Independently of clusters, `replicare` now **rejects an un-declared replication cycle**
-among plain one-way `syncs` (e.g. `A→B` *and* `B→A`, or a longer ring) at config load —
-that topology silently corrupted data before. A genuine active-active setup must be
-declared as a `clusters:` entry, which is exempt.
+Separately from clusters, `replicare` now rejects an undeclared replication cycle among plain
+one-way `syncs` at config load - for example `A→B` *and* `B→A`, or a longer ring. Before this
+check existed, that topology silently corrupted data. A genuine active-active setup has to be
+declared as a `clusters:` entry, which is exempt from the check.
 
 ## Full example
 
-See [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml) for a fully annotated
-config. For one config that runs a Postgres pipeline and a Redis pipeline
-side by side (the per-sync single-engine model), see
+See [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml)
+for a fully annotated config. For a single config that runs a Postgres pipeline and a Redis
+pipeline side by side(which is how the per-sync single-engine model is meant to be used), see
 [`../examples/postgres-and-redis.yml`](https://github.com/rudimk/replicare/blob/main/examples/postgres-and-redis.yml).
