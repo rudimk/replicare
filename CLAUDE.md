@@ -733,8 +733,9 @@ without changing the single-static-binary distribution.
   they live in `.sisyphus/` (e.g. `.sisyphus/multi-master-design.md`,
   `.sisyphus/reseed-state-machine.md`).** What a user needs from a design note is rewritten in
   plain language on a user page (e.g. `docs/active-active.md`). **Site docs voice:** always
-  British spelling (except reserved words in code / tech, e.g. the `Authorization` header,
-  kept as-is in inline code); page title in Title Case, **every subheading in sentence case**;
+  British spelling for prose, the sentences we write (anything that's a name in code / tech -
+  HTTP bearer auth's `Authorization` header, a config key, an API - keeps its own spelling,
+  in inline code); page title in Title Case, **every subheading in sentence case**;
   "we" for the project, never "you" or "I". **In this repo's docs the name is always written as
   inline code, `replicare`** (not in URLs, paths or code blocks; a repo-specific rule, not part
   of the general voice). Docs that live next to their code (the Helm chart README, the
