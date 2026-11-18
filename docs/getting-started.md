@@ -1,31 +1,34 @@
-# Getting started
+# Getting Started
 
-This walks you from zero to a running replication in a few minutes, then explains
-how to point replicare at your own databases.
+This page goes from nothing to a running replication in a few minutes, using a demo that runs
+entirely in Docker, and then walks through pointing `replicare` at real databases - from the
+checks worth doing before a migration, through to preparing the target, granting privileges,
+writing a config and deploying the daemon.
 
-## What replicare does
+## What `replicare` does
 
-You give replicare a **source** database and one or more **target** databases and
-a list of tables. It:
+`replicare` is given a source database, one or more target databases and a list of tables. It
+then works in three steps:
 
-1. installs lightweight capture (triggers) on the source,
-2. copies the selected data to the targets (chunked and parallel), then
-3. streams every insert/update/delete continuously to keep the targets converged.
+1. It installs lightweight capture(triggers) on the source.
+2. It copies the selected data to the targets, in chunks and in parallel.
+3. It streams every insert / update / delete continuously, to keep the targets converged.
 
-No WAL access, no `REPLICATION` role, no `wal_level` change — just ordinary,
+None of this needs WAL access, a `REPLICATION` role or a `wal_level` change - just ordinary,
 grantable privileges. [Architecture](architecture.md) explains why.
 
-## Try the demo (2 minutes)
+## Try the demo
 
-The fastest way to see it work end to end:
+The fastest way to see it working end to end takes about 2 minutes:
 
 ```sh
 task docker                        # build the replicare image
 cd examples/demo && docker compose up
 ```
 
-This starts a source Postgres (seeded with `public.orders`), a target Postgres,
-and replicare copying then streaming between them. In another shell:
+This starts a source Postgres(seeded with `public.orders`), a target Postgres, and `replicare`
+copying and then streaming between them. In another shell, check that the initial copy landed,
+make a live change on the source and look at the operator surface:
 
 ```sh
 # initial copy landed
@@ -41,72 +44,75 @@ curl localhost:8080/status | jq
 curl localhost:9090/metrics | grep replicare_
 ```
 
-`Ctrl-C` then `docker compose down -v` to clean up.
+To clean up, press `Ctrl-C`, then run `docker compose down -v`.
 
 ### Verifying the metrics
 
-`/metrics` shows many `replicare_*` series once a sync is streaming, not just
-one. To eyeball the series that only populate at runtime:
+Once a sync is streaming, `/metrics` shows many `replicare_*` series, not just one. Some of them
+only populate at runtime, and this picks those out:
 
 ```sh
 curl -s localhost:9090/metrics | grep -E \
   'replicare_(rows_copied_total|apply_batch_seconds|throughput_rows_per_second|replication_lag_seconds|table_phase_info|target_up)'
 ```
 
-- `replicare_table_phase_info` (one line per table, `initial_copy` then `streaming`),
-  `replicare_target_up` and the row estimate `replicare_initial_copy_rows_target`
-  appear as soon as the sync starts; `replicare_rows_copied_total` climbs as the
-  initial copy commits rows.
-- `replicare_apply_batch_seconds` and `replicare_replication_lag_seconds` refresh on
-  every streaming drain pass.
-- `replicare_throughput_rows_per_second` is only non-zero on a pass that actually
-  applied deltas — make a change on the source (the `INSERT/UPDATE/DELETE` above)
-  and re-scrape; a caught-up idle sync correctly reports `0` here.
+`replicare_table_phase_info`(one line per table, `initial_copy` then `streaming`),
+`replicare_target_up` and the row estimate `replicare_initial_copy_rows_target` appear as soon as
+the sync starts, and `replicare_rows_copied_total` climbs as the initial copy commits rows.
+`replicare_apply_batch_seconds` and `replicare_replication_lag_seconds` refresh on every
+streaming drain pass.
 
-The full list of every metric, its type, and its labels is in
-[operations.md](operations.md#metrics-reference).
+`replicare_throughput_rows_per_second` is only non-zero on a pass that actually applied deltas.
+To see it move, make a change on the source(the `INSERT/UPDATE/DELETE` above) and scrape again;
+a sync that's caught up and idle correctly reports `0` here.
 
-## Point it at your own databases
+The full list of every metric, its type and its labels is in the
+[operations metrics reference](operations.md#metrics-reference).
+
+## Point it at real databases
+
+Moving from the demo to real databases takes six steps, starting with a checklist that's worth
+going through before anything touches a production source.
 
 ### 0. Run the pre-migration checklist
 
-Before pointing replicare at a production source, gather the facts below and confirm the
-must-haves. The queries for each item, for Postgres and MySQL, are in
-[operations.md → Before a migration: checklist](operations.md#before-a-migration-checklist).
+Before pointing `replicare` at a production source, gather the facts below and confirm the
+must-haves. The queries for each item, for both Postgres and MySQL, are in the
+[before a migration checklist](operations.md#before-a-migration-checklist) in operations.
 
-**Sizing and traffic**
+Start with sizing and traffic:
 
 - [ ] Total database size, and row counts and sizes per table.
-- [ ] Write volume over 24 hours (inserts, updates and deletes): every change adds one row to
-      replicare's change tracking on the source.
+- [ ] Write volume over 24 hours(inserts, updates and deletes), since every change adds one row
+      to `replicare`'s change tracking on the source.
 - [ ] Daily and weekly low-traffic windows, for catching up and for the final cutover.
 
-**Must be true before starting**
+Then confirm everything that has to be true before starting:
 
-- [ ] Every table has a primary key or a `UNIQUE` constraint (tables without one are skipped).
-- [ ] Postgres: every extension the tables use exists on the target. MySQL: every table is InnoDB,
-      the source is 5.7 or newer (older sources cannot add replicare's triggers next to a table's
-      own), and the target has `local_infile` on.
-- [ ] Materialized views and views are not replicated: plan to create and refresh them on the target.
-      Postgres large objects are not replicated either.
-- [ ] Schema changes and migrations are frozen for the whole replication (including online
-      schema-change tools such as `pt-online-schema-change` / `gh-ost` on MySQL).
-- [ ] Regular vacuum and maintenance jobs are known: plain `VACUUM` / autovacuum is fine; heavy jobs
-      that lock whole tables (`VACUUM FULL`, `CLUSTER`, `pg_repack`, MySQL `OPTIMIZE TABLE`) are paused
-      during the initial copy and kept out of peak hours afterwards.
-- [ ] No long-open (`idle in transaction`) sessions on the source.
-- [ ] Source and target versions checked (target the same major version or newer), grants in place,
-      and disk room on the source for the change-tracking tables to grow.
-- [ ] A plan for sequence / identity counters at cutover (`replicare reseed-sequences`).
+- [ ] Every table has a primary key or a `UNIQUE` constraint(tables without one are skipped).
+- [ ] Postgres: every extension the tables use exists on the target. MySQL: every table is
+      InnoDB, the source is 5.7 or newer(older sources can't add `replicare`'s triggers next to
+      a table's own), and the target has `local_infile` on.
+- [ ] Materialised views and views aren't replicated, so there's a plan to create and refresh
+      them on the target. Postgres large objects aren't replicated either.
+- [ ] Schema changes and migrations are frozen for the whole replication, including online
+      schema-change tools such as `pt-online-schema-change` / `gh-ost` on MySQL.
+- [ ] Regular vacuum and maintenance jobs are known. Plain `VACUUM` / autovacuum is fine; heavy
+      jobs that lock whole tables(`VACUUM FULL`, `CLUSTER`, `pg_repack`, MySQL `OPTIMIZE TABLE`)
+      are paused during the initial copy, and kept out of peak hours afterwards.
+- [ ] No long-open sessions(`idle in transaction`) on the source.
+- [ ] Source and target versions checked(the target on the same major version or newer), grants
+      in place, and disk room on the source for the change-tracking tables to grow.
+- [ ] A plan for sequence / identity counters at cutover(`replicare reseed-sequences`).
 
 ### 1. Prepare the target schema
 
-replicare replicates **data only** — it never creates or migrates target tables.
-Create/migrate the target tables yourself first, matching the source columns you
-want to replicate. (Types must be compatible; pre-flight will tell you if not.)
+`replicare` only replicates data; it never creates or migrates target tables. So the target
+tables have to be created / migrated first, outside `replicare`, matching the source columns that
+should be replicated. The types have to be compatible, and pre-flight reports it if they aren't.
 
-The quickest way to match the source is to dump its **structure only** (no data) to a
-file, then load that file on each target.
+The quickest way to match the source is to dump its structure only(no data) to a file, and then
+load that file on each target:
 
 ```bash
 # Postgres — 1) dump the source structure (no ownership/privilege noise)
@@ -124,19 +130,20 @@ mysqldump --no-data -h SRC_HOST -P SRC_PORT -u USER -p DB > schema.sql
 mysql -h TARGET_HOST -P TARGET_PORT -u USER -p DB < schema.sql
 ```
 
-**Credentials.** These tools ask for a password when the server requires one: Postgres
-prompts interactively (and `mysqldump -p` means "prompt me"). Don't put the password in
-the command — it leaks into your shell history and `ps`. Instead store it in `~/.pgpass`
-(Postgres, `chmod 600`) or `~/.my.cnf` (MySQL). If you prefer a one-step pipe
-(`pg_dump … | psql …`), note it **cannot prompt** — the password step and the data stream
-collide — so set up `~/.pgpass` / `PGPASSWORD` first, or stick with the two-step form above.
+These tools ask for a password when the server requires one; Postgres prompts interactively, and
+`mysqldump -p` means "prompt me". We'd recommend never putting the password in the command itself,
+since it leaks into the shell history and `ps`. Store it in `~/.pgpass`(Postgres, `chmod 600`) or
+`~/.my.cnf`(MySQL) instead. A one-step pipe(`pg_dump … | psql …`) can't prompt at all, because the
+password step and the data stream collide; for that, set up `~/.pgpass` / `PGPASSWORD` first, or
+stick with the two-step form above.
 
-For **active-active**, run this against **every node** before starting (and apply any
-later schema change to every node first — see [active-active.md](active-active.md)).
+For active-active, run this against every node before starting, and apply any later schema change
+to every node first(see [active-active replication](active-active.md)).
 
 ### 2. Grant least-privilege roles
 
-Run the grant scripts (edit the role/schema/db values, or pass them with `-v`):
+Run the grant scripts, either editing the role / schema / db values in them or passing them with
+`-v`:
 
 ```sh
 psql -v ON_ERROR_STOP=1 -v role=replicare -v db=app -v app_schema=public \
@@ -145,29 +152,30 @@ psql -v ON_ERROR_STOP=1 -v role=replicare -v db=warehouse -v app_schema=public \
   -f deploy/grants-target.sql "host=TARGET dbname=warehouse user=admin"
 ```
 
-The source role needs only `CREATE`-on-db (or a pre-created owned `replicare`
-schema) plus `USAGE`/`TRIGGER`/`SELECT`; the target role needs only DML. See
+The source role only needs `CREATE` on the database(or a pre-created `replicare` schema that it
+owns) plus `USAGE` / `TRIGGER` / `SELECT`, and the target role only needs DML. The details are in
 [configuration.md](configuration.md) and
-[`../deploy/`](https://github.com/rudimk/replicare/tree/main/deploy) for details.
+[`../deploy/`](https://github.com/rudimk/replicare/tree/main/deploy).
 
-For **MySQL**, use [`../deploy/grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql)
+For MySQL, use [`../deploy/grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql)
 and [`../deploy/grants-target-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target-mysql.sql)
-instead: the source role needs `SELECT`+`TRIGGER` on the replicated tables and
-ownership of the `replicare` capture database; the target role needs the four DML
-verbs plus `CREATE TEMPORARY TABLES`. See [the MySQL engine page](mysql.md).
+instead. There, the source role needs `SELECT` and `TRIGGER` on the replicated tables, as well as
+ownership of the `replicare` capture database; the target role needs the four DML verbs plus
+`CREATE TEMPORARY TABLES`. The [MySQL engine page](mysql.md) has more.
 
-For **Redis**, use the ACL presets
+For Redis, use the ACL presets
 [`../deploy/acl-source-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-source-redis.txt) and
-[`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt): the source role
-is read-only (`+scan +dump +pttl +exists +type +memory|usage`); the target role
-needs `+restore +del +scan +exists +module|list`. Note the foot-gun — `RESTORE` is
-`@dangerous` and must be granted explicitly with `+restore`. See
-[the Redis engine page](redis.md).
+[`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt). The
+source role is read-only(`+scan +dump +pttl +exists +type +memory|usage`), and the target role
+needs `+restore +del +scan +exists +module|list`. The [Redis engine page](redis.md) has more.
+
+> ⚠️ `RESTORE` is the one foot-gun here. It's `@dangerous`, so it has to be granted explicitly
+> with `+restore`.
 
 ### 3. Write a config
 
-Copy [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml) and edit the
-connection blocks and the sync's table selection. Minimal example:
+Start from a copy of [`../examples/replicare.yml`](https://github.com/rudimk/replicare/blob/main/examples/replicare.yml),
+and edit the connection blocks and the sync's table selection. A minimal config looks like this:
 
 ```yaml
 state_store:
@@ -189,37 +197,39 @@ syncs:
     exclude: ["*_audit"]
 ```
 
-**Choosing tables.** `include` and `exclude` are lists of `schema.table` glob
-patterns, and `exclude` is applied on top of `include`. To drop **one specific table**,
-name it in full under `exclude`:
+Tables are chosen with `include` and `exclude`, which are both lists of `schema.table` glob
+patterns; `exclude` is applied on top of `include`. To drop one specific table, name it in full
+under `exclude`:
 
 ```yaml
     include: ["public.*"]            # everything in public…
     exclude: ["public.audit_log"]    # …except this one table
 ```
 
-Patterns work too — `*_audit` excludes every table whose name ends in `_audit`. A few
-notes: selection is read **at daemon start**, so change it and restart; excluding a table
-only stops replicating it (rows already on the target are left in place, not deleted); and
-if another replicated table has a foreign key pointing at the excluded one, replicare warns
-about the dangling reference (the target must already satisfy that parent). For Redis,
-selection uses key patterns instead of `schema.table`.
+Patterns work too, so `*_audit` excludes every table whose name ends in `_audit`. Selection is
+read at daemon start, so changing it means a restart. Excluding a table only stops replicating
+it; rows already on the target are left in place, not deleted. If another replicated table has a
+foreign key pointing at the excluded one, `replicare` warns about the dangling reference, since
+the target must already satisfy that parent. For Redis, selection uses key patterns instead of
+`schema.table`.
 
-Secrets like `${PW}` are read from the environment. Full field reference:
-[configuration.md](configuration.md).
+Secrets like `${PW}` are read from the environment. Every field is listed in the
+[configuration reference](configuration.md).
 
-For a **MySQL** sync, set `engine: mysql` with `mysql:` blocks (see the
-[MySQL connection block](configuration.md#mysql-connection-block)); the state
-store stays on Postgres. A ready-to-run example is in
+For a MySQL sync, set `engine: mysql` with `mysql:` blocks(see the
+[MySQL connection block](configuration.md#mysql-connection-block)); the state store stays on
+Postgres. A ready-to-run example is in
 [`../examples/demo-mysql/config.yml`](https://github.com/rudimk/replicare/blob/main/examples/demo-mysql/config.yml).
 
-For a **Redis** sync, set `engine: redis` with `redis:` blocks (see the
-[Redis connection block](configuration.md#redis-connection-block)); the state store
-still stays on Postgres (Redis writes nothing to the source, so *all* its durable
-state lives there). Selection uses **key-pattern globs** (`include: ["app:*"]`)
-rather than `schema.table`. See [the Redis engine page](redis.md).
+For a Redis sync, set `engine: redis` with `redis:` blocks(see the
+[Redis connection block](configuration.md#redis-connection-block)). The state store still stays
+on Postgres; Redis writes nothing to the source, so *all* of its durable state lives there.
+Selection uses key-pattern globs(`include: ["app:*"]`) rather than `schema.table`. The
+[Redis engine page](redis.md) covers the rest.
 
 ### 4. Validate, then run
+
+Validate the config first, and then start replicating:
 
 ```sh
 export PW=...                          # the replicare role's password
@@ -227,32 +237,37 @@ replicare validate config.yml          # pre-flight: no changes, reports problem
 replicare run config.yml               # start replicating (Ctrl-C / SIGTERM to stop cleanly)
 ```
 
-`validate` connects read-only and classifies every column pair — fix any **BLOCK**
-findings (incompatible/missing types) before running. Once running, check
-progress any time with `replicare status config.yml`.
+`validate` connects read-only and classifies every column pair; fix any BLOCK
+findings(incompatible / missing types) before running. Once it's running, check progress at any
+time with `replicare status config.yml`.
 
-A few more commands you'll reach for later: **`replicare capture install|remove`** to
-pre-provision (or tear down) the source-side trigger capture out of band,
-**`replicare reseed --sync <s> --target <t>`** to force a laggard or diverged target
-to re-copy its *data*, and — when you **promote a one-way (DR) target** —
-**`replicare reseed-sequences --sync <s>`** to advance its identity/sequence counters to
-`max(id)+1` before it takes writes (otherwise `nextval()` collides with the copied rows;
-passive/DR only — it refuses an active-active mesh). See the [CLI reference](cli.md).
+There are a few more commands that come up later on. `replicare capture install|remove`
+pre-provisions(or tears down) the source-side trigger capture out of band.
+`replicare reseed --sync <s> --target <t>` forces a laggard or diverged target to re-copy its
+*data*. Finally - when a one-way(DR) target is promoted, `replicare reseed-sequences --sync <s>`
+advances its identity / sequence counters to `max(id)+1` before it takes writes; otherwise
+`nextval()` collides with the copied rows. That last one is passive / DR only, and it refuses an
+active-active mesh. The [CLI reference](cli.md) has every command.
 
 ### 5. Deploy
 
-Install the binary and the sample [systemd unit](https://github.com/rudimk/replicare/blob/main/deploy/replicare.service),
-run the [Docker image](https://github.com/rudimk/replicare#install), or deploy on Kubernetes with the
-Helm chart — see [Kubernetes (Helm)](kubernetes.md). See [operations.md](operations.md)
-for tuning, monitoring, retention/reseed, and troubleshooting.
+Install the binary and the sample
+[systemd unit](https://github.com/rudimk/replicare/blob/main/deploy/replicare.service), run the
+[Docker image](https://github.com/rudimk/replicare#install), or deploy on Kubernetes with the Helm
+chart, as described in [Kubernetes(Helm)](kubernetes.md). [operations.md](operations.md) covers
+tuning, monitoring, retention / reseed and troubleshooting.
 
-## Next
+## Where to go next
 
-- [Configuration reference](configuration.md) — every config field.
-- [CLI reference](cli.md) — every command.
-- [Operations](operations.md) — tuning, health signals, retention, restarts.
-- [Troubleshooting](troubleshooting.md) — common problems and fixes.
-- [Architecture](architecture.md) — how the pipeline works end to end (capture → copy → stream → apply → checkpoint).
-- [Postgres engine](postgres.md) — the reference engine: trigger CDC, faithful `COPY`, FK components, least-privilege grants.
-- [MySQL engine](mysql.md) — MySQL→MySQL specifics, plus a [runnable MySQL demo](https://github.com/rudimk/replicare/tree/main/examples/demo-mysql).
-- [Redis engine](redis.md) — Redis→Redis specifics: SCAN reconciliation, the delete sweep, TTL, cluster, and ACLs.
+- [Configuration reference](configuration.md) - every config field.
+- [CLI reference](cli.md) - every command.
+- [Operations](operations.md) - tuning, health signals, retention and restarts.
+- [Troubleshooting](troubleshooting.md) - common problems and how to fix them.
+- [Architecture](architecture.md) - how the pipeline works end to end(capture, copy, stream,
+  apply, then checkpoint).
+- [Postgres engine](postgres.md) - the reference engine: trigger CDC, faithful `COPY`, FK
+  components and least-privilege grants.
+- [MySQL engine](mysql.md) - MySQL to MySQL specifics, plus a
+  [runnable MySQL demo](https://github.com/rudimk/replicare/tree/main/examples/demo-mysql).
+- [Redis engine](redis.md) - Redis to Redis specifics: SCAN reconciliation, the delete sweep, TTL,
+  cluster and ACLs.
