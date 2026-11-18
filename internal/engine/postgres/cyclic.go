@@ -144,12 +144,16 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	// Re-copying a parent (live-source skew recovery) must use the same load shape the
 	// parent was first loaded with: a whole-loaded table in one statement with its real
 	// self-link, anything else as the chunked upsert with its nullCols left empty.
-	recopy := func(ctx context.Context, p engine.TableRef) error {
+	recopyOne := func(ctx context.Context, p engine.TableRef) error {
 		if len(keepReal[p]) > 0 {
 			return s.loadSelfRefWhole(ctx, src, p, byRef[p], nullCols[p])
 		}
 		return copyOrUpsert(ctx, src, s, p, subtractCols(transportColumns(byRef[p]), nullCols[p]))
 	}
+	// The re-copy of a parent can itself hit the same skew one level up (the parent now
+	// carries a row pointing at a grandparent row newer than the grandparent's copy), so
+	// it walks the whole chain of non-cyclic parents rather than giving up after one hop.
+	recopy := transitiveRecopier(recopyOne, parents)
 
 	// Pass 1: copy every table, omitting its nullCols (empty on the target). Empty target
 	// → a plain streaming COPY (light: no staging, no whole-table upsert); non-empty target
@@ -878,6 +882,33 @@ type parentRecopier func(ctx context.Context, ref engine.TableRef) error
 func recopyOmitting(src *Source, sink *Sink, byRef map[engine.TableRef]engine.Table, omit map[engine.TableRef][]string) parentRecopier {
 	return func(ctx context.Context, p engine.TableRef) error {
 		return copyOrUpsert(ctx, src, sink, p, subtractCols(transportColumns(byRef[p]), omit[p]))
+	}
+}
+
+// transitiveRecopier wraps a single-table re-copy so that, when re-copying a parent itself
+// hits a transient FK violation (on a live source the fresh parent snapshot can reference a
+// grandparent row newer than the grandparent's own copy — e.g. a new Project for a new
+// User), it re-copies that parent's own non-cyclic parents and retries, recursively up the
+// chain. Without this the first such hop failed the whole component and fell through to
+// the syncer's coarse retry, which re-copies EVERY table of the component — on a large
+// component that is minutes per attempt and, on a busy source, may never converge.
+//
+// The non-cyclic parent graph is acyclic (cyclic and self edges are excluded from
+// `parents`), so the recursion terminates; an in-progress set guards against a loop anyway
+// by falling back to a plain single re-copy for a table already being re-copied up-stack.
+func transitiveRecopier(one parentRecopier, parents map[engine.TableRef][]engine.TableRef) parentRecopier {
+	var rec func(ctx context.Context, p engine.TableRef, inProgress map[engine.TableRef]bool) error
+	rec = func(ctx context.Context, p engine.TableRef, inProgress map[engine.TableRef]bool) error {
+		if inProgress[p] {
+			return one(ctx, p)
+		}
+		inProgress[p] = true
+		defer delete(inProgress, p)
+		up := func(ctx context.Context, gp engine.TableRef) error { return rec(ctx, gp, inProgress) }
+		return withParentRetry(ctx, func() error { return one(ctx, p) }, parents[p], up)
+	}
+	return func(ctx context.Context, p engine.TableRef) error {
+		return rec(ctx, p, map[engine.TableRef]bool{})
 	}
 }
 

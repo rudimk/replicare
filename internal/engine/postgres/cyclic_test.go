@@ -358,6 +358,62 @@ func TestCyclicCopyRecoversFromParentSkew(t *testing.T) {
 	}
 }
 
+// TestCyclicCopyRecoversFromTwoLevelParentSkew is the next production failure after the
+// one above: a live app created a NEW user and a NEW project for it while the copy ran, and
+// a credit row for that project. The credit chunk failed (project missing), so its parent
+// project was re-copied — but the fresh project snapshot referenced the new user, which the
+// target did not have either, and the one-hop retry gave up ("upsert public.Project:
+// violates foreign key constraint Project_userId_fkey"), failing the whole component into
+// the slow coarse retry. The re-copy must walk up: user, then project, then credit.
+func TestCyclicCopyRecoversFromTwoLevelParentSkew(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+
+	userDDL := "CREATE TABLE rc_it.usr (id int PRIMARY KEY, name text)"
+	projDDL := "CREATE TABLE rc_it.proj (id int PRIMARY KEY, user_id int NOT NULL REFERENCES rc_it.usr(id), name text)"
+	credDDL := "CREATE TABLE rc_it.cred (id int PRIMARY KEY, proj_id int NOT NULL REFERENCES rc_it.proj(id), amount int)"
+	setupSourceTables(t, ctx, src, userDDL, projDDL, credDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, userDDL)
+	mustExecTarget(t, ctx, sink, projDDL)
+	mustExecTarget(t, ctx, sink, credDDL)
+
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.usr SELECT g, 'u'||g FROM generate_series(1,3) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.proj SELECT g, g, 'p'||g FROM generate_series(1,3) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.cred SELECT g, g, g*10 FROM generate_series(1,3) g")
+	// Target user AND project both lag by the newest row (user 3 + its project 3 were
+	// created after each was copied).
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.usr VALUES (1,'u1'),(2,'u2')")
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.proj VALUES (1,1,'p1'),(2,2,'p2')")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.usr", "rc_it.proj", "rc_it.cred"}})
+	if err != nil {
+		t.Fatalf("introspect: %v", err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	usrRef, projRef, credRef := ref("rc_it.usr"), ref("rc_it.proj"), ref("rc_it.cred")
+	parents := map[engine.TableRef][]engine.TableRef{credRef: {projRef}, projRef: {usrRef}}
+	recopy := transitiveRecopier(recopyOmitting(src, sink, byRef, map[engine.TableRef][]string{}), parents)
+
+	if err := copyChildWithParentRetry(ctx, src, sink, credRef, transportColumns(byRef[credRef]), parents[credRef], recopy); err != nil {
+		t.Fatalf("did not recover from two-level parent skew: %v", err)
+	}
+	for _, sel := range []string{
+		"SELECT id::text, name FROM rc_it.usr ORDER BY id",
+		"SELECT id::text, user_id::text, name FROM rc_it.proj ORDER BY id",
+		"SELECT id::text, proj_id::text, amount::text FROM rc_it.cred ORDER BY id",
+	} {
+		if !eqLines(dumpText(t, ctx, src.conn, sel), dumpText(t, ctx, sink.conn, sel)) {
+			t.Errorf("did not converge to source: %s", sel)
+		}
+	}
+}
+
 // TestCyclicCopyChunkedLargeTable is the regression for the production crash-loop's real
 // cause: the cyclic copy used to move each table in ONE whole-table COPY, which dies with
 // "unexpected EOF" on a multi-million-row table (public.user_answer). The copy is now
