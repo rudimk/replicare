@@ -1,25 +1,21 @@
-# Verifying data integrity — Postgres
+# Verifying Data Integrity on Postgres
 
-Standalone `psql` queries to confirm a Postgres **source** and **target** are
-converged, for when you can't reach the replicare pod to run
-[`replicare status`](cli.md) / [`replicare verify`](cli.md). Run each block on
-**both** databases and compare the output.
+This page collects standalone `psql` queries that confirm a Postgres source and target have
+converged, for when the `replicare` pod can't be reached to run [`replicare status`](cli.md) /
+[`replicare verify`](cli.md). Run each block on both databases and compare the output.
 
-These mirror what `verify` does internally: columns are matched by **name**,
-`GENERATED … STORED` columns are **excluded** (the target regenerates them), and the
-content hash is **order-independent** (physical row order, index order, and text
-collation don't affect it).
+The queries mirror what `verify` does internally. Columns are matched by name,
+`GENERATED … STORED` columns are excluded(the target regenerates them), and the content hash is
+order-independent, so physical row order, index order and text collation don't affect it.
 
-> The authoritative check is still `replicare verify <config>`. This is the no-pod
-> fallback, and its results should agree with `verify`.
-
----
+> ⚠️ The authoritative check is still `replicare verify <config>`. These queries are the
+> fallback for when there's no pod to run it from, and their results should agree with `verify`.
 
 ## 0. Pin session GUCs (run on both, every session)
 
-Essential — replicare canonicalizes these on every connection. Row text must render
-identically on both sides (an old source and a newer target) or you get false
-mismatches on dates, floats, and `bytea`. Run this **first** in every session before
+This step is essential. `replicare` canonicalises these settings on every connection, and row
+text has to render identically on both sides(an old source and a newer target), otherwise there
+are false mismatches on dates, floats and `bytea`. Run this first in every session, before
 hashing.
 
 ```sql
@@ -33,10 +29,9 @@ SET client_encoding = 'UTF8';
 
 ## 1. Row counts per table (run on both)
 
-Exact counts for every base table in a schema, via a session-local helper
-(`pg_temp.*` is dropped automatically at disconnect). A hot table reads a few rows
-ahead on the source by whatever is in flight — a gap that **shrinks toward 0** is
-normal streaming, not drift.
+This gets exact counts for every base table in a schema, using a session-local helper(anything
+in `pg_temp.*` is dropped automatically at disconnect). A hot table reads a few rows ahead on the
+source, by whatever's in flight; a gap that shrinks towards 0 is normal streaming, not drift.
 
 ```sql
 CREATE OR REPLACE FUNCTION pg_temp.rc_counts(sch text)
@@ -52,11 +47,12 @@ END $$ LANGUAGE plpgsql;
 SELECT * FROM pg_temp.rc_counts('public') ORDER BY table_name;
 ```
 
-## 2. Content digest per table (run on both — digests must match)
+## 2. Content digest per table (run on both; digests must match)
 
-The real integrity check: order-independent, column-name-matched, excludes
-`GENERATED … STORED`. Identical `digest` per table = logically converged. Best for
-static / lookup tables; for actively-written tables see [step 3](#3-hot-table-digest-over-a-stable-key-range-run-on-both).
+This is the real integrity check. It's order-independent, matches columns by name and excludes
+`GENERATED … STORED` columns, so an identical `digest` for a table means it's logically
+converged. It works best for static / lookup tables; for actively-written tables, see
+[step 3](#3-hot-table-digest-over-a-stable-key-range-run-on-both).
 
 ```sql
 CREATE OR REPLACE FUNCTION pg_temp.rc_verify(sch text)
@@ -81,7 +77,8 @@ END $$ LANGUAGE plpgsql;
 SELECT * FROM pg_temp.rc_verify('public') ORDER BY table_name;
 ```
 
-Diff the two sides cleanly inside `psql`, then compare the files in a shell:
+To diff the two sides cleanly, write the output to a file inside `psql` on each side, then
+compare the files in a shell:
 
 ```sql
 -- in psql, on EACH side:
@@ -98,10 +95,9 @@ diff /tmp/rc_src.txt /tmp/rc_tgt.txt   # no output = fully converged
 
 ## 3. Hot-table digest over a stable key range (run on both)
 
-Actively-written tables won't match whole-table (the source runs ahead). Hash an
-**immutable historical window** instead — a key range below the active tail — which
-must match exactly. Adjust the table, key column, and range to a span you know isn't
-being updated.
+Actively-written tables won't match as a whole, since the source runs ahead. Instead, hash an
+immutable historical window - a key range below the active tail - which must match exactly.
+Adjust the table, key column and range to a span that's known not to be updated.
 
 ```sql
 SELECT count(*),
@@ -112,9 +108,9 @@ WHERE id BETWEEN 1000000 AND 1010000;
 
 ## 4. Referential integrity (run on target)
 
-Catches any FK breakage from the copy. The query below **generates** one anti-join
-per foreign key; run it, then paste and run the emitted `SELECT … UNION ALL …`. Every
-`orphans` count should be 0.
+This catches any FK breakage from the copy. The query below generates one anti-join per foreign
+key; run it, then paste and run the emitted `SELECT … UNION ALL …`. Every `orphans` count should
+be 0.
 
 ```sql
 SELECT string_agg(
@@ -139,22 +135,23 @@ JOIN pg_class pc ON pc.oid = con.confrelid JOIN pg_namespace pn ON pn.oid = pc.r
 WHERE con.contype = 'f' AND cn.nspname = 'public';
 ```
 
----
-
 ## Caveats
 
-- **Live drift.** On hot tables use the step 3 stable-range check, or run during a
-  quiet window. The whole-table digest (step 2) is for static / lookup tables, which
-  must match exactly.
-- **Schema must match.** If the target is missing or has an extra column, step 2's
-  digest differs — that's correct, it's flagging a real schema mismatch, not spurious
-  drift.
-- **Order & collation don't matter.** Step 2 orders rows by their hash, so different
-  heap / index order or text collation never cause a false diff.
-- **Version gap is handled.** With the step 0 GUCs pinned, values render identically
-  across a source/target major-version gap (floats, timestamps, `bytea`, intervals).
-- **Nothing is left behind.** The `pg_temp.*` helpers are session-local and vanish at
-  disconnect — safe to run against a source you don't own.
+> ⚠️ Live writes cause drift. On hot tables, use the stable-range check from step 3, or run the
+> checks during a quiet window. The whole-table digest from step 2 is meant for static / lookup
+> tables, which must match exactly.
 
-See also: [MySQL integrity checks](integrity-checks-mysql.md) ·
-[Redis integrity checks](integrity-checks-redis.md).
+The schema has to match, too. If the target is missing a column or has an extra one, step 2's
+digest differs - that's correct, since it's flagging a real schema mismatch rather than spurious
+drift.
+
+On the other hand, order and collation don't matter. Step 2 orders rows by their hash, so a
+different heap / index order or text collation never causes a false diff. A version gap is
+handled as well; with the step 0 GUCs pinned, values render identically across a source / target
+major-version gap(floats, timestamps, `bytea`, intervals).
+
+Finally - nothing is left behind. The `pg_temp.*` helpers are session-local and vanish at
+disconnect, so they're safe to run against a source that isn't ours.
+
+The equivalent checks for the other engines are in [MySQL integrity checks](integrity-checks-mysql.md)
+and [Redis integrity checks](integrity-checks-redis.md).
