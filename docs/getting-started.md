@@ -71,6 +71,35 @@ replicare replicates **data only** — it never creates or migrates target table
 Create/migrate the target tables yourself first, matching the source columns you
 want to replicate. (Types must be compatible; pre-flight will tell you if not.)
 
+The quickest way to match the source is to dump its **structure only** (no data) to a
+file, then load that file on each target.
+
+```bash
+# Postgres — 1) dump the source structure (no ownership/privilege noise)
+pg_dump --schema-only --no-owner --no-privileges -h SRC_HOST -p SRC_PORT -U USER -d DB > schema.sql
+# 2) load it into the target
+psql -h TARGET_HOST -p TARGET_PORT -U USER -d DB -f schema.sql
+
+# narrow it: -n public (one schema), -t public.orders (one table)
+```
+
+```bash
+# MySQL — 1) dump  (-P is the PORT; lowercase -p is the password prompt)
+mysqldump --no-data -h SRC_HOST -P SRC_PORT -u USER -p DB > schema.sql
+# 2) load
+mysql -h TARGET_HOST -P TARGET_PORT -u USER -p DB < schema.sql
+```
+
+**Credentials.** These tools ask for a password when the server requires one: Postgres
+prompts interactively (and `mysqldump -p` means "prompt me"). Don't put the password in
+the command — it leaks into your shell history and `ps`. Instead store it in `~/.pgpass`
+(Postgres, `chmod 600`) or `~/.my.cnf` (MySQL). If you prefer a one-step pipe
+(`pg_dump … | psql …`), note it **cannot prompt** — the password step and the data stream
+collide — so set up `~/.pgpass` / `PGPASSWORD` first, or stick with the two-step form above.
+
+For **active-active**, run this against **every node** before starting (and apply any
+later schema change to every node first — see [active-active.md](active-active.md)).
+
 ### 2. Grant least-privilege roles
 
 Run the grant scripts (edit the role/schema/db values, or pass them with `-v`):
@@ -125,6 +154,22 @@ syncs:
     include: ["public.*"]
     exclude: ["*_audit"]
 ```
+
+**Choosing tables.** `include` and `exclude` are lists of `schema.table` glob
+patterns, and `exclude` is applied on top of `include`. To drop **one specific table**,
+name it in full under `exclude`:
+
+```yaml
+    include: ["public.*"]            # everything in public…
+    exclude: ["public.audit_log"]    # …except this one table
+```
+
+Patterns work too — `*_audit` excludes every table whose name ends in `_audit`. A few
+notes: selection is read **at daemon start**, so change it and restart; excluding a table
+only stops replicating it (rows already on the target are left in place, not deleted); and
+if another replicated table has a foreign key pointing at the excluded one, replicare warns
+about the dangling reference (the target must already satisfy that parent). For Redis,
+selection uses key patterns instead of `schema.table`.
 
 Secrets like `${PW}` are read from the environment. Full field reference:
 [configuration.md](configuration.md).
