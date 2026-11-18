@@ -190,8 +190,20 @@ func (t *Telemetry) SetPhase(sync string, table engine.TableRef, phase string) {
 	if t.reg == nil {
 		return
 	}
-	t.reg.Gauge(observability.MetricPhaseInfo).WithLabelValues(sync, table.String(), phase).Set(1)
+	g := t.reg.Gauge(observability.MetricPhaseInfo)
+	// Exactly one phase series per table: clear the other phases so a table that moved
+	// initial_copy → streaming does not report both.
+	for _, other := range tablePhases {
+		if other != phase {
+			g.DeleteLabelValues(sync, table.String(), other)
+		}
+	}
+	g.WithLabelValues(sync, table.String(), phase).Set(1)
 }
+
+// tablePhases are the values replicare_table_phase_info's phase label takes (the
+// state.Phase values; listed here to keep telemetry free of a state import).
+var tablePhases = []string{"initial_copy", "streaming"}
 
 // AddRowsCopied advances the initial-copy rows counter for a table.
 func (t *Telemetry) AddRowsCopied(sync string, table engine.TableRef, n int64) {

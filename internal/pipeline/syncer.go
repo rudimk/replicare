@@ -115,6 +115,17 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 		Message: fmt.Sprintf("capture installed on %d tables", len(s.Replicable)),
 	})
 
+	// Publish every table's phase up front, so the metrics page shows the copy is under
+	// way from the first scrape — before this, nothing was reported until a table reached
+	// streaming, and a long copy (a large cyclic component especially, which reports no
+	// per-chunk progress) served an EMPTY /metrics page that looked broken. Tables
+	// already copied on an earlier run report streaming once their loop starts.
+	for _, comp := range s.Components {
+		for _, t := range comp.Order {
+			s.Tel.SetPhase(s.Name, t, string(state.PhaseInitialCopy))
+		}
+	}
+
 	for _, comp := range s.Components {
 		if err := s.copyAndCutover(ctx, comp); err != nil {
 			return err

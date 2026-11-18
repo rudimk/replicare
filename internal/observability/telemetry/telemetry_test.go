@@ -198,3 +198,26 @@ func TestRetentionProximity(t *testing.T) {
 		t.Errorf("proximity = %v, want 0", p)
 	}
 }
+
+// TestSetPhaseKeepsOneSeriesPerTable: the copy publishes initial_copy at bring-up and the
+// stream loop later sets streaming; the table must then report ONLY streaming.
+func TestSetPhaseKeepsOneSeriesPerTable(t *testing.T) {
+	reg := prom.New()
+	tm := New(reg, nil, nil, nil)
+	ref := engine.TableRef{Schema: "public", Name: "Account"}
+	labels := func(p state.Phase) map[string]string {
+		return map[string]string{"sync": "s1", "table": "public.Account", "phase": string(p)}
+	}
+
+	tm.SetPhase("s1", ref, string(state.PhaseInitialCopy))
+	if v, ok := gaugeValue(t, reg, observability.MetricPhaseInfo, labels(state.PhaseInitialCopy)); !ok || v != 1 {
+		t.Fatalf("initial_copy phase not published (present=%v v=%v)", ok, v)
+	}
+	tm.SetPhase("s1", ref, string(state.PhaseStreaming))
+	if _, ok := gaugeValue(t, reg, observability.MetricPhaseInfo, labels(state.PhaseInitialCopy)); ok {
+		t.Error("initial_copy series must be cleared once the table is streaming")
+	}
+	if v, ok := gaugeValue(t, reg, observability.MetricPhaseInfo, labels(state.PhaseStreaming)); !ok || v != 1 {
+		t.Errorf("streaming phase not published (present=%v v=%v)", ok, v)
+	}
+}
