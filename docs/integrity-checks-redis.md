@@ -1,37 +1,37 @@
-# Verifying data integrity — Redis
+# Redis Integrity Checks
 
-Standalone `redis-cli` checks to confirm a Redis **source** and **target** are
-converged, for when you can't reach the replicare pod to run
-[`replicare status`](cli.md) / [`replicare verify`](cli.md).
+This page describes a set of standalone `redis-cli` checks for confirming that a Redis source
+and target have converged, for the times the `replicare` pod can't be reached to run
+[`replicare status`](cli.md) / [`replicare verify`](cli.md). Redis has no query language, so
+they're shell one-liners and a small script rather than SQL.
 
-Redis has no query language, so these are shell one-liners and a small script. They
-mirror what `verify` does: hash **key + type + canonical logical value**, using
-type-aware logical reads (`GET` / `LRANGE` / `SMEMBERS` / `ZRANGE WITHSCORES` /
-`HGETALL` / `XRANGE`) — **never** raw `DUMP` bytes, which are **not** byte-identical
-across Redis versions for equal values. **TTL is excluded** (replicated relative →
-skew-safe, so the exact remaining time differs by design).
+They mirror what `verify` does: hash the key, its type and its canonical logical value, using
+type-aware logical reads(`GET` / `LRANGE` / `SMEMBERS` / `ZRANGE WITHSCORES` / `HGETALL` /
+`XRANGE`). They *never* hash raw `DUMP` bytes, since those aren't byte-identical across Redis
+versions for equal values. TTL is left out as well; it's replicated as a relative value, which
+keeps it safe from clock skew, so the exact remaining time differs by design.
 
-> The authoritative check is still `replicare verify <config>`. This is the no-pod
-> fallback.
+> ⚠️ The authoritative check is still `replicare verify <config>`. What's on this page is the
+> fallback for when there's no pod to run it from.
 
----
+## 1. Key count on both ends
 
-## 1. Key count (run on both)
+Run this against both the source and the target:
 
 ```sh
 redis-cli -h "$SRC_HOST" -p "$SRC_PORT" -n 0 DBSIZE
 redis-cli -h "$TGT_HOST" -p "$TGT_PORT" -n 0 DBSIZE
 ```
 
-The source may read a few keys ahead by whatever the current reconciliation sweep
-hasn't applied yet — a gap that **shrinks toward 0** is normal, not drift. (Deletes on
-the target lag by the sweep interval by design.)
+The source may be a few keys ahead, by whatever the current reconciliation sweep hasn't
+applied yet. A gap that shrinks towards 0 is normal, and not drift. (Deletes on the target lag
+by the sweep interval, by design.)
 
-## 2. Keyspace content digest (run on both — digests must match)
+## 2. A keyspace content digest on both ends
 
-Save this as `rc-redis-digest.sh`. It SCANs the keyspace, computes a type-aware
-canonical value per key, and XOR-folds each key's MD5 so **iteration order doesn't
-matter**. Run it against source and target; `keys` and `digest` must match.
+Save the following as `rc-redis-digest.sh`. It SCANs the keyspace, computes a type-aware
+canonical value for each key, and XOR-folds each key's MD5, so the order keys come back in
+doesn't matter. Run it against the source and the target; `keys` and `digest` have to match.
 
 ```sh
 #!/usr/bin/env bash
@@ -62,19 +62,21 @@ done < <(r --scan)
 printf 'keys=%d digest=%016x\n' "$count" "$acc"
 ```
 
+Then run it against both ends:
+
 ```sh
 chmod +x rc-redis-digest.sh
 ./rc-redis-digest.sh "$SRC_HOST" "$SRC_PORT" 0
 ./rc-redis-digest.sh "$TGT_HOST" "$TGT_PORT" 0
 ```
 
-Use the **same `redis-cli` binary** for both runs so value formatting is identical.
-Point the source read at the **master**, not a replica (a lagging replica reads stale).
+Use the *same* `redis-cli` binary for both runs, so values are formatted identically. Point the
+source read at the master, and not a replica, since a lagging replica reads stale values.
 
 ## 3. Per-key spot checks
 
-To eyeball a specific key on both sides, read it with its type's logical command and
-`diff`:
+To eyeball a specific key on both sides, read it with its type's logical command, and `diff`
+the two:
 
 ```sh
 # string
@@ -88,31 +90,32 @@ diff <(redis-cli -h "$SRC_HOST" -p "$SRC_PORT" ZRANGE myzset 0 -1 WITHSCORES) \
      <(redis-cli -h "$TGT_HOST" -p "$TGT_PORT" ZRANGE myzset 0 -1 WITHSCORES)
 ```
 
-## 4. Cluster
+## 4. Clusters
 
-`--scan` and `DBSIZE` are **per-node**. On a cluster, run steps 1–2 against **each
-master** and sum/compare per shard (replicare scans, subscribes, and delete-sweeps
-per master; delete detection is master-pinned). Only DB 0 is replicated.
-
----
+`--scan` and `DBSIZE` work per node. On a cluster, run steps 1 and 2 against each master, and
+add up / compare the results shard by shard; `replicare` itself scans, subscribes and runs its
+delete sweep per master, and its delete detection is pinned to the master. Only DB 0 is
+replicated.
 
 ## Caveats
 
-- **Never hash `DUMP` bytes.** They differ across Redis versions for equal values, so
-  a byte hash would false-positive across a version gap. The script above uses logical
-  reads, which match because transport is *value*-faithful.
-- **TTL is excluded** by design (relative replication → skew-safe; exact remaining
-  time differs). Don't compare `TTL`/`PTTL`.
-- **XOR folding.** Distinct keys fold safely (key is part of each hash); the fold is a
-  drift *indicator*, with `verify` the authority. It's the same fold replicare's own
-  Redis verify uses.
-- **Big keys.** A multi-million-element value serialized through `redis-cli` is slow;
-  spot-check those individually rather than in the full-keyspace script, or accept the
-  runtime.
-- **Streams.** Entries are compared; consumer groups / PEL are not deep-verified here
-  (nor by `verify` in v1).
-- **Value reads may use a replica; delete/keyspace comparisons must use the master** —
-  a lagging replica would show phantom missing/extra keys.
+There are a few things to keep in mind with these checks:
 
-See also: [Postgres integrity checks](integrity-checks-postgres.md) ·
+1. Never hash `DUMP` bytes. They differ across Redis versions for equal values, so a hash of
+   the bytes would report drift that isn't there across a version gap. The script above uses
+   logical reads, which match because transport is *value*-faithful.
+2. TTL is left out by design. It's replicated as a relative value, which keeps it safe from
+   clock skew, so the exact remaining time differs. Don't compare `TTL`/`PTTL`.
+3. The XOR fold is safe for distinct keys, since the key is part of each hash. It's an
+   indicator of drift, though, with `verify` as the authority; it's the same fold `replicare`'s
+   own Redis verify uses.
+4. Big keys are slow. Serialising a value with millions of elements through `redis-cli` takes a
+   while, so either spot-check those individually rather than in the full-keyspace script, or
+   accept the runtime.
+5. Streams only have their entries compared. Consumer groups / PEL aren't deep-verified here,
+   and nor are they by `verify` in v1.
+6. Value reads may use a replica, but any comparison of deletes or of the keyspace has to use
+   the master; a lagging replica would show keys missing or extra that aren't.
+
+See also the [Postgres integrity checks](integrity-checks-postgres.md) and the
 [MySQL integrity checks](integrity-checks-mysql.md).
