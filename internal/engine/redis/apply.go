@@ -59,7 +59,7 @@ func (tx *redisApplyTx) StageUpsert(ctx context.Context, _ engine.TableRef, _ []
 //
 // In cluster (mesh) mode it is a NO-OP: a blind DEL would destroy a peer's legitimate
 // write, so mesh deletes flow only as version-guarded tombstone records through
-// StageUpsert (docs/multi-master.md §5.4).
+// StageUpsert (.sisyphus/multi-master-design.md §5.4).
 func (tx *redisApplyTx) DeleteAbsent(ctx context.Context, _ engine.TableRef, keys []engine.KeyValues) error {
 	if tx.cluster {
 		return nil

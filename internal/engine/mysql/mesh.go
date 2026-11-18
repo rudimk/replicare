@@ -11,7 +11,7 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// Multi-master mesh machinery for MySQL (CLAUDE.md §6, docs/multi-master.md §5.3),
+// Multi-master mesh machinery for MySQL (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.3),
 // mirroring internal/engine/postgres/mesh.go. It lives in the source `replicare`
 // DATABASE alongside the delta/track tables and is created ONLY for cluster members
 // (InstallOriginCapture) — a one-way source gets none of it, so the one-way path is

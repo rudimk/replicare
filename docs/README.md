@@ -60,10 +60,9 @@ engine's specifics.
 
 ### Active-active
 
-- **[Active-active: operating rules](active-active.md)** — the rules a multi-node setup must
-  follow, in plain terms.
-- **[Multi-master design](multi-master.md)** — the `clusters:` config, loop suppression and
-  last-write-wins conflict resolution, shipped for Postgres, MySQL and Redis.
+- **[Active-active replication](active-active.md)** — writes on any node, for Postgres,
+  MySQL and Redis: setting up a cluster, how conflicting changes are settled, and the two
+  rules a multi-node setup must follow.
 
 ### Elsewhere in the repository
 

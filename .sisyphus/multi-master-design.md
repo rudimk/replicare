@@ -29,7 +29,7 @@ superuser anywhere**; the config surface is **`clusters:`**.
 
 **Operator-facing rules.** The plain-language rules for safely running an active-active
 cluster — the globally-unique-ID requirement and the schema-change procedure — live in
-[`active-active.md`](active-active.md). This note is the engineering design behind them; if
+[`active-active.md`](../docs/active-active.md). This note is the engineering design behind them; if
 the two ever disagree, the mechanisms described here are the source of truth and
 `active-active.md` should be corrected to match.
 
@@ -383,8 +383,8 @@ UUID). Id allocation belongs upstream of replication, and UUIDs put the fix exac
 keeping replicare a pure replicator with nothing to build on the write path.
 
 **Do NOT try to sync integer counters across a mesh.** This is the single most dangerous
-anti-pattern here, and it is why [`reseed-sequences` refuses a cluster member](operations.md#sequences--identity-counters-dr--promotion)
-and why [`sync_sequences`](operations.md#keeping-counters-warm-continuously-sync_sequences)
+anti-pattern here, and it is why [`reseed-sequences` refuses a cluster member](../docs/operations.md#sequences--identity-counters-dr--promotion)
+and why [`sync_sequences`](../docs/operations.md#keeping-counters-warm-continuously-sync_sequences)
 is one-way only. In a converged mesh every node holds the **union** of all rows, so
 `max(id)` is the same global maximum everywhere; setting every node's counter to
 `max(id)+1` collapses them onto **one shared counter**. Two nodes then both allocate
@@ -539,7 +539,7 @@ Notes:
    auto-counting column added to a running cluster) is not caught until the next restart.
    The plan is to run the same pure classifier on a schedule and on demand, so a risky
    change is flagged when it ships rather than at the next restart. This is the continuous
-   check referenced in [`active-active.md`](active-active.md) Rule 1.
+   check referenced in [`active-active.md`](../docs/active-active.md) Rule 1.
 
 ### 6.4 State-store & source-schema changes
 

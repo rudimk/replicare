@@ -10,7 +10,7 @@ import (
 )
 
 // Delta purge, bounded retention & forced reseed (CLAUDE.md §3.4;
-// docs/reseed-state-machine.md). Source-side only: Purge touches the delta and
+// .sisyphus/reseed-state-machine.md). Source-side only: Purge touches the delta and
 // track tables, never the StateStore (§9). It returns which targets it
 // sacrificed so the engine-neutral reseed orchestration can mark needs-reseed.
 
@@ -21,7 +21,7 @@ const defaultPurgeBatch = 10000
 // Purge removes deltas consumed by all configured targets, subject to retention.
 // If a target's pinned backlog exceeds a retention cap it is sacrificed: its
 // track is reset (so it will be reseeded from scratch) and the now-unpinned
-// deltas are purged. See docs/reseed-state-machine.md §3.
+// deltas are purged. See .sisyphus/reseed-state-machine.md §3.
 func (s *Source) Purge(ctx context.Context, t engine.TableRef, targets []engine.TargetID, ret engine.RetentionPolicy) (engine.PurgeStats, error) {
 	if err := s.requireConn(); err != nil {
 		return engine.PurgeStats{}, err
@@ -50,7 +50,7 @@ func (s *Source) Purge(ctx context.Context, t engine.TableRef, targets []engine.
 
 	// Reset the sacrificed targets' track (they are reseeded from scratch, so
 	// their partial consumption record is void — reset to EMPTY, never a
-	// high-water mark, docs/reseed-state-machine.md §4.5), then purge the deltas
+	// high-water mark, .sisyphus/reseed-state-machine.md §4.5), then purge the deltas
 	// now consumed by all remaining targets (treating the reseeding ones as
 	// satisfied). For a single-target sync, remaining is empty and the queue
 	// drains fully.

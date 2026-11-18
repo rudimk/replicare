@@ -38,7 +38,9 @@ copy/apply/reseed/pipeline/observability layers unchanged.
   silently mutate the wrong row, so pre-flight **blocks** such target tables. This is a hard faithful-transport guarantee.
 - **Least privilege (source):** `SELECT` + `TRIGGER` on the replicated tables,
   `CREATE`/owner on the `replicare` capture database — **no `SUPER`, no
-  `REPLICATION SLAVE`, no binlog access.** (Exact grant SQL ships with MM8.)
+  `REPLICATION SLAVE`, no binlog access.** Ready-to-edit grant SQL:
+  [`grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql) and
+  [`grants-target-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target-mysql.sql).
 
 ## The two operational wrinkles
 

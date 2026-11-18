@@ -6,7 +6,7 @@ import (
 )
 
 // MeshIDAllocCategory is the pre-flight Finding category for active-active
-// id-allocation policing (CLAUDE.md §6, docs/multi-master.md §5.6, §6.3).
+// id-allocation policing (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.6, §6.3).
 const MeshIDAllocCategory = "mesh-id-alloc"
 
 // MeshIDAllocationFindings polices id allocation for an active-active (mesh) member.
@@ -14,7 +14,7 @@ const MeshIDAllocCategory = "mesh-id-alloc"
 // CI-testable: each engine's introspection sets Column.Identity / Column.DefaultSequence
 // / Column.DataType, and this classifier reasons about them the same way.
 //
-// The hazard (docs/multi-master.md §5.6): in a converged mesh every node holds the
+// The hazard (.sisyphus/multi-master-design.md §5.6): in a converged mesh every node holds the
 // union of all rows and allocates from the same local counter, so two nodes mint the
 // same integer id for DIFFERENT rows; they replicate and HLC last-write-wins silently
 // discards one — the §1.7 cardinal sin. replicare cannot de-collide independently minted
@@ -105,7 +105,7 @@ func meshFindingsForTable(t Table) []Finding {
 			"%s.%s is a locally-allocated integer (%s) in %s — in an active-active mesh "+
 				"every node allocates from the same counter, so two nodes mint the same id "+
 				"for different rows and HLC last-write-wins silently drops one. Use "+
-				"globally-unique keys (UUID v7 / ULID); see docs/multi-master.md §5.6.",
+				"globally-unique keys (UUID v7 / ULID); see Rule 1 at https://replicare.rudimk.com/active-active.html.",
 			t.Ref, col.Name, strings.TrimSpace(col.DataType), keyRole)
 		if narrow {
 			msg += " (This key is 32-bit or narrower, so even the deferred integer-window fallback would have little range.)"

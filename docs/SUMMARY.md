@@ -37,12 +37,7 @@
 
 # Active-active
 
-- [Operating rules](active-active.md)
-- [Multi-master design](multi-master.md)
-
-# Internals
-
-- [Purge, retention & reseed](reseed-state-machine.md)
+- [Active-active replication](active-active.md)
 
 # Testing
 

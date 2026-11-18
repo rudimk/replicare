@@ -102,6 +102,38 @@ func TestSiteNeverReferencesInternalDocs(t *testing.T) {
 	}
 }
 
+// internalTermRe matches the vocabulary of the internal design notes and plans: milestone
+// codes (M5c, MM6, MF3, RM2, F2), the plan reviewer, and "design note" / "milestone". None of
+// it means anything to a reader of the site, and its presence is the sign that an internal
+// design document (which belongs in .sisyphus/) has leaked onto a public page.
+var internalTermRe = regexp.MustCompile(`\b(?:MM|MF|RM)[0-9]+[a-z]?\b|\bM[0-9]+[a-z]?\b|\bF[0-9]+\b|(?i:momus|milestone|design note|phased plan|project owner)`)
+
+// TestSiteHasNoInternalPlanningTerms: design notes, milestone plans and their vocabulary stay
+// out of the published pages.
+func TestSiteHasNoInternalPlanningTerms(t *testing.T) {
+	pages, order := loadSite(t)
+	for _, name := range order {
+		for i, line := range strings.Split(pages[name].content, "\n") {
+			if m := internalTermRe.FindString(line); m != "" {
+				t.Errorf("%s:%d uses the internal planning term %q, which belongs in the internal design notes, not on the site: %s", name, i+1, m, strings.TrimSpace(line))
+			}
+		}
+	}
+}
+
+func TestInternalTermPattern(t *testing.T) {
+	for _, s := range []string{"shipped in M5c", "the MM6 mesh", "(RM2)", "F2 signals", "MF3 floor", "see the design note", "Momus review", "next milestone"} {
+		if !internalTermRe.MatchString(s) {
+			t.Errorf("internalTermRe misses %q", s)
+		}
+	}
+	for _, s := range []string{"utf8mb4", "UUID v7", "MAX(id)", "a plan for counters", "HTTP/2", "SM2 key", "X5"} {
+		if internalTermRe.MatchString(s) {
+			t.Errorf("internalTermRe wrongly matches %q", s)
+		}
+	}
+}
+
 // TestSiteLinksResolve: every link on the site goes somewhere real — another page (and the
 // heading it names), a file in the repository, or an external URL.
 func TestSiteLinksResolve(t *testing.T) {

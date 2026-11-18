@@ -19,7 +19,7 @@ import (
 // MM6 — Redis mesh SOURCE side: origin identity, version-stamping re-read, dirty-key
 // enumeration from BOTH the data keyspace (present keys) and the metadata keyspace
 // (deletes/tombstones), and tombstone GC. All of this is gated on s.cluster; a
-// one-way source never enters these paths (docs/multi-master.md §5.4).
+// one-way source never enters these paths (.sisyphus/multi-master-design.md §5.4).
 
 // EnableClusterReads implements engine.ClusterReadSource: switch this source to the
 // version-aware, stamping re-read for a cluster edge. nodeID is this member's origin

@@ -49,7 +49,7 @@ REPLACE), so no watermark is needed.
 Because the store never *interprets* these fields — it persists `TableRef` as
 two opaque strings, `KeyValues`/`DeltaID` as JSON/bigint, and the advisory lock
 by sync name — a Redis unit flows through the exact same read/write path as a
-Postgres table. The RM3 tests
-(`internal/state/postgres/redis_unit_test.go`) assert this by round-tripping
+Postgres table. The tests in
+[`internal/state/postgres/redis_unit_test.go`](https://github.com/rudimk/replicare/blob/main/internal/state/postgres/redis_unit_test.go) assert this by round-tripping
 Redis-shaped `SyncDef`, `CopyProgress`, and `Cursor` values, and by proving the
 ownership lock excludes a second daemon for a Redis sync.

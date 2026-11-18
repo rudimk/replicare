@@ -216,7 +216,7 @@ type KeyExister interface { // implemented by the Redis Source
 // OriginAwareCapturer is an OPTIONAL Source capability for cluster (multi-master)
 // members: it installs trigger-based capture whose trigger additionally SUPPRESSES
 // re-capturing writes that replicare itself applied (loop suppression, CLAUDE.md
-// §6 / docs/multi-master.md §5.4). The suppression keys on a session marker the
+// §6 / .sisyphus/multi-master-design.md §5.4). The suppression keys on a session marker the
 // paired OriginMarkingSink sets on its apply/copy connections: the trigger fires
 // for an ordinary application write (no marker → captured, so a local write still
 // replicates outward) but not for a replicare-applied write (marker set → skipped,
@@ -229,7 +229,7 @@ type KeyExister interface { // implemented by the Redis Source
 //
 // nodeID is this member's stable replication-origin identity (CLAUDE.md §6): the
 // capture trigger stamps every local change into the mesh version register as
-// (hlc, nodeID) so HLC last-write-wins can resolve conflicts (docs/multi-master.md
+// (hlc, nodeID) so HLC last-write-wins can resolve conflicts (.sisyphus/multi-master-design.md
 // §5.3). It must be unique within the cluster.
 type OriginAwareCapturer interface {
 	InstallOriginCapture(ctx context.Context, tables []TableRef, nodeID string) error
@@ -238,7 +238,7 @@ type OriginAwareCapturer interface {
 // OriginMarkingSink is an OPTIONAL Sink capability paired with OriginAwareCapturer:
 // once EnableOriginMarking is called, every apply/copy write through the Sink carries
 // the loop-suppression marker, so an origin-aware source on the same database does not
-// re-capture it (docs/multi-master.md §5.4). It is enabled ONLY for a cluster member's
+// re-capture it (.sisyphus/multi-master-design.md §5.4). It is enabled ONLY for a cluster member's
 // sink; a one-way Sink is never enabled, so its writes set no marker and behave exactly
 // as before. The marker is transaction-scoped (Postgres SET LOCAL), so it cannot leak
 // past an apply/copy transaction onto an ordinary connection.
@@ -271,7 +271,7 @@ type ClusterReadSource interface {
 
 // TombstoneGC is an OPTIONAL Source capability for cluster (multi-master) members: it
 // reclaims version-register tombstones whose delete has been consumed by every peer,
-// bounding the register's footprint (CLAUDE.md §5.3, docs/multi-master.md §5.3). The
+// bounding the register's footprint (CLAUDE.md §5.3, .sisyphus/multi-master-design.md §5.3). The
 // pipeline calls it each streaming pass for a cluster edge; a one-way source does not
 // implement it (or is a no-op), so nothing runs on the one-way path.
 type TombstoneGC interface {

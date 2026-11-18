@@ -10,7 +10,7 @@
 > obligation limited to **pre-flight policing** — not counter-syncing, not allocation (§6).
 >
 > Companion reading: `CLAUDE.md` §7 (data-only), §4.2 (identity columns / `OVERRIDING
-> SYSTEM VALUE`), §12 (privileges); `docs/multi-master.md` (the mesh);
+> SYSTEM VALUE`), §12 (privileges); `.sisyphus/multi-master-design.md` (the mesh);
 > `.sisyphus/multi-master-plan.md`.
 
 ---
@@ -170,14 +170,14 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
   (`syncSequences`), `internal/daemon/build.go` (threaded, always false on a cluster edge). Unit-tested
   (config parse + mesh refusal; pipeline gating/throttle/best-effort). Docs: `docs/configuration.md`,
   `docs/operations.md`, `CLAUDE.md` §12 + decision log.
-- **M6 (active-active docs) — ✅ SHIPPED.** `docs/multi-master.md` §5.6 "Active-active id
+- **M6 (active-active docs) — ✅ SHIPPED.** `.sisyphus/multi-master-design.md` §5.6 "Active-active id
   allocation — globally-unique keys": **UUID v7 / ULID (stored binary) is the blessed strategy**,
   with the §6.0 fine print (allocation-not-conflict-resolution, the migration cost,
   v7/ULID-over-v4 stored binary, and *all* unique keys not just the PK), a loud "do NOT sync
   integer counters across a mesh" (the §5 blast radius, cross-linked to the `reseed-sequences`
   refusal and `sync_sequences`), the §6.2 why-counter-syncing-can't-work summary, and a forward
   pointer to the M7 guardrail. Cross-linked from `docs/operations.md` → Sequences section; the
-  planned policing is seeded as `docs/multi-master.md` §6.3 item 3. No code.
+  planned policing is seeded as `.sisyphus/multi-master-design.md` §6.3 item 3. No code.
 - **M7 (active-active guardrail — code) — ✅ SHIPPED.** Mesh **pre-flight policing** (§6.1):
   at cluster bring-up the daemon refuses to start a mesh member whose replicated tables use a
   **locally-allocated integer PK or secondary unique key** (serial / identity /
@@ -187,7 +187,7 @@ applies. **Decision: ship the command first; treat continuous sync as a fast-fol
   over the introspected schema; wired into `internal/daemon/build.go` only on a cluster edge
   (one-way unaffected). Postgres `serial` caught via a new `Column.DefaultSequence` introspection
   flag (kept distinct from `Identity` so apply's `OVERRIDING SYSTEM VALUE` is unchanged). Docs:
-  `docs/multi-master.md` §5.6 + §6.3 item 3 + §8 status table. **Follow-up:** `replicare validate`
+  `.sisyphus/multi-master-design.md` §5.6 + §6.3 item 3 + §8 status table. **Follow-up:** `replicare validate`
   does not yet walk `clusters:`, so the refusal surfaces at `run`/bring-up, not in `validate`.
   The transparent integer-PK auto-config (§6.3) stays a **separate later plan**.
 

@@ -13,7 +13,7 @@ import (
 )
 
 // Version-guarded (HLC last-write-wins) apply for cluster members (CLAUDE.md §5.3,
-// docs/multi-master.md §5.3). It parallels the one-way StageUpsert/DeleteAbsent but,
+// .sisyphus/multi-master-design.md §5.3). It parallels the one-way StageUpsert/DeleteAbsent but,
 // instead of blindly overwriting, applies an incoming change only when its version
 // (rc_hlc_phys, rc_hlc_log, rc_node) strictly beats the value the target already
 // holds — recorded in the target's version register. The incoming version rides the

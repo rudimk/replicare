@@ -188,7 +188,7 @@ const ordersDDL = "CREATE TABLE rc_it.orders (id int PRIMARY KEY, note text)"
 // TestReseedConvergenceUnderWrites is the M5c keystone: an over-cap target is
 // forced to reseed, and — with source writes continuing throughout — the target
 // re-derives and converges to current source state, with no delta lost across the
-// handoff (docs/reseed-state-machine.md §4.3).
+// handoff (.sisyphus/reseed-state-machine.md §4.3).
 func TestReseedConvergenceUnderWrites(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()

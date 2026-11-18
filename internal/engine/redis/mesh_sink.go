@@ -14,7 +14,7 @@ import (
 // updates the local register ONLY when the incoming version strictly beats the local
 // one. That single comparison is both loop suppression (replicare's own applied write
 // carries a version the peer already has, so it loses) and HLC last-write-wins conflict
-// resolution (docs/multi-master.md §5.3). The value and its register are written
+// resolution (.sisyphus/multi-master-design.md §5.3). The value and its register are written
 // together in one Lua script — they share a cluster slot (metaKey co-location), so the
 // pair can never diverge (an MM6 atomicity requirement).
 

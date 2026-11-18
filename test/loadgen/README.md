@@ -109,7 +109,7 @@ well under ~500M rows per node (the harness refuses a scale that approaches the 
 ### Three-node mesh example
 
 Assume a running replicare `clusters:` mesh over three Postgres nodes `A`, `B`, `C`
-(config per [multi-master.md](https://replicare.rudimk.com/multi-master.html)), with `$A`/`$B`/`$C` their DSNs.
+(config per [Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)), with `$A`/`$B`/`$C` their DSNs.
 
 ```sh
 # 1. Schema on every node (data-only replication; targets must pre-exist).

@@ -27,7 +27,7 @@ clusters:       [ ... ]   # active-active (multi-master) groups (optional)
 
 `nodes` and `clusters` are **optional and additive** — a config with neither behaves
 exactly like a one-way daemon. See [Active-active clusters](#active-active-clusters-nodes-and-clusters)
-and the [multi-master design note](multi-master.md).
+and [Active-active replication](active-active.md).
 
 ## `logging`
 
@@ -261,21 +261,19 @@ delta queue to bound); Redis pacing lives in the `redis:` block instead
 
 ## Active-active clusters (`nodes` and `clusters`)
 
-> **Status: in progress.** For **Postgres and MySQL**, a `clusters:` block **runs today**
-> with full conflict resolution: the daemon brings up a full-mesh active-active cluster with
-> loop suppression (MM3) and HLC last-write-wins (MM4 for Postgres, MM5 mirrors it for MySQL),
-> so writes accepted on any node — including concurrent writes to the **same key** — converge
-> to the same value on every node, with no config and no user schema change; deletes resolve
-> via GC'd tombstones. **Redis** clusters are still parse-and-validate only. See the
-> [design note](multi-master.md#8-implementation-status) for the full status. These keys are
-> **optional and additive**: omit them and replicare behaves exactly as a one-way daemon. Do
-> not confuse a replicare **`clusters:`** entry (a group of active-active peer databases) with
-> a Redis endpoint's `redis.mode: cluster` (one *sharded* Redis) — different scopes.
+> A `clusters:` block runs a full active-active cluster on **Postgres, MySQL and Redis**:
+> writes accepted on any node — including changes to the **same row** on two nodes at
+> once — end up with the same value on every node, with nothing to configure and no change
+> to the application's tables. These keys are **optional and additive**: omit them and
+> replicare behaves exactly as a one-way daemon. Do not confuse a replicare **`clusters:`**
+> entry (a group of active-active peer databases) with a Redis endpoint's
+> `redis.mode: cluster` (one *sharded* Redis) — different things.
 
-An **active-active cluster** keeps N peer databases converged with writes accepted on
-**any** node. Conflict resolution is **zero-config** — replicare manages a hidden
-per-row version itself (HLC last-write-wins; no column to add, nothing to declare); see
-the [design note](multi-master.md). A cluster is **single-engine**, like a sync.
+An **active-active cluster** keeps N peer databases in step with writes accepted on
+**any** node. Conflicting changes are settled automatically (the later change wins,
+using a timestamp replicare keeps for each row; no column to add, nothing to declare);
+see [Active-active replication](active-active.md). A cluster is **single-engine**, like
+a sync.
 
 ### `nodes`
 

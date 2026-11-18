@@ -139,7 +139,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return fail(fmt.Errorf("target version: %w", err))
 	}
 	report := eng.Preflight(name, srcVer, tgtVer, srcSchema, tgtSchema)
-	// Active-active id-allocation policing (CLAUDE.md §6, docs/multi-master.md §5.6, §6.3):
+	// Active-active id-allocation policing (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.6, §6.3):
 	// only on a cluster edge, refuse to bring up a mesh member whose replicated tables use
 	// a locally-allocated integer PK/unique key — that is a silent-data-loss setup under
 	// HLC-LWW. The check is pure over the (source) schema; fold its findings into the report
@@ -149,7 +149,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		if mf := engine.MeshIDAllocationFindings(srcSchema); len(mf) > 0 {
 			report.Findings = append(report.Findings, mf...)
 			if detail := meshBlockDetail(mf); detail != "" {
-				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — docs/multi-master.md §5.6):%s", name, detail))
+				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — see Rule 1 at https://replicare.rudimk.com/active-active.html):%s", name, detail))
 			}
 		}
 	}

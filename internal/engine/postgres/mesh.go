@@ -12,7 +12,7 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// Multi-master mesh machinery (CLAUDE.md §6, docs/multi-master.md §5.3): the HLC
+// Multi-master mesh machinery (CLAUDE.md §6, .sisyphus/multi-master-design.md §5.3): the HLC
 // version register that makes HLC last-write-wins possible. These objects live in
 // the source `replicare` schema alongside the delta/track tables, but are created
 // ONLY for cluster members (InstallOriginCapture) — a one-way source never gets them,
@@ -83,7 +83,7 @@ $rc$`
 // receive step): the new physical is the max of the local physical, the incoming
 // physical, and wall-clock now; logical is bumped so a subsequent local tick is
 // strictly greater than anything seen. This is what makes a laggard node's next write
-// beat an older remote write despite clock skew (docs/multi-master.md §9).
+// beat an older remote write despite clock skew (.sisyphus/multi-master-design.md §9).
 const hlcObserveFnDDL = `CREATE OR REPLACE FUNCTION replicare.hlc_observe(in_phys bigint, in_log int)
 RETURNS void LANGUAGE plpgsql AS $rc$
 DECLARE pt bigint; new_phys bigint;

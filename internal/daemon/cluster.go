@@ -13,7 +13,7 @@ import (
 // clusterEdge is one directed replication edge of an active-active cluster: changes
 // captured on srcNode are applied to dstNode. A full mesh over N members is the set
 // of all ordered pairs (srcNode != dstNode), so every member's writes reach every
-// other member directly (docs/multi-master.md §5.2). Each edge runs as an
+// other member directly (.sisyphus/multi-master-design.md §5.2). Each edge runs as an
 // independent single-active job in cluster mode (loop-suppressing capture + marked
 // apply), so an inbound change is not re-captured and echoed back around the mesh.
 type clusterEdge struct {

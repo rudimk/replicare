@@ -486,7 +486,7 @@ Replication topology is **configured by the user**, never hardcoded:
   and Redis** — a `clusters:` block of peer `nodes:`, zero-config **HLC last-write-wins**
   conflict resolution over a hidden `(hlc, node_id)` version register (a `replicare`-schema
   side table on PG/MySQL; a parallel metadata keyspace on Redis, since Redis is
-  capture-less), loop suppression, and GC'd tombstones. See `docs/multi-master.md`
+  capture-less), loop suppression, and GC'd tombstones. See `.sisyphus/multi-master-design.md`
   (MM3–MM6). HA leader election (MM8) is still deferred.
 
 For one-way replication the source is authoritative (target rows are overwritten/deleted to
@@ -728,12 +728,17 @@ without changing the single-static-binary distribution.
   built on every PR and published to GitHub Pages on push to `main` by
   `.github/workflows/docs.yml` (`task docs:serve` locally). **This file (CLAUDE.md) and the
   `.sisyphus/` plans are never published and never mentioned or linked from the site** — write
-  site docs self-contained. Docs that live next to their code (the Helm chart README, the
+  site docs self-contained. **The site is for users only: internal design notes and specs
+  (milestones, design reviews, implementation status, "proposed design") never go in `docs/`;
+  they live in `.sisyphus/` (e.g. `.sisyphus/multi-master-design.md`,
+  `.sisyphus/reseed-state-machine.md`).** What a user needs from a design note is rewritten in
+  plain language on a user page (e.g. `docs/active-active.md`). Docs that live next to their code (the Helm chart README, the
   `test/loadgen*` READMEs, `CHANGELOG.md`) are pulled in with `{{#include}}` pages and must use
   absolute links (`https://replicare.rudimk.com/<page>.html`); links from `docs/` to other repo
   files go to GitHub (`https://github.com/rudimk/replicare/blob/main/...`). `internal/docscheck`
   enforces all of it in CI: every page in SUMMARY.md, every link and `#anchor` resolves, no
-  mention of CLAUDE.md or the plans.
+  mention of CLAUDE.md or the plans, and no internal planning vocabulary (milestone codes such
+  as M5c/MM6/RM2/F2, "design note", "milestone", "Momus").
 
 ---
 
@@ -843,19 +848,19 @@ invasive.
 | Tables without PK/unique | **Skip + loud warning** (telemetry-surfaced). |
 | Initial copy vs deltas | **Enable capture first**, then chunked parallel copy; idempotent apply reconciles overlap → **no frozen snapshot needed** (handles huge DBs). |
 | Delivery | **At-least-once + idempotent upserts**, checkpointed cursors. |
-| Topology | **User choice**: default single→single; **fan-out supported**; **active-active mesh shipped** (PG/MySQL/Redis, `clusters:`, HLC-LWW; docs/multi-master.md). |
+| Topology | **User choice**: default single→single; **fan-out supported**; **active-active mesh shipped** (PG/MySQL/Redis, `clusters:`, HLC-LWW; .sisyphus/multi-master-design.md). |
 | Engine scope | **Never cross-engine.** A sync is **single-engine** (source + all targets share one engine: PG→PG, MySQL→MySQL, Redis→Redis). Follows from faithful transport (§1.7); enforced in config validation. |
 | Config model | **Neutral envelope + typed per-engine block, registry-dispatched** (§11). Each engine owns/validates its connection, selection, and CDC tuning. v1: Postgres block only; MySQL/Redis are extension points. |
 | Per-pipeline pause | Optional neutral **`enabled: true\|false`** on each `sync`/`cluster` (unset = enabled, pure opt-out). `false` = daemon skips it at startup (no ownership lock); source capture left installed so unpause+restart drains the backlog (data-loss-free), but source deltas grow + retention is paused while off. Start-time only (config change + restart). **Zero active syncs → daemon idles (does NOT exit), so a fully-paused config never CrashLoops; `status` shows `[PAUSED]`.** See §11. |
 | Schema | **Target pre-exists; data-only; no live DDL** (v1). |
-| Sequence/identity counters | Row **values** (incl. identity ids) replicate faithfully; the sequence **counter** (`last_value` / `AUTO_INCREMENT`) does **not** (data-only, §7). Harmless for a passive replica; on **DR promotion** `nextval()` would collide, so **`replicare reseed-sequences`** advances each replicated table's counter to `max(id)+1` on the promoted target (PG `setval`, MySQL `ALTER … AUTO_INCREMENT`; needs a DR-only sequence `UPDATE`/table `ALTER` grant). **Passive/one-way/DR ONLY** — it refuses an active-active mesh member (same op there = silent LWW data loss). Optional neutral **`sync_sequences: true`** sync knob (default off) keeps that advance running on a lazy interval during streaming (same mechanism + mesh refusal, enforced at config load; grant becomes steady-state when on, missing grant logged/retried not fatal). **Active-active id allocation = globally-unique keys (UUID v7 / ULID)**, never counter-syncing; replicare polices, never allocates — a **mesh pre-flight refuses to bring up a cluster member whose replicated tables use a locally-allocated integer PK/secondary-unique key** (serial/identity/`AUTO_INCREMENT`; pure CI-tested classifier `engine.MeshIDAllocationFindings`, run on cluster edges in `daemon.build`; PG `serial` caught via `Column.DefaultSequence`, distinct from `Identity`). See `.sisyphus/sequence-reseed-plan.md`, `docs/multi-master.md` §5.6/§6.3. |
+| Sequence/identity counters | Row **values** (incl. identity ids) replicate faithfully; the sequence **counter** (`last_value` / `AUTO_INCREMENT`) does **not** (data-only, §7). Harmless for a passive replica; on **DR promotion** `nextval()` would collide, so **`replicare reseed-sequences`** advances each replicated table's counter to `max(id)+1` on the promoted target (PG `setval`, MySQL `ALTER … AUTO_INCREMENT`; needs a DR-only sequence `UPDATE`/table `ALTER` grant). **Passive/one-way/DR ONLY** — it refuses an active-active mesh member (same op there = silent LWW data loss). Optional neutral **`sync_sequences: true`** sync knob (default off) keeps that advance running on a lazy interval during streaming (same mechanism + mesh refusal, enforced at config load; grant becomes steady-state when on, missing grant logged/retried not fatal). **Active-active id allocation = globally-unique keys (UUID v7 / ULID)**, never counter-syncing; replicare polices, never allocates — a **mesh pre-flight refuses to bring up a cluster member whose replicated tables use a locally-allocated integer PK/secondary-unique key** (serial/identity/`AUTO_INCREMENT`; pure CI-tested classifier `engine.MeshIDAllocationFindings`, run on cluster edges in `daemon.build`; PG `serial` caught via `Column.DefaultSequence`, distinct from `Identity`). See `.sisyphus/sequence-reseed-plan.md`, `.sisyphus/multi-master-design.md` §5.6/§6.3. |
 | Process model | **Single daemon, many syncs, goroutine worker pools.** |
 | State store | **Pluggable `StateStore`; v1 = Postgres only** (dedicated schema on target/source/separate PG). Embedded/etcd/cloud-KV deferred. (Delta/track tables always live on source — separate concern.) |
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
 | Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
-| Docs site | **mdBook from `docs/`**, GitHub Pages via `.github/workflows/docs.yml`, at replicare.rudimk.com. **Never publish, mention or link CLAUDE.md or `.sisyphus/`**; outside-`docs/` files via `{{#include}}` with absolute links; `internal/docscheck` enforces links, anchors and the ban (§11). |
+| Docs site | **mdBook from `docs/`**, GitHub Pages via `.github/workflows/docs.yml`, at replicare.rudimk.com. **Never publish, mention or link CLAUDE.md or `.sisyphus/`; internal design notes live in `.sisyphus/`, never `docs/` (user pages only, no milestone vocabulary)**; outside-`docs/` files via `{{#include}}` with absolute links; `internal/docscheck` enforces links, anchors and the ban (§11). |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
 | Compatibility | **Must read from very old source Postgres**; keep source SQL conservative; target may use modern features. |
 | Redis engine fit | **Overload the neutral vocabulary** (`TableRef`→ replication unit, `KeyValues`→ one `[]byte` key, text COPY→ private binary DUMP framing); **single-member acyclic components + a thin `ApplyTx`**; **near-zero neutral edits** — reuse copy/apply/state/config/observability, plus one additive optional `KeyLister`/`KeyExister` delete-reconciliation seam and a `Schema.Capabilities` field. |
@@ -868,7 +873,7 @@ invasive.
 | Redis state store | **Reused Postgres, no new code**; nothing on the source. **A Redis→Redis sync still requires a Postgres state store** (documented wart). |
 | Redis cluster | Per-master `SCAN` + subscription + delete-sweep; topology via `CLUSTER SHARDS`/`SLOTS`; parallelism unit = shard; per-key ops sidestep cross-slot; **delete detection master-pinned** (replica lag → false deletes); DB 0 only. |
 | Redis privileges | Redis 6+ ACL, no admin; **`+restore` granted explicitly** (`@dangerous`); notification-enable/`PSUBSCRIBE` are privilege-gated extras (`deploy/acl-*-redis.txt`). |
-| Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine — deferred. **Redis active-active IS shipped** (MM6: metadata-keyspace version register, version-guarded Lua apply, tombstone deletes; docs/multi-master.md §5.4). |
+| Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine — deferred. **Redis active-active IS shipped** (MM6: metadata-keyspace version register, version-guarded Lua apply, tombstone deletes; .sisyphus/multi-master-design.md §5.4). |
 | Redis multi-master (MM6) | **Shipped.** Capture-less, so the `(hlc,node,deleted,vhash)` register lives in a **parallel metadata keyspace** (`\x00rc:m:{slot}K`, co-located in K's slot for atomic value+register Lua). Local writes detected by a **logical-value fingerprint** (version-gap-stable, not DUMP bytes); apply is **version-guarded** (loop suppression + LWW in one compare); deletes are **tombstones** (stateless sweep disabled in mesh); tombstone **GC by age**. Metadata excluded from all data ops at `selection.match`. One-way Redis unchanged. Correctness on the local gate (`REPLICARE_REDIS=1`); pure logic in CI. |
 | CI vs local (Redis) | **CI = compile/unit/PG-regression only**; Redis correctness is a **LOCAL** gate (`REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1`, or `REPLICARE_REDIS_CLUSTER=1`; the tri-engine daemon test via `task test:integration:tri`). |
 
@@ -888,7 +893,7 @@ invasive.
   becomes a goal; keep the ownership interface ready for it.
 - Multi-master conflict resolution: **HLC last-write-wins shipped** (PG/MySQL/Redis, zero-config);
   a pluggable priority/custom resolver on the open policy interface — design later.
-- **Partition+DROP as default on PG≥10** — **RESOLVED (M5c, `docs/reseed-state-machine.md` §5):**
+- **Partition+DROP as default on PG≥10** — **RESOLVED (M5c, `.sisyphus/reseed-state-machine.md` §5):**
   **no** — batched-DELETE + aggressive autovacuum is the universal v1 default on every version;
   partition+DROP stays an opt-in, documented optimization for high-churn PG≥10. **M9 kept it
   deferred** (batched-DELETE proven sufficient); the **partition granularity/cadence** numbers are a
@@ -897,7 +902,7 @@ invasive.
 - ~~**Reseed coordination:** mechanics of marking a target needs-reseed, resetting its track,
   re-running initial copy, and resuming streaming without gaps~~ — **RESOLVED (M5c):** the reseed
   state machine, its no-delta-lost invariant, and crash-safety across the handoff are specified in
-  `docs/reseed-state-machine.md` (§4).
+  `.sisyphus/reseed-state-machine.md` (§4).
 - Optional full-row capture mode (currently PK-only) if a use case demands exact history.
 - Re-sync / reseed workflow for schema drift or divergence.
 - Helm chart packaging.

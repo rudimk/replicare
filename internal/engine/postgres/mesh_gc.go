@@ -8,7 +8,7 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 )
 
-// Tombstone / version-register GC (CLAUDE.md §5.3, docs/multi-master.md §5.3). A
+// Tombstone / version-register GC (CLAUDE.md §5.3, .sisyphus/multi-master-design.md §5.3). A
 // tombstone (a register row with rc_deleted=true) must outlive the moment a delete is
 // captured so it can reject a resurrecting OLDER write from a peer that has not yet
 // applied the delete. It becomes safe to remove once EVERY peer has applied the

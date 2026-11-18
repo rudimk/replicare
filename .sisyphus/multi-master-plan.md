@@ -1,7 +1,7 @@
 # replicare — Multi-Master (Active-Active) Implementation Plan (v3)
 
 > **Status: PLAN / NOT STARTED.** Companion to the design note
-> [`docs/multi-master.md`](../docs/multi-master.md). Read the spec first; this plan
+> [`.sisyphus/multi-master-design.md`](../.sisyphus/multi-master-design.md). Read the spec first; this plan
 > turns it into milestones with acceptance criteria, a critical path, and — first
 > among equals — the invariants that keep the existing one-way path unchanged.
 >
@@ -327,7 +327,7 @@ tombstone keyspace RW, no admin) + `deploy/acl-*` updates are MM6 acceptance.
 
 ### MM7 — Cluster lifecycle: retention & reseed reconciliation
 Reconcile clusters with the default-on retention/reseed machinery (CLAUDE.md §3.4;
-`docs/reseed-state-machine.md`). A slow member hitting the cap → needs-reseed → re-copy
+`.sisyphus/reseed-state-machine.md`). A slow member hitting the cap → needs-reseed → re-copy
 must (a) run marked (MM3) so it doesn't self-capture, (b) **seed the register**, and
 (c) **not resurrect tombstoned keys**.
 - **Acceptance:** a member forced to reseed re-converges without echoing its copy, seeds
@@ -347,7 +347,7 @@ election + cursor fencing (today stubbed). A cluster must not split-brain.
 F2 contract entries as **new distinct series** (conflicts resolved by winner origin,
 loop-suppressed-write rate, HLC skew, version-register/tombstone backlog, per-edge lag —
 **not** new labels on existing series) with M6-style verification; update
-`docs/multi-master.md` (plan→shipped where true), engine pages, configuration reference,
+`.sisyphus/multi-master-design.md` (plan→shipped where true), engine pages, configuration reference,
 `CLAUDE.md`, and the combined no-superuser grant docs.
 - **Acceptance:** `/metrics` matches the extended contract; docs describe `clusters:`,
   the zero-config HLC-LWW model, and per-engine no-superuser grants (and disambiguate a

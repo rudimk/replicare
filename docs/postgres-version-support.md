@@ -1,11 +1,10 @@
 # Postgres version support
 
-This records replicare's committed Postgres version support floor and the
-rationale. It is load-bearing: several design decisions hinge on genuinely old
-source behavior, so the floor is a decision, not
-an afterthought.
+This page covers the oldest Postgres version replicare supports as a source, the
+target version it is tested against, and why. Much of replicare's source-side SQL is
+written to work on genuinely old servers, so the oldest supported version matters.
 
-## Decision
+## Supported versions
 
 | Role | Version in the test harness | Support statement |
 |------|------|-------------------|

@@ -197,7 +197,7 @@ skipped; `--dry-run` reports the target values and writes nothing.
   cluster member: there the same `max(id)+1` collapses every node onto one counter and
   silently drops rows via last-write-wins. Active-active id allocation is a schema
   concern — use globally-unique keys (UUID v7 / ULID); see
-  [multi-master](multi-master.md).
+  [active-active, Rule 1](active-active.md#rule-1--use-globally-unique-ids-uuid-or-ulid-always).
 - **Privilege:** a DR-only grant beyond the DML set — Postgres `UPDATE` on each
   sequence, MySQL `ALTER` on each table (reads only the target's own `max(id)`; no
   source privilege). See [operations → Sequences & identity counters](operations.md#sequences--identity-counters-dr--promotion).

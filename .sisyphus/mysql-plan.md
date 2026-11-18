@@ -514,7 +514,7 @@ metrics/spans.
 
 ### MM5c — Bloat control: purge + bounded retention + forced reseed (MySQL)
 **Goal:** Protect a source we may not own; survive a stalled **InnoDB history list** (xmin analog).
-**Pre-work (oracle):** confirm the engine-neutral reseed state machine (`docs/reseed-state-machine.md`)
+**Pre-work (oracle):** confirm the engine-neutral reseed state machine (`.sisyphus/reseed-state-machine.md`)
 needs no MySQL change — or enumerate `TEMP`/`FK_CHECKS`/orphan-verify interactions during re-copy.
 **Deliverables:** **batched consumption-gated purge** (plain `DELETE` — no autovacuum) with **optional
 per-table `OPTIMIZE TABLE`** and/or **RANGE-partition + `DROP PARTITION`** (5.7+/8.0) as the
