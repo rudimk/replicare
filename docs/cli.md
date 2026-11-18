@@ -152,7 +152,7 @@ Installs or removes the trigger-based CDC machinery on a sync's source, over its
 selected tables. `run` installs capture automatically, so this is for
 pre-provisioning or manual teardown.
 
-**Note (§12):** `install` needs only `TRIGGER` (plus `SELECT`/`USAGE` and schema
+**Note:** `install` needs only `TRIGGER` (plus `SELECT`/`USAGE` and schema
 creation). `remove` additionally needs **table ownership** to drop the triggers —
 if the replicare role doesn't own the tables, removal of the trigger fails
 (reported), though replicare's own delta/track tables are still dropped.
@@ -184,8 +184,7 @@ replicare reseed-sequences config.yml --sync app-to-warehouse --dry-run  # repor
 Advances each replicated table's owned identity/serial/`AUTO_INCREMENT` counter on a
 **promoted one-way (DR) target** to `max(id)+1`, so after a failover cutover the node
 never re-issues an id already present in the replicated data. replicare replicates row
-*values* faithfully but not the sequence *object's* counter (data-only, `CLAUDE.md`
-§7); for a passive replica that is harmless, but a promoted node's `nextval()` would
+*values* faithfully but not the sequence *object's* counter (data-only); for a passive replica that is harmless, but a promoted node's `nextval()` would
 collide with the copied rows. Postgres uses `setval`, MySQL `ALTER TABLE …
 AUTO_INCREMENT`. Tables with no owned counter (UUID / natural / composite PK) are
 skipped; `--dry-run` reports the target values and writes nothing.

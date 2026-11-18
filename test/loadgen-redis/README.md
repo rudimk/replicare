@@ -1,6 +1,6 @@
 # loadgen-redis — a Redis load + verification harness for replicare
 
-`loadgen-redis` is the Redis sibling of [`test/loadgen`](../loadgen/README.md). It
+`loadgen-redis` is the Redis sibling of [`test/loadgen`](https://replicare.rudimk.com/load-testing-postgres.html). It
 is a manual, idempotent tool for exercising replicare's Redis engine against
 **broad, multi-type, high-volume** data. You run it against a **source** Redis; it
 seeds a rich keyspace the first time and applies random mutations on every
@@ -128,7 +128,7 @@ Always pass the same `--node-id` for a given node's DB. Keep `--scale` modest pe
 ### Three-node mesh example
 
 Assume a running replicare `clusters:` mesh over three Redis nodes `A`, `B`, `C`
-(config per [multi-master.md](../../docs/multi-master.md)), with `$A`/`$B`/`$C` their
+(config per [multi-master.md](https://replicare.rudimk.com/multi-master.html)), with `$A`/`$B`/`$C` their
 connection specs. There is **no `ddl` step** — Redis has no schema.
 
 ```sh

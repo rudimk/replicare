@@ -1,16 +1,15 @@
 # MySQL engine
 
 replicare's second engine replicates **MySQL → MySQL** using the same trigger-based,
-no-binlog CDC model as Postgres (CLAUDE.md §3.1) and reuses the engine-neutral
-copy/apply/reseed/pipeline/observability layers unchanged. The design and milestone
-plan live in [`../.sisyphus/mysql-plan.md`](../.sisyphus/mysql-plan.md).
+no-binlog CDC model as Postgres and reuses the engine-neutral
+copy/apply/reseed/pipeline/observability layers unchanged.
 
 > **Status: shipped.** The MySQL engine runs end to end — trigger capture,
 > chunked initial copy (byte-faithful `LOAD DATA`), FK-ordered streaming apply
 > (including cyclic `NOT NULL` components), bloat control (purge/retention/reseed),
 > observability, and the full daemon lifecycle — and coexists with Postgres syncs
 > in one daemon. This page documents the engine's shape and its two operational
-> wrinkles. Try it with the [MySQL demo](../examples/demo-mysql/).
+> wrinkles. Try it with the [MySQL demo](https://github.com/rudimk/replicare/tree/main/examples/demo-mysql).
 
 ## Supported versions
 
@@ -23,7 +22,7 @@ plan live in [`../.sisyphus/mysql-plan.md`](../.sisyphus/mysql-plan.md).
 
 - **InnoDB tables only.** Non-transactional engines (MyISAM/MEMORY) break the
   per-component atomic apply and the source consume/track atomicity, so pre-flight
-  **blocks** them (mysql-plan §0.5).
+  **blocks** them.
 - **`local_infile=ON` is required on the target** — it is the copy/apply transport
   (`LOAD DATA LOCAL INFILE`). replicare probes it at connect and, if it is off,
   **halts loud with an actionable error** rather than failing cryptically mid-copy.
@@ -33,11 +32,10 @@ plan live in [`../.sisyphus/mysql-plan.md`](../.sisyphus/mysql-plan.md).
   it byte-faithfully across column charsets needs careful design, and a hardening
   release favors a loud requirement over a risky fallback.)*
 - **Every replicated table needs a primary key or a usable unique key.** Tables
-  without one are skipped with a loud warning (CLAUDE.md §3.1).
+  without one are skipped with a loud warning.
 - **No secondary UNIQUE keys on target tables** (beyond the replication key):
   MySQL's `INSERT … ON DUPLICATE KEY UPDATE` fires on *any* unique key and would
-  silently mutate the wrong row, so pre-flight **blocks** such target tables
-  (mysql-plan §0.4). This is a hard §1.7 (faithful-transport) guarantee.
+  silently mutate the wrong row, so pre-flight **blocks** such target tables. This is a hard faithful-transport guarantee.
 - **Least privilege (source):** `SELECT` + `TRIGGER` on the replicated tables,
   `CREATE`/owner on the `replicare` capture database — **no `SUPER`, no
   `REPLICATION SLAVE`, no binlog access.** (Exact grant SQL ships with MM8.)
@@ -51,7 +49,7 @@ Both follow from the v1 architecture and are worth knowing up front:
 replicare's own operational state — which syncs exist, per-table copy progress,
 per-target cursors, and the single-active ownership lock — lives in a
 **Postgres** state store (`state_store.engine: postgres`), *regardless of the data
-engine* (CLAUDE.md §9). This state is small control-plane bookkeeping, entirely
+engine*. This state is small control-plane bookkeeping, entirely
 separate from your MySQL data: the correctness-bearing replication state (the
 delta/track tables) lives on the **MySQL source**, exactly as Postgres puts them on
 a Postgres source.
@@ -62,10 +60,10 @@ state. A MySQL-backed state store is a future item behind the pluggable
 
 ### 2. MySQL syncs are strictly at-least-once
 
-replicare's delivery is at-least-once with idempotent apply (CLAUDE.md §5). For a
+replicare's delivery is at-least-once with idempotent apply. For a
 **Postgres** target, when the state store *is* that target database, a cursor
 advance can ride the same transaction as its apply batch — yielding
-effectively-exactly-once apply per batch (CLAUDE.md §9, "bonus property").
+effectively-exactly-once apply per batch.
 
 That optimization is **not available for MySQL syncs**: the state store is a
 different engine/server (Postgres) than the MySQL target, so no single transaction
@@ -124,7 +122,7 @@ syncs:
   verify-full` (mapped onto the driver, including a custom `verify-ca`).
 - `database` is the DSN default; selection globs may span other databases, and
   cross-database FK components are handled.
-- The **single-engine rule** (§6) is enforced: a MySQL source's targets must all be
+- The **single-engine rule** is enforced: a MySQL source's targets must all be
   MySQL — never cross-engine.
 
 ## Validating

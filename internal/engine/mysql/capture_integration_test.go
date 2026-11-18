@@ -118,7 +118,8 @@ func TestCaptureLifecycle(t *testing.T) {
 }
 
 // TestPreExistingTriggerBlocks confirms capture install refuses a table that
-// already has a conflicting AFTER trigger on the 5.7 floor.
+// already has a conflicting AFTER trigger where MySQL allows only one trigger per
+// event (before 5.7.2 — in practice a best-effort 5.6 source).
 func TestPreExistingTriggerBlocks(t *testing.T) {
 	if !integration(t) {
 		return
@@ -129,8 +130,8 @@ func TestPreExistingTriggerBlocks(t *testing.T) {
 	t.Cleanup(func() { _, _ = s.db.Exec("DROP DATABASE IF EXISTS replicare") })
 
 	ver, _ := serverVersion(ctx, s.db)
-	if ver >= 80000 {
-		t.Skip("pre-existing-trigger block only applies on MySQL < 8.0")
+	if ver >= multiTriggerMinVersion {
+		t.Skip("the one-trigger-per-event limit only exists before MySQL 5.7.2")
 	}
 	mustExec(t, ctx, s.db,
 		"CREATE TABLE rc_it.audited (id INT PRIMARY KEY, n INT) ENGINE=InnoDB",
@@ -140,5 +141,65 @@ func TestPreExistingTriggerBlocks(t *testing.T) {
 	err := s.InstallCapture(ctx, []engine.TableRef{{Schema: "rc_it", Name: "audited"}})
 	if err == nil {
 		t.Fatal("expected install to block on a pre-existing AFTER trigger")
+	}
+}
+
+// TestCaptureCoexistsWithExistingTriggers: from MySQL 5.7.2 a table may carry several
+// triggers per event, so a table with the application's own AFTER INSERT/UPDATE/DELETE
+// triggers is captured normally — replicare's triggers sit alongside, and both the
+// application's triggers and capture keep firing. (Before this, any MySQL < 8.0 was
+// refused, needlessly blocking 5.7 sources.)
+func TestCaptureCoexistsWithExistingTriggers(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Second)
+	defer cancel()
+	s := connectSource(t, ctx)
+	t.Cleanup(func() { _, _ = s.db.Exec("DROP DATABASE IF EXISTS replicare") })
+
+	ver, _ := serverVersion(ctx, s.db)
+	// A fixed 5.7.2 here, not multiTriggerMinVersion: the test must fail, not skip, if
+	// that constant is ever raised back above what MySQL actually allows.
+	if ver < 50702 {
+		t.Skip("before MySQL 5.7.2 an existing trigger blocks capture (TestPreExistingTriggerBlocks)")
+	}
+	mustExec(t, ctx, s.db,
+		"CREATE TABLE rc_it.audited (id INT PRIMARY KEY, n INT) ENGINE=InnoDB",
+		"CREATE TABLE rc_it.audit_log (id INT AUTO_INCREMENT PRIMARY KEY, msg VARCHAR(50)) ENGINE=InnoDB",
+		"CREATE TRIGGER rc_it.user_ins AFTER INSERT ON rc_it.audited FOR EACH ROW INSERT INTO rc_it.audit_log (msg) VALUES ('ins')",
+		"CREATE TRIGGER rc_it.user_upd AFTER UPDATE ON rc_it.audited FOR EACH ROW INSERT INTO rc_it.audit_log (msg) VALUES ('upd')",
+		"CREATE TRIGGER rc_it.user_del AFTER DELETE ON rc_it.audited FOR EACH ROW INSERT INTO rc_it.audit_log (msg) VALUES ('del')",
+	)
+	ref := engine.TableRef{Schema: "rc_it", Name: "audited"}
+	if err := s.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install must succeed next to the application's own triggers on MySQL %d: %v", ver, err)
+	}
+	mustExec(t, ctx, s.db,
+		"INSERT INTO rc_it.audited VALUES (1, 1)",
+		"UPDATE rc_it.audited SET n = 2 WHERE id = 1",
+		"DELETE FROM rc_it.audited WHERE id = 1",
+	)
+	if got := deltaRows(t, ctx, s, ref); len(got) != 3 || got[0] != "I|1" || got[1] != "U|1" || got[2] != "D|1" {
+		t.Errorf("capture deltas = %v, want [I|1 U|1 D|1]", got)
+	}
+	var appRows int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM rc_it.audit_log").Scan(&appRows); err != nil {
+		t.Fatal(err)
+	}
+	if appRows != 3 {
+		t.Errorf("the application's own triggers fired %d times, want 3 (they must keep working)", appRows)
+	}
+	// Removing capture must leave the application's triggers in place.
+	if err := s.RemoveCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("remove capture: %v", err)
+	}
+	var appTriggers int
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = 'rc_it' AND EVENT_OBJECT_TABLE = 'audited'").Scan(&appTriggers); err != nil {
+		t.Fatal(err)
+	}
+	if appTriggers != 3 {
+		t.Errorf("after removing capture %d triggers remain, want the application's 3", appTriggers)
 	}
 }

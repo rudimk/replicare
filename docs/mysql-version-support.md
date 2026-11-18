@@ -2,8 +2,8 @@
 
 This records replicare's committed MySQL version floor and the MariaDB scope
 decision for the v1 MySQL engine. It is the MySQL counterpart to
-`docs/postgres-version-support.md`, and it fixes the CI test pair the milestone
-plan (`.sisyphus/mysql-plan.md`, MF3) commits every acceptance test to.
+[Postgres version support](postgres-version-support.md), and it fixes the CI test pair every
+MySQL acceptance test runs against.
 
 ## The committed pair: **MySQL 5.7 source → MySQL 8.4 target**
 
@@ -16,7 +16,7 @@ runs under emulation locally on Apple Silicon; CI is amd64 natively).
 
 5.7 is the oldest source we support, chosen because it is the oldest release that
 still has the features replicare's introspection and capture rely on, while being
-old enough to genuinely exercise the "old source → modern target" path (§1.6):
+old enough to genuinely exercise the "old source → modern target" path:
 
 | Capability | Introduced | Consequence if the floor were older (5.6) |
 |---|---|---|
@@ -32,9 +32,9 @@ need arises, 5.6 support is additive.
 ### Why 8.4 is the target
 
 8.4 is the current LTS. It exercises the modern-target concerns the plan calls
-out: 8.0+ multi-trigger-per-event, `utf8mb4` defaults, `ROW_NUMBER()` window
+out: `utf8mb4` defaults, `ROW_NUMBER()` window
 functions for boundary discovery (MM4a), and the strict-`sql_mode`/zero-date
-interaction the faithful-transport path depends on (`mysql-plan.md` §0.4). The
+interaction the faithful-transport path depends on. The
 5.7→8.4 gap is where the old-source fidelity work earns its keep.
 
 ## MariaDB: **out of scope for v1**
@@ -42,7 +42,7 @@ interaction the faithful-transport path depends on (`mysql-plan.md` §0.4). The
 replicare v1 does **not** support MariaDB. Although MariaDB began as a MySQL fork,
 its dialect, system catalogs, `sql_mode` semantics, and JSON/sequence behavior have
 diverged enough that silently driving it as MySQL would risk exactly the value
-corruption §1.7 forbids. The engine therefore **detects MariaDB at connect time**
+corruption faithful transport forbids. The engine therefore **detects MariaDB at connect time**
 (the server advertises `MariaDB` in `VERSION()`) and **refuses it with a loud
 error** rather than mis-driving it. MariaDB is a candidate for a future engine
 variant behind the same interface, not a v1 goal.
@@ -50,7 +50,6 @@ variant behind the same interface, not a v1 goal.
 ## What this pins
 
 - The CI job builds and tests only against `mysql:5.7` and `mysql:8.4`.
-- Every MySQL milestone's acceptance is verified on this pair (`mysql-plan.md`,
-  "Testing strategy").
+- Every MySQL milestone's acceptance is verified on this pair.
 - If CI cannot run 5.7 (e.g. image unavailability), the plan requires listing which
   fidelity claims become unverified rather than silently raising the floor.

@@ -8,6 +8,8 @@ converged with the source.
 It is written in Go and ships as a single static binary. **Postgres**, **MySQL**, and **Redis** are
 all supported today.
 
+**Documentation:** <https://replicare.rudimk.com>
+
 ## Why it's different
 
 - **No privileged change stream required.** replicare does **not** need the Postgres WAL, the MySQL
@@ -131,10 +133,10 @@ A degrading target — unreachable, or its delta backlog climbing toward the ret
 surfaced across metrics, logs, *and* traces simultaneously, never just one channel.
 
 To scrape `/metrics` without the Prometheus Operator (e.g. an OpenTelemetry Collector or plain
-Prometheus), see [`deploy/otel-collector-scrape.md`](deploy/otel-collector-scrape.md). A ready-to-import
+Prometheus), see [the metrics-scraping guide](docs/otel-collector.md). A ready-to-import
 **Grafana dashboard** (per-table backlog/lag, catch-up, initial-copy progress, throughput, errors)
 with a configurable Prometheus data source lives at [`deploy/grafana/`](deploy/grafana/) — see its
-[README](deploy/grafana/README.md) to import it.
+[guide](docs/grafana-dashboard.md) to import it.
 
 See [`docs/operations.md`](docs/operations.md) for tuning, retention/reseed, and the headline
 health signals.

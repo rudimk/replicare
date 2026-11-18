@@ -1,7 +1,7 @@
 # Operating replicare
 
-Practical guidance for running replicare in production. Design rationale lives in
-[`../CLAUDE.md`](../CLAUDE.md); this is the operator's view.
+Practical guidance for running replicare in production: the operator's view. How it
+works underneath is in [Architecture](architecture.md).
 
 ## Lifecycle of a sync
 
@@ -17,6 +17,194 @@ Practical guidance for running replicare in production. Design rationale lives i
    re-reads the current source values of dirty keys and applies them idempotently, FK-ordered.
 5. **Purge / retention / reseed.** Consumed deltas are purged; a target that falls too far behind is
    reseeded (see below).
+
+## Before a migration: checklist
+
+Work through this before pointing replicare at a production source. Most items are information to
+gather (sizing, traffic, quiet windows); a few must be true before starting. Run the queries on the
+**source** unless stated otherwise. `replicare validate <config>` then checks the rest (types,
+foreign-key loops, keys) and reports anything that would block.
+
+### Postgres
+
+**Sizing and traffic**
+
+1. **Total database size.**
+   ```sql
+   SELECT pg_size_pretty(pg_database_size(current_database()));
+   ```
+2. **Row counts and sizes per table.** `row_estimate` comes from planner statistics; `-1` (or `0` on
+   older versions) means the table has never been analyzed — run `ANALYZE` first for real numbers.
+   ```sql
+   SELECT n.nspname AS schema, c.relname AS table_name,
+          c.reltuples::bigint                            AS row_estimate,
+          pg_size_pretty(pg_total_relation_size(c.oid)) AS total,
+          pg_size_pretty(pg_indexes_size(c.oid))        AS indexes
+   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p')
+     AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'replicare')
+     AND n.nspname NOT LIKE 'pg_toast%'
+   ORDER BY pg_total_relation_size(c.oid) DESC;
+   ```
+3. **Write volume over 24 hours.** The counters only ever go up, so run this twice, 24 hours apart,
+   and subtract. Every row inserted, updated or deleted in a replicated table adds one row to
+   replicare's change tracking, so `inserts + updates + deletes` per day is roughly the daily
+   change-tracking volume (and the work streaming has to keep up with).
+   ```sql
+   SELECT now() AS sampled_at,
+          sum(n_tup_ins) AS inserts, sum(n_tup_upd) AS updates, sum(n_tup_del) AS deletes,
+          (SELECT xact_commit + xact_rollback FROM pg_stat_database
+            WHERE datname = current_database()) AS transactions
+   FROM pg_stat_user_tables;
+   ```
+   For the busiest tables, `SELECT relname, n_tup_ins + n_tup_upd + n_tup_del AS writes FROM
+   pg_stat_user_tables ORDER BY writes DESC LIMIT 20;`.
+4. **Low-traffic windows** (daily and weekly). Busy periods followed by lulls let streaming catch up,
+   and a quiet window is the best time for the final cutover.
+
+**Must be true before starting**
+
+5. **Every table has a primary key or a `UNIQUE` constraint.** replicare tracks changes by key.
+   It uses the primary key, or else the first `UNIQUE` constraint; a bare `CREATE UNIQUE INDEX`
+   without a constraint does not count. Tables listed here are **skipped** (with a warning), not
+   replicated:
+   ```sql
+   SELECT n.nspname AS schema, c.relname AS table_name
+   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+   WHERE c.relkind IN ('r', 'p')
+     AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'replicare')
+     AND n.nspname NOT LIKE 'pg_toast%'
+     AND NOT EXISTS (SELECT 1 FROM pg_constraint k
+                     WHERE k.conrelid = c.oid AND k.contype IN ('p', 'u'))
+   ORDER BY 1, 2;
+   ```
+6. **Extensions.** List them on the source and confirm the **target** has every one the replicated
+   tables use (column types, defaults). replicare never installs extensions; a missing one fails
+   pre-flight.
+   ```sql
+   SELECT extname, extversion FROM pg_extension ORDER BY 1;
+   ```
+7. **Materialized views (and plain views) are not replicated** — only table data is. Create them on
+   the target from the schema dump, then `REFRESH MATERIALIZED VIEW` there after the initial copy
+   and again just before cutover.
+   ```sql
+   SELECT schemaname, matviewname FROM pg_matviews ORDER BY 1, 2;
+   ```
+8. **Large objects are not replicated.** Their contents live in `pg_largeobject`, not in a replicated
+   table; a table's `oid` column is copied but the object it points to is not. Anything above 0 here
+   needs a separate plan:
+   ```sql
+   SELECT count(*) FROM pg_largeobject_metadata;
+   ```
+9. **Schema changes are frozen for the whole replication.** DDL is not replicated, so a schema change
+   on the source has to be applied to the target by hand and can break the pipeline. During the
+   initial copy there is an extra reason: an `ALTER TABLE` waits for replicare's copy read of that
+   table to finish, and the application's queries on that table queue behind the `ALTER`.
+10. **Regular vacuum and maintenance jobs.** Find out what runs and when — autovacuum settings,
+    scheduled `VACUUM`, and especially heavy jobs that lock whole tables (`VACUUM FULL`, `CLUSTER`,
+    `pg_repack`). Plain `VACUUM` / autovacuum is fine at any time; the heavy jobs should be paused
+    during the initial copy and kept out of peak hours afterwards. See
+    [Vacuum and other maintenance](#vacuum-and-other-maintenance).
+    ```sql
+    SHOW autovacuum;
+    -- scheduled jobs, if pg_cron is installed:
+    SELECT jobid, schedule, command FROM cron.job;
+    -- recent vacuum activity and the tables with the most dead rows:
+    SELECT relname, last_vacuum, last_autovacuum, n_dead_tup
+    FROM pg_stat_user_tables ORDER BY n_dead_tup DESC LIMIT 20;
+    ```
+    Also ask about jobs outside the database (cron, CI pipelines, the hosting provider's maintenance
+    windows).
+11. **No long-open transactions.** Sessions left open — especially `idle in transaction` — stop vacuum
+    from cleaning up (replicare's change-tracking tables bloat) and make trigger setup wait. This
+    should normally return nothing:
+    ```sql
+    SELECT pid, usename, state, now() - xact_start AS open_for, left(query, 80) AS last_query
+    FROM pg_stat_activity
+    WHERE xact_start < now() - interval '5 minutes' AND pid <> pg_backend_pid()
+    ORDER BY xact_start;
+    ```
+12. **Versions.** `SELECT version();` on both sides. The source can be old; the target should be the
+    same major version or newer.
+13. **Privileges and disk.** The source role needs the grants in
+    [Least-privilege grants](#least-privilege-grants), and the source needs room for the
+    change-tracking tables to grow with the write volume from item 3 (more if a target falls behind,
+    up to the retention cap).
+14. **Sequences at cutover.** Row values are copied, sequence counters are not. Plan
+    `replicare reseed-sequences` (or `sync_sequences: true`) before the target takes writes — see
+    [Sequences & identity counters](#sequences--identity-counters-dr--promotion).
+
+### MySQL
+
+Numbers match the Postgres list. Postgres items 4 (quiet windows), 9 (schema freeze), 13 (privileges
+and disk) and 14 (sequences) apply as written; large objects (8) don't exist in MySQL, and the version
+check (12) is part of (6). MySQL versions of the rest, plus two MySQL-only items:
+
+- **(1) Total size.**
+   ```sql
+   SELECT ROUND(SUM(data_length + index_length) / 1024 / 1024) AS size_mb
+   FROM information_schema.TABLES WHERE table_schema = '<DB_NAME>';
+   ```
+- **(2) Row counts, sizes and storage engine per table.** `table_rows` is InnoDB's estimate.
+   ```sql
+   SELECT table_name, engine, table_rows AS row_estimate,
+          ROUND(data_length / 1024 / 1024)  AS data_mb,
+          ROUND(index_length / 1024 / 1024) AS index_mb
+   FROM information_schema.TABLES
+   WHERE table_schema = '<DB_NAME>' AND table_type = 'BASE TABLE'
+   ORDER BY data_length + index_length DESC;
+   ```
+   **Every table must be InnoDB** — pre-flight blocks MyISAM/MEMORY tables.
+- **(3) Write volume over 24 hours.** Server-wide counters (all databases on the server); run twice,
+   24 hours apart, and subtract.
+   ```sql
+   SHOW GLOBAL STATUS WHERE Variable_name IN
+     ('Innodb_rows_inserted', 'Innodb_rows_updated', 'Innodb_rows_deleted', 'Com_commit', 'Com_rollback');
+   ```
+- **(5) Every table has a primary key or a `UNIQUE` key** (tables without one are skipped):
+   ```sql
+   SELECT t.table_name FROM information_schema.TABLES t
+   WHERE t.table_schema = '<DB_NAME>' AND t.table_type = 'BASE TABLE'
+     AND NOT EXISTS (SELECT 1 FROM information_schema.TABLE_CONSTRAINTS c
+                     WHERE c.table_schema = t.table_schema AND c.table_name = t.table_name
+                       AND c.constraint_type IN ('PRIMARY KEY', 'UNIQUE'));
+   ```
+- **(6) Extensions** don't exist in MySQL. Instead check: MySQL **5.7 or newer** (`SELECT VERSION();`,
+   MariaDB is not supported); on the **target**, `local_infile` is `ON`
+   (`SHOW GLOBAL VARIABLES LIKE 'local_infile';`) and the target tables have **no extra `UNIQUE`
+   keys** beyond the one replicare uses (pre-flight blocks them — see
+   [the MySQL page](mysql.md#requirements)).
+- **(7) Materialized views** don't exist in MySQL; plain views are not replicated (they come over with
+   the schema dump).
+- **(MySQL only) Existing triggers.** Tables can keep their own triggers: from MySQL 5.7.2 a table may
+   have several triggers per timing and event, so replicare's triggers sit alongside the
+   application's and both fire. Only a source older than 5.7.2 (in practice a best-effort 5.6) allows
+   a single trigger per timing and event, and there a table with its own `AFTER INSERT/UPDATE/DELETE`
+   trigger blocks capture. Worth listing either way, to know what else runs on each write:
+   ```sql
+   SELECT event_object_table, trigger_name, action_timing, event_manipulation
+   FROM information_schema.TRIGGERS WHERE trigger_schema = '<DB_NAME>';
+   ```
+- **(9) Schema freeze also covers online schema-change tools** (`pt-online-schema-change`, `gh-ost`).
+   They rebuild a table and swap it in, and the swap leaves replicare's triggers behind on the old
+   table; `pt-online-schema-change` also adds triggers of its own.
+- **(10) Maintenance jobs (the MySQL counterpart of vacuum).** MySQL has no `VACUUM`; the jobs that
+    matter are table rebuilds — `OPTIMIZE TABLE`, `ALTER TABLE … FORCE` / `ENGINE=InnoDB` — run from
+    cron or the event scheduler. A rebuild locks the table briefly at the start and end; during the
+    initial copy it waits for replicare's copy read and the application queues behind it, so pause
+    rebuilds during the copy.
+    ```sql
+    SELECT event_schema, event_name, interval_value, interval_field, event_definition
+    FROM information_schema.EVENTS;
+    ```
+- **(11) No long-open transactions** — they hold back InnoDB's purge (the history list grows and
+    replicare's change-tracking tables bloat) and make trigger setup wait:
+    ```sql
+    SELECT trx_mysql_thread_id, trx_started, trx_state, LEFT(trx_query, 80) AS query
+    FROM information_schema.INNODB_TRX ORDER BY trx_started;
+    ```
+- **(MySQL only) A Postgres database for replicare's state** is still required for a MySQL→MySQL sync (see
+    [the MySQL page](mysql.md#1-a-mysql-sync-still-needs-a-postgres-for-state)).
 
 ## Tuning knobs (per sync, under `tuning:`)
 
@@ -101,6 +289,54 @@ next sweep. `replicare_delete_reconciliation_lag_seconds` (sweep duration) and
 `delete_sweep_interval`. Upserts converge faster via the rolling reconciliation scan. See
 [the Redis engine page](redis.md).
 
+## Vacuum and other maintenance
+
+**Plain `VACUUM` and autovacuum never conflict with streaming.** While streaming, replicare runs
+only ordinary statements on the source — the trigger's `INSERT` into its change-tracking table on
+every application write, `SELECT`s that read those tables and re-read changed rows, and batched
+`DELETE`s that clear changes every target has applied. None of them takes a lock that a plain
+vacuum blocks, or that blocks a plain vacuum. The same holds on the target, where replicare only
+inserts, updates and deletes rows.
+
+**Trigger setup is the one place a plain vacuum can get in the way** — only at startup, and only
+when a trigger actually has to be created or replaced (a new table, or a trigger someone removed).
+Adding a trigger needs a lock that a running vacuum holds. replicare waits at most 2 seconds for it,
+backs off and retries, and after repeated failures stops with an error naming the table, rather than
+holding the application up. A normal restart, with every trigger already in
+place, takes no lock on application tables at all.
+
+**Heavy maintenance that locks a whole table** — `VACUUM FULL`, `CLUSTER`, `pg_repack`,
+`ALTER TABLE`:
+
+- On an **application table**, it blocks replicare's reads of that table just like the
+  application's queries; replicare adds no extra harm. During streaming replicare's reads are
+  short, so the job waits only a moment for one to finish.
+- On one of **replicare's change-tracking tables** (for example a database-wide `VACUUM FULL`), it
+  briefly blocks the application's writes to the matching table, because the trigger cannot record
+  the change until the job finishes. These tables are small, so the pause is short; keep it out of
+  peak hours.
+
+**During the initial copy** two more things apply:
+
+- Copy reads are long: each chunk, and a table loaded in one statement (a self-referencing table
+  whose link column cannot be emptied), keeps a read open for as long as it runs.
+  While it runs, vacuum cannot remove rows that read might still need to see, anywhere in the
+  database.
+- An `ALTER TABLE` (or `VACUUM FULL` / `CLUSTER`) on a table being copied waits for that read to
+  finish, and the application's queries on the table queue behind it. Pause heavy maintenance and
+  schema migrations during the initial copy, or run them with a `lock_timeout`.
+
+**Long-open transactions are the real vacuum problem.** replicare's change-tracking tables get
+constant inserts and deletes and rely on autovacuum to reclaim the space. A transaction left open on
+the source — typically an application session `idle in transaction` — stops vacuum from cleaning up
+after it anywhere in the database, so those tables grow even though replicare keeps clearing them
+(see [the `xmin`-horizon caveat](#source-footprint-the-thing-to-watch)). Streaming keeps working; the
+cost is disk. Ending the stuck session fixes it.
+
+**MySQL** has no `VACUUM`; the equivalents are table rebuilds (`OPTIMIZE TABLE`,
+`ALTER TABLE … FORCE`), which behave like the heavy jobs above, and long transactions holding back
+InnoDB's purge, which behave like the open-transaction problem.
+
 ## When a target goes down
 
 A drain against an unreachable target fires **all three channels at once**: an errored trace span
@@ -126,7 +362,7 @@ caught-up single→single Postgres sync you will typically see `source_db_bytes`
 
 1. **Trigger CDC writes to the source.** replicare's own `replicare` schema lives on the *source*:
    per-table delta and track tables, plus trigger functions. Under churn those delta tables are a
-   high-write queue that bloats before autovacuum/purge reclaims it (CLAUDE.md §3.4). None of this
+   high-write queue that bloats before autovacuum/purge reclaims it. None of this
    exists on the target.
 2. **Unreplicated tables count too.** `pg_database_size` covers the *whole* database, so any table
    on the source you did not select (audit logs, staging tables, keyless tables skipped for lacking
@@ -149,8 +385,8 @@ locked in the observability contract, so a scrape of a running daemon matches th
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy. |
-| `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator). |
+| `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy, counted once they are committed on the target (a retried chunk counts once). Tables linked in a loop count too; rows re-copied only to catch up with a busy source do not. Restarts from 0 with the daemon. |
+| `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy (the progress denominator), from the source's own statistics (Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy; left unset for a table never analyzed. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply/copy throughput. `0` on an idle, caught-up pass. |
 | `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table`, `component` | Replication lag — age of the oldest unconsumed delta (`0` when caught up). |
 | `replicare_delta_backlog_rows` | gauge | `sync`, `target`, `table`, `component` | Unconsumed delta rows (the queue depth). |
@@ -166,12 +402,12 @@ locked in the observability contract, so a scrape of a running daemon matches th
 | `replicare_target_replicated_bytes` | gauge | `sync`, `target` | Size in bytes of **just the replicated tables** on the target (same engine support). |
 | `replicare_apply_batch_seconds` | histogram | `sync`, `target` | Apply-batch duration per drain pass. |
 | `replicare_errors_total` | counter | `sync`, `category` | Errors by category (e.g. `drain`, `retention`). |
-| `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`). |
+| `replicare_table_phase_info` | gauge | `sync`, `table`, `phase` | Table lifecycle phase as an info gauge — value `1` on the active `phase` label (`initial_copy`/`streaming`); exactly one series per table. Present from bring-up, so it is the series to key dashboards on. |
 | `replicare_delete_reconciliation_lag_seconds` | gauge | `sync`, `target`, `table` | **Redis only** — duration of the last completed delete sweep (staleness of capture-less deletes). Unset for Postgres/MySQL. |
 | `replicare_deletes_reconciled_total` | counter | `sync`, `target`, `table` | **Redis only** — keys `DEL`ed by the target-vs-source delete sweep. Unset for Postgres/MySQL. |
 
 The per-table backlog/lag gauges also carry a `component` label — the table's FK connected
-component (its first member; CLAUDE.md §8.1) — so you can roll lag and backlog up per component
+component (its first member) — so you can roll lag and backlog up per component
 (`max by (component) (replicare_replication_lag_seconds)`).
 
 The headline signals to watch are `replicare_source_up`, `replicare_target_up`, `replicare_delta_backlog_rows`,
@@ -181,7 +417,7 @@ and [When a target goes down](#when-a-target-goes-down)).
 
 A ready-to-import **Grafana dashboard** over these metrics — per-table backlog/lag, catch-up,
 initial-copy progress, throughput, and errors, with a configurable Prometheus data source — lives at
-[`deploy/grafana/`](../deploy/grafana/README.md).
+[Grafana dashboard](grafana-dashboard.md).
 
 ### Traces (OpenTelemetry)
 
@@ -198,7 +434,7 @@ fixed registry:
 | `replicare.preflight` | the start-up compatibility check |
 
 A drain/apply span against an **unreachable** target is recorded with **error status** plus the
-backlog/age attributes, so the stall and its blast radius are visible in the trace timeline (§3.4).
+backlog/age attributes, so the stall and its blast radius are visible in the trace timeline.
 
 ### Structured logs (slog)
 
@@ -214,7 +450,7 @@ can grep/alert on:
 | `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
 | `preflight.blocked` | ERROR | a sync refused to start on a blocking incompatibility |
 
-A degrading target surfaces in **metrics, traces, AND logs at once** — never just one channel (§3.4).
+A degrading target surfaces in **metrics, traces, AND logs at once** — never just one channel.
 
 ## The status HTTP API
 
@@ -274,7 +510,7 @@ kubectl exec <pod> -- /usr/local/bin/replicare status /etc/replicare/config.yml
 kubectl exec <pod> -- /usr/local/bin/replicare verify /etc/replicare/config.yml
 ```
 
-The runtime image is [Chainguard `wolfi-base`](../Dockerfile), which *does* include `/bin/sh` if you
+The runtime image is [Chainguard `wolfi-base`](https://github.com/rudimk/replicare/blob/main/Dockerfile), which *does* include `/bin/sh` if you
 want an interactive session (`kubectl exec -it <pod> -- /bin/sh`), but the direct-exec form above is
 all you need for a progress check.
 
@@ -286,7 +522,7 @@ share an engine, but a config may hold a Postgres sync and a Redis sync side by 
 runs them concurrently (each under its own single-active ownership lock).
 
 A complete, annotated version of the example below is at
-[`../examples/postgres-and-redis.yml`](../examples/postgres-and-redis.yml).
+[`../examples/postgres-and-redis.yml`](https://github.com/rudimk/replicare/blob/main/examples/postgres-and-redis.yml).
 
 ```yaml
 state_store:                     # ALWAYS Postgres — even for a Redis-only deployment
@@ -363,7 +599,7 @@ ownership.
 replicare replicates row **values** faithfully — the integer `id` a sequence produced lands on the
 target verbatim (`OVERRIDING SYSTEM VALUE` on Postgres, the explicit value on MySQL). What it does
 **not** replicate is the sequence *object's counter* — Postgres `last_value`, MySQL's per-table
-`AUTO_INCREMENT` — because that is schema-object state and replicare is data-only (`CLAUDE.md` §7).
+`AUTO_INCREMENT` — because that is schema-object state and replicare is data-only.
 
 For a **passive replica this is harmless**: the target never calls `nextval()` for a replicated
 table (the applier always supplies explicit ids), so the stale counter just sits unused. It bites
@@ -466,21 +702,21 @@ wedge.
 
 ## Least-privilege grants
 
-See [`../deploy/grants-source.sql`](../deploy/grants-source.sql) and
-[`../deploy/grants-target.sql`](../deploy/grants-target.sql). Note the documented asymmetry:
+See [`../deploy/grants-source.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source.sql) and
+[`../deploy/grants-target.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target.sql). Note the documented asymmetry:
 installing capture needs only the `TRIGGER` privilege, but `capture remove` (dropping the trigger)
 requires table ownership. For the **true zero-database-grant** path, pre-create the `replicare`
 capture schema (and, if the state store lives there, the `replicare_state` schema) owned by the
 daemon role — the migration runner then issues no `CREATE SCHEMA` and needs no `CREATE`-on-database
-privilege (CLAUDE.md §12). See the [Postgres engine page](postgres.md#least-privilege).
+privilege. See the [Postgres engine page](postgres.md#least-privilege).
 
-For **MySQL**, use [`../deploy/grants-source-mysql.sql`](../deploy/grants-source-mysql.sql) and
-[`../deploy/grants-target-mysql.sql`](../deploy/grants-target-mysql.sql). MySQL has no such asymmetry
+For **MySQL**, use [`../deploy/grants-source-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-source-mysql.sql) and
+[`../deploy/grants-target-mysql.sql`](https://github.com/rudimk/replicare/blob/main/deploy/grants-target-mysql.sql). MySQL has no such asymmetry
 — the `TRIGGER` privilege covers both `CREATE TRIGGER` and `DROP TRIGGER`, so the daemon role can
 fully uninstall capture on its own.
 
-For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](../deploy/acl-source-redis.txt)
-and [`../deploy/acl-target-redis.txt`](../deploy/acl-target-redis.txt). The source role is read-only
+For **Redis**, use the ACL presets [`../deploy/acl-source-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-source-redis.txt)
+and [`../deploy/acl-target-redis.txt`](https://github.com/rudimk/replicare/blob/main/deploy/acl-target-redis.txt). The source role is read-only
 (`+ping +info +scan +type +dump +pttl +exists +memory|usage`); the target role needs `+ping +info
 +restore +del +scan +exists +module|list`. Both roles need **`+info`** (pre-flight reads `INFO
 server`), and in **cluster** mode both also need `+cluster|shards +cluster|slots` and the same user
@@ -498,16 +734,16 @@ Three manual load-and-verify harnesses drive replicare against broad, high-volum
 assert the target **converges** with the source under continuous churn. They are developer/test
 tools, run from a checkout (`go run ./test/…`), **not** part of the shipped binary:
 
-- **Postgres** — [`test/loadgen`](../test/loadgen/README.md). Seeds a rich 10-table schema chosen to
+- **Postgres** — [`test/loadgen`](load-testing-postgres.md). Seeds a rich 10-table schema chosen to
   exercise the hard paths (FK components, composite/UUID/text PKs, PK-changing `SKU` renames,
   `GENERATED` columns, a keyless table it must skip; optional FK cycles under `--cyclic`), churns
   random inserts/updates/deletes, and `verify`s per-table row-count + ordered content checksum.
-- **MySQL** — [`test/loadgen-mysql`](../test/loadgen-mysql/README.md). The MySQL sibling of the
+- **MySQL** — [`test/loadgen-mysql`](load-testing-mysql.md). The MySQL sibling of the
   Postgres harness: the same 10-table schema in MySQL types (`AUTO_INCREMENT`, `JSON`, composite
   `VARCHAR` PK, `GENERATED … STORED`, a keyless table), generated with **MySQL-5.7-safe** SQL (no
   `generate_series`/CTE/window functions), churned the same way, and `verify`d with a cross-version,
   order-independent content checksum (`BIT_XOR`-folded per-row hashes).
-- **Redis** — [`test/loadgen-redis`](../test/loadgen-redis/README.md). Seeds every value type
+- **Redis** — [`test/loadgen-redis`](load-testing-redis.md). Seeds every value type
   (string/hash/list/set/zset/stream + big/TTL'd keys) plus a source-only `lgskip:*` cohort the sync
   must exclude, churns value mutations, `RENAME`s, and heavy `DEL`s (the delete-reconciliation
   stress), and `verify`s a version-independent, type-aware content hash + TTL presence. Standalone,

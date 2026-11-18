@@ -1,6 +1,6 @@
 # loadgen-mysql — a MySQL load + verification harness for replicare
 
-`loadgen-mysql` is the MySQL sibling of [`test/loadgen`](../loadgen/README.md). It is a
+`loadgen-mysql` is the MySQL sibling of [`test/loadgen`](https://replicare.rudimk.com/load-testing-postgres.html). It is a
 manual, idempotent tool for exercising replicare's MySQL engine against **broad,
 high-volume, realistic** data. You run it whenever you like against a **source** MySQL;
 it seeds a rich schema the first time and applies random inserts/updates/deletes on
@@ -130,7 +130,7 @@ consistent — always pass the same `--node-id` for a given node. Keep `--scale`
 ### Three-node mesh example
 
 Assume a running replicare `clusters:` mesh over three MySQL nodes `A`, `B`, `C` (config
-per [multi-master.md](../../docs/multi-master.md)), with `$A`/`$B`/`$C` their DSNs.
+per [multi-master.md](https://replicare.rudimk.com/multi-master.html)), with `$A`/`$B`/`$C` their DSNs.
 
 ```sh
 # 1. Schema on every node (data-only replication; targets must pre-exist).

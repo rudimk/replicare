@@ -31,7 +31,7 @@ chart + image pair. Override `image.tag` to decouple them.
 replicare is driven by **one config file**. This chart renders the `config` value
 into a ConfigMap mounted at `/etc/replicare/config.yml` — you get replicare's full
 expressiveness (any engines, any number of sources/targets/syncs). See the
-[configuration reference](../../../docs/configuration.md).
+[configuration reference](https://replicare.rudimk.com/configuration.html).
 
 `config` is a **structured YAML object** by default, so Helm merges and overrides
 it the normal way — layer `-f` files or `--set config.logging.level=debug` and only
@@ -79,7 +79,7 @@ rollout, confirm which sync paused in the pod logs (`sync disabled (paused); ski
 sync=<name>` vs `sync streaming sync=<name>`) or via `replicare status` (`[PAUSED]`).
 The paused sync's source capture stays installed, so re-enabling it drains the queued
 backlog with no data loss (a long pause grows the source-side delta tables). Full
-semantics: [configuration.md → Pausing a sync](../../../docs/configuration.md#pausing-a-sync-enabled).
+semantics: [configuration.md → Pausing a sync](https://replicare.rudimk.com/configuration.html#pausing-a-sync-enabled).
 
 Secrets stay out of `config` using `${VAR}` placeholders (replicare expands env vars
 in **any** field), supplied via a Secret:
@@ -119,9 +119,9 @@ can reference.
   `:8080`/`:9090`.
 - **Scraping metrics.** With the Prometheus Operator, set `serviceMonitor.enabled=true`.
   Without it (e.g. an OpenTelemetry Collector or plain Prometheus), use the scrape job in
-  [`deploy/otel-collector-scrape.md`](../../otel-collector-scrape.md).
+  [the metrics-scraping guide](https://replicare.rudimk.com/otel-collector.html).
 - **Grafana dashboard.** Once `/metrics` is scraped (via `serviceMonitor.enabled`
-  or your own scrape job), import [`deploy/grafana/replicare-dashboard.json`](../../grafana/README.md)
+  or your own scrape job), import [`deploy/grafana/replicare-dashboard.json`](https://replicare.rudimk.com/grafana-dashboard.html)
   — it has a configurable Prometheus data source and covers per-table backlog/lag,
   catch-up, initial-copy progress, throughput, and errors.
 - **State store.** Every sync needs a Postgres state store (v1's only backend),
@@ -130,7 +130,7 @@ can reference.
   `helm upgrade` after editing `config` restarts the daemon cleanly.
 - **Least privilege.** The container runs non-root (uid 65534), read-only root FS,
   all capabilities dropped. Grant the daemon roles per
-  [`deploy/`](../../) (`grants-*.sql`, `acl-*-redis.txt`).
+  [`deploy/`](https://github.com/rudimk/replicare) (`grants-*.sql`, `acl-*-redis.txt`).
 
 ## Validate before applying
 

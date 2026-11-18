@@ -106,6 +106,16 @@ tasks:
       - task: test:race
       - task: build
 
+  docs:build:
+    desc: Build the docs site (mdBook, from docs/) into book/
+    cmds:
+      - mdbook build
+
+  docs:serve:
+    desc: Serve the docs site locally with live reload (http://localhost:3000)
+    cmds:
+      - mdbook serve --open
+
   clean:
     desc: Remove build artifacts
     cmds:

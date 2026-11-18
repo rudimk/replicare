@@ -45,7 +45,8 @@ import (
 // Tables are copied whole (unchunked) here — a documented tradeoff: a cyclic
 // component gives up chunked/parallel copy for a correct load. The blocked case
 // (NOT NULL + non-deferrable) never reaches here (pre-flight fails loud).
-func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef) error {
+func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
+	ctx = withCopyProgress(ctx, progress)
 	pgSrc, ok := src.(*Source)
 	if !ok {
 		return fmt.Errorf("postgres: cyclic copy: source is %T, want *postgres.Source", src)
@@ -164,7 +165,11 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 	for _, ref := range order {
 		table := byRef[ref]
 		if len(keepReal[ref]) > 0 {
-			load := func() error { return s.loadSelfRefWhole(ctx, src, ref, table, nullCols[ref]) }
+			load := func() error {
+				return countedLoad(ctx, ref, func(ctx context.Context) error {
+					return s.loadSelfRefWhole(ctx, src, ref, table, nullCols[ref])
+				})
+			}
 			if err := withParentRetry(ctx, load, parents[ref], recopy); err != nil {
 				return fmt.Errorf("postgres: cyclic whole-load (%s): %w", ref, err)
 			}
@@ -437,6 +442,9 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 	if _, err := sink.conn.Exec(ctx, "SET CONSTRAINTS ALL DEFERRED"); err != nil {
 		return fmt.Errorf("postgres: cyclic deferred: defer constraints: %w", err)
 	}
+	// Rows are counted per table but reported only after the one COMMIT: until then
+	// nothing is durable on the target.
+	copied := make(map[engine.TableRef]int64, len(tables))
 	for i, ref := range tables {
 		table, err := src.tableMeta(ctx, ref)
 		if err != nil {
@@ -448,22 +456,31 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 			// COMMIT). No whole-table staging/upsert — that can't complete on a very
 			// large table.
 			sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
-			if err := pipeCopy(ctx, src, ref, cols, sink, sql); err != nil {
+			n, err := countAttempt(ctx, func(ctx context.Context) error { return pipeCopy(ctx, src, ref, cols, sink, sql) })
+			if err != nil {
 				return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
 			}
+			copied[ref] += n
 			continue
 		}
 		// Non-empty target: idempotent staged upsert within the deferred transaction.
 		// Distinct staging name because ON COMMIT DROP fires only at the outer COMMIT.
 		stg := fmt.Sprintf("replicare_stg_%d", i)
-		if err := stagedUpsertCopy(ctx, src, sink, ref, cols, stg, false); err != nil {
+		n, err := countAttempt(ctx, func(ctx context.Context) error {
+			return stagedUpsertCopy(ctx, src, sink, ref, cols, stg, false)
+		})
+		if err != nil {
 			return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
 		}
+		copied[ref] += n
 	}
 	if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("postgres: cyclic deferred: commit: %w", err)
 	}
 	committed = true
+	for _, ref := range tables {
+		reportCopied(ctx, ref, copied[ref])
+	}
 	return nil
 }
 
@@ -774,7 +791,9 @@ func copyOrUpsert(ctx context.Context, src *Source, sink *Sink, ref engine.Table
 func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues) error {
 	var lastErr error
 	for attempt := 0; attempt < cyclicCopyConnAttempts; attempt++ {
-		err := copyRangeOnce(ctx, src, sink, ref, cols, meta, lo, hi)
+		_, err := countAttempt(ctx, func(ctx context.Context) error {
+			return copyRangeOnce(ctx, src, sink, ref, cols, meta, lo, hi)
+		})
 		if err == nil {
 			return nil
 		}
@@ -951,7 +970,10 @@ func withParentRetry(ctx context.Context, load func() error, parentRefs []engine
 // copyChildWithParentRetry loads one whole component table (copyOrUpsert) with the
 // live-source parent-skew retry (withParentRetry).
 func copyChildWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, parentRefs []engine.TableRef, recopy parentRecopier) error {
-	return withParentRetry(ctx, func() error { return copyOrUpsert(ctx, src, sink, ref, cols) }, parentRefs, recopy)
+	load := func() error {
+		return countedLoad(ctx, ref, func(ctx context.Context) error { return copyOrUpsert(ctx, src, sink, ref, cols) })
+	}
+	return withParentRetry(ctx, load, parentRefs, recopy)
 }
 
 // copyTableChunkedWithParentRetry loads one component table in bounded keyset chunks
@@ -988,7 +1010,10 @@ func copyTableChunkedWithParentRetry(ctx context.Context, src *Source, sink *Sin
 // retry (withParentRetry): only this chunk is retried, and only the child's non-cyclic
 // parents are re-copied.
 func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues, parentRefs []engine.TableRef, recopy parentRecopier) error {
-	return withParentRetry(ctx, func() error { return copyRange(ctx, src, sink, ref, cols, meta, lo, hi) }, parentRefs, recopy)
+	load := func() error {
+		return countedLoad(ctx, ref, func(ctx context.Context) error { return copyRange(ctx, src, sink, ref, cols, meta, lo, hi) })
+	}
+	return withParentRetry(ctx, load, parentRefs, recopy)
 }
 
 // cyclicRetryBackoff is a short, bounded backoff between parent re-copy attempts.
@@ -1106,7 +1131,7 @@ func pipeCopy(ctx context.Context, src *Source, ref engine.TableRef, cols []stri
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	_, loadErr := sink.conn.PgConn().CopyFrom(ctx, pr, sinkCopySQL)
+	tag, loadErr := sink.conn.PgConn().CopyFrom(ctx, pr, sinkCopySQL)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {
@@ -1115,6 +1140,7 @@ func pipeCopy(ctx context.Context, src *Source, ref engine.TableRef, cols []stri
 	if loadErr != nil {
 		return fmt.Errorf("write side: %w", loadErr)
 	}
+	countCopiedRows(ctx, tag.RowsAffected())
 	return nil
 }
 
@@ -1129,7 +1155,7 @@ func pipeCopyWhere(ctx context.Context, src *Source, ref engine.TableRef, cols [
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	_, loadErr := sink.conn.PgConn().CopyFrom(ctx, pr, sinkCopySQL)
+	tag, loadErr := sink.conn.PgConn().CopyFrom(ctx, pr, sinkCopySQL)
 	_ = pr.CloseWithError(loadErr)
 	copyErr := <-errc
 	if copyErr != nil {
@@ -1138,6 +1164,7 @@ func pipeCopyWhere(ctx context.Context, src *Source, ref engine.TableRef, cols [
 	if loadErr != nil {
 		return fmt.Errorf("write side: %w", loadErr)
 	}
+	countCopiedRows(ctx, tag.RowsAffected())
 	return nil
 }
 

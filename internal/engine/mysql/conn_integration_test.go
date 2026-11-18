@@ -138,3 +138,25 @@ func TestSizeIntegration(t *testing.T) {
 		t.Errorf("empty replicated size = %d, want 0", empty)
 	}
 }
+
+// TestEstimateRowsIntegration: the initial-copy target comes from InnoDB's own
+// statistics (information_schema.TABLES.TABLE_ROWS), no scan.
+func TestEstimateRowsIntegration(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := connectSource(t, ctx)
+	mustExec(t, ctx, s.db,
+		"CREATE TABLE rc_it.est (id INT PRIMARY KEY) ENGINE=InnoDB",
+		"INSERT INTO rc_it.est SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3",
+		"ANALYZE TABLE rc_it.est")
+	got, err := s.EstimateRows(ctx, []engine.TableRef{{Schema: "rc_it", Name: "est"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := got[engine.TableRef{Schema: "rc_it", Name: "est"}]; n < 1 || n > 10 {
+		t.Errorf("estimate = %d, want roughly 3", n)
+	}
+}

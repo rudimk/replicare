@@ -3,7 +3,7 @@
 replicare's operational state — which syncs exist, per-unit initial-copy
 progress, per-target streaming cursors, ownership, and reseed flags — lives in a
 dedicated schema on a Postgres database (the target, the source, or a separate
-Postgres; see [state storage](../CLAUDE.md#9-state-storage)). This backend is
+Postgres; see [Architecture](architecture.md)). This backend is
 **engine-neutral**: the Redis engine ships **no new StateStore code**. It reuses
 the identical Postgres backend by overloading the neutral vocabulary. This
 document records those overloads so an operator reading the `replicare_state`
@@ -11,7 +11,7 @@ schema knows how to interpret a Redis sync's rows.
 
 > The StateStore is the *daemon's own* operational state. It is **not** where
 > Redis change-capture lives — Redis has no source-side delta/track tables; its
-> CDC is SCAN reconciliation (see [the Redis engine page](redis.md) and CLAUDE.md §3.2).
+> CDC is SCAN reconciliation (see [the Redis engine page](redis.md)).
 
 ## The overloads
 

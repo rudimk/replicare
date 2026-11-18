@@ -65,6 +65,6 @@ integration matrix with fault-injection, perf, and fidelity gates.
 
 - MySQL and Redis engines (the core is engine-agnostic and designed for them).
 - HA / leader election, multi-master conflict resolution, live DDL replication,
-  Helm chart, hardened fan-out. See `CLAUDE.md §15`.
+  Helm chart, hardened fan-out.
 
 [0.1.0]: https://github.com/rudimk/replicare/releases/tag/v0.1.0

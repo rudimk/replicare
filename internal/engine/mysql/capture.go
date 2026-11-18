@@ -298,13 +298,20 @@ func (s *Source) RemoveCapture(ctx context.Context, tables []engine.TableRef) er
 	return nil
 }
 
-// blockConflictingTrigger enforces the pre-existing-trigger rule (mysql-plan
-// §0.5). On MySQL < 8.0 only one trigger per (timing, event) is allowed, so a
-// pre-existing non-replicare AFTER trigger on a selected table blocks capture
-// install with an actionable error. On 8.0+ multiple triggers per event are
-// allowed, so it is permitted.
+// multiTriggerMinVersion is the first MySQL release that allows more than one trigger
+// per (timing, event) on a table (5.7.2). Below it — in practice 5.6, best-effort
+// only — a table's existing AFTER trigger occupies the slot replicare needs.
+const multiTriggerMinVersion = 50702
+
+// blockConflictingTrigger enforces the pre-existing-trigger rule (mysql-plan §0.5)
+// where it actually applies: before MySQL 5.7.2 a table can hold only one trigger per
+// (timing, event), so a non-replicare AFTER trigger on a selected table blocks capture
+// install with an actionable error. From 5.7.2 on (every GA 5.7 and all 8.x) several
+// triggers per event are allowed, so replicare's triggers simply sit alongside the
+// application's own and both fire. (The original plan assumed the limit lasted until
+// 8.0; that was wrong and needlessly refused tables with their own triggers on 5.7.)
 func (s *Source) blockConflictingTrigger(ctx context.Context, ref engine.TableRef, serverVer int) error {
-	if serverVer >= 80000 {
+	if serverVer >= multiTriggerMinVersion {
 		return nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
@@ -325,7 +332,7 @@ func (s *Source) blockConflictingTrigger(ctx context.Context, ref engine.TableRe
 			continue // one of ours (a prior install)
 		}
 		return fmt.Errorf("mysql: table %s already has an AFTER %s trigger %q; MySQL %d allows only one trigger per event, "+
-			"so replicare cannot install capture — drop/merge the existing trigger or upgrade the source to 8.0+ (mysql-plan §0.5)",
+			"so replicare cannot install capture — drop/merge the existing trigger or upgrade the source to 5.7.2+ (mysql-plan §0.5)",
 			ref, strings.ToLower(event), name, serverVer)
 	}
 	return rows.Err()

@@ -13,21 +13,19 @@
 > capture-less (§5.4). **Not yet shipped:** HA leader election (MM8). The **hard
 > constraint** on all of this work is that the existing one-way path (source →
 > target(s), changes never flow back) keeps behaving **exactly** as it does today — see
-> [§7 Backward compatibility](#7-backward-compatibility-the-non-negotiable).
+> [§7 Backward compatibility](#7-backward-compatibility--the-non-negotiable).
 
 This note covers **Postgres, MySQL, and Redis**. It records what exists now, why
 naively wiring a bidirectional topology breaks today, the mechanisms a real
 multi-master mode would need per engine, the config-schema changes, and a phased
-plan. It is written to sit alongside `CLAUDE.md` (multi-master is listed there as
-roadmap, §6/§14) and the per-engine pages.
+plan. It is written to sit alongside the per-engine pages.
 
 **Direction set by the project owner (v3):** full active-active is required on **all
 three engines, Redis included (not deferred)**; **N-node full mesh** (no fixed node
 count); conflict resolution must need **no user schema change and no user-specified
 column** (replicare manages a hidden version itself — §5.3); **no priority-fencing**;
 tombstones live in the `replicare` schema and are **GC'd**; it must work with **no
-superuser anywhere**; the config surface is **`clusters:`**. The milestone-level plan is
-[`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md).
+superuser anywhere**; the config surface is **`clusters:`**.
 
 **Operator-facing rules.** The plain-language rules for safely running an active-active
 cluster — the globally-unique-ID requirement and the schema-change procedure — live in
@@ -97,8 +95,9 @@ with file references, because the design has to work *with* them:
   the one timestamp signal a naive LWW might have used.
 - Delta rows are PK-only + `delta_id` + `rc_op` + `k1..kn` + `rc_at` — **no origin,
   no txid**.
-- Constraints that matter later: pre-8.0 allows only one trigger per (timing,event);
-  install already **blocks** if a non-replicare AFTER trigger exists; InnoDB has **no
+- Constraints that matter later: before MySQL 5.7.2 a table allows only one trigger per
+  (timing,event), so install **blocks** there if a non-replicare AFTER trigger exists (from 5.7.2
+  they coexist); InnoDB has **no
   deferrable FKs**; `FOREIGN_KEY_CHECKS` is session-level and non-transactional.
 
 **Redis capture/apply** (`internal/engine/redis/`, `internal/pipeline/delete.go`)
@@ -237,7 +236,7 @@ Per-engine mechanism for (1):
   problem moves to the reconciliation passes (5.4). Loop suppression requires **per-key
   origin+version metadata** that a reconcile pass consults to decide "I already have
   the newest version; don't re-RESTORE, don't delete." Redis has no room in the value
-  (`DUMP`/`RESTORE` is verbatim, §1.7 forbids wrapping it), so this metadata lives in a
+  (`DUMP`/`RESTORE` is verbatim, and faithful transport forbids wrapping it), so this metadata lives in a
   **parallel metadata keyspace** (see 5.4).
 
 **v1 is full-mesh only, so sub-problem (2) does not arise** — every node ships directly
@@ -280,8 +279,7 @@ register, so copied rows carry their true `(hlc, node)` rather than a fresh loca
 > (the bootstrap-vs-concurrent caveat in [§8](#8-implementation-status)); MySQL/Redis
 > (MM5–MM6).
 
-replicare deliberately has **no commit-order signal** (the entire trigger-CDC premise;
-`CLAUDE.md` §3.3), so it cannot do true causal ordering. And a hard product requirement:
+replicare deliberately has **no commit-order signal** (the entire trigger-CDC premise), so it cannot do true causal ordering. And a hard product requirement:
 **conflict resolution must need no user schema change and no user-specified column.**
 The **primary key cannot be the tiebreaker** — it is the *conflict key* (two colliding
 writes share it), so it says *which* rows conflict, never *which value wins*. Resolution
@@ -312,7 +310,7 @@ Deletes are **tombstones carrying `(hlc, node_id)`** in the same register/keyspa
 delete competes with a concurrent update under the same total order. Tombstones **and**
 version records for deleted keys are **GC'd** once every peer has observed a version ≥
 them (a per-cluster min-observed watermark across peers' cursors), keeping the source
-footprint bounded (§3.4).
+footprint bounded.
 
 ### 5.4 Redis specifics (the hardest engine) — SHIPPED (MM6)
 
@@ -391,7 +389,7 @@ is one-way only. In a converged mesh every node holds the **union** of all rows,
 `max(id)` is the same global maximum everywhere; setting every node's counter to
 `max(id)+1` collapses them onto **one shared counter**. Two nodes then both allocate
 `global_max+1`, insert *different* rows under the *same* id, replicate, and HLC-LWW keeps
-one and **silently discards the other** — the §1.7 cardinal sin (silent data loss),
+one and **silently discards the other** — the cardinal sin (silent data loss),
 delivered by an operation that exits 0. On a *correctly partitioned* mesh it is worse: it
 yanks a node out of its disjoint window into another's space, destroying the very invariant
 that was keeping the cluster collision-free. replicare cannot de-collide two independently
@@ -526,7 +524,7 @@ Notes:
    secondary unique key → **refuse to start, loudly**, naming the offending table/column and
    pointing at the UUID/ULID guidance (§5.6), with narrow (32-bit-or-smaller) keys flagged
    especially. This converts the silent data-loss setup (§5.6) into a loud startup refusal —
-   the same "block on incompatible" philosophy as the type pre-flight (`CLAUDE.md` §4.2). The
+   the same "block on incompatible" philosophy as the type pre-flight. The
    classifier is **pure** over the introspected schema (`engine.MeshIDAllocationFindings`,
    `internal/engine/preflight_mesh.go`) → engine-neutral and CI-tested; the daemon runs it
    only on a cluster edge (`internal/daemon/build.go`), so one-way syncs are unaffected.
@@ -550,7 +548,7 @@ Notes:
   deleted?)`) and **tombstones** are **new, mesh-only tables** in the `replicare` schema,
   created only for cluster tables. Applied via the existing **in-place, idempotent
   migration runner** with a `schema_version` bump that **preserves in-flight
-  deltas/cursors** (`CLAUDE.md` §14) — never drop-recreate.
+  deltas/cursors** — never drop-recreate.
 - **Cursors** extend their key with cluster/edge for cluster members; the existing
   `(sync, target, table)` shape is unchanged for one-way.
 - **Redis** adds the metadata keyspace (the register + tombstones, §5.4); nothing changes
@@ -662,7 +660,7 @@ same-key conflicts resolve correctly (each side stamps its own write).
 ### 8.1 Usage — running a Postgres active-active cluster
 
 Define each member under `nodes:` and group them in a `clusters:` block. The target schema
-must pre-exist on every member (data-only, `CLAUDE.md` §7), and the daemon needs a Postgres
+must pre-exist on every member (data-only), and the daemon needs a Postgres
 `state_store` (it may live on any member or a separate DB):
 
 ```yaml
@@ -688,7 +686,7 @@ clusters:
 
 - **Grants (no superuser).** Each member needs the *combined* cluster-member grant set: the
   source-side grants (`TRIGGER` + `SELECT` on replicated tables, `CREATE`/`USAGE` on the
-  `replicare` schema — or pre-create it owned by the daemon role, `CLAUDE.md` §12) **and**
+  `replicare` schema — or pre-create it owned by the daemon role) **and**
   the target-side grants (`INSERT/UPDATE/DELETE` on the replicated tables), because every
   member is both. No superuser, no `REPLICATION`, no `wal_level` change.
 - **What the daemon does.** It expands the cluster into one directed edge per ordered pair
@@ -705,9 +703,7 @@ clusters:
 
 ## 9. Phased plan
 
-Ordered so each phase is independently shippable and low-risk-first. The detailed,
-milestone-by-milestone version (with acceptance criteria + a per-milestone BC proof) is
-[`.sisyphus/multi-master-plan.md`](../.sisyphus/multi-master-plan.md); this is the summary:
+Ordered so each phase is independently shippable and low-risk-first:
 
 1. **Cycle-detection guardrail (small, do first).** Make `Config.Validate()` refuse an
    un-declared one-way cycle. Pure safety, no behaviour change for valid configs.
@@ -757,7 +753,7 @@ milestone-by-milestone version (with acceptance criteria + a per-milestone BC pr
   member pair, not just source→target.
 - **Full-mesh edge scaling.** N·(N−1) directed edges — fine for small-to-moderate N;
   beyond ~tens of nodes a hub/ring (the deferred forwarding work) would be preferable.
-- **Faithful transport (§1.7) is preserved** — none of this transforms values; the HLC
+- **Faithful transport is preserved** — none of this transforms values; the HLC
   version/origin are *metadata about* a change, never a mutation of the replicated value.
 
 ---

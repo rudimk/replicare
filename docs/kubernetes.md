@@ -2,7 +2,7 @@
 
 replicare ships a Helm chart — `replicare-controller` — that runs the daemon
 (`replicare run`) on Kubernetes. This page is the deployment guide; the chart's own
-[README](../deploy/helm/replicare-controller/README.md) is the exhaustive values
+[README](helm-chart.md) is the exhaustive values
 reference.
 
 ## Two GHCR packages
@@ -176,8 +176,8 @@ form above needs no shell.
 The container runs **non-root** (uid 65534), with a **read-only root filesystem**
 and **all capabilities dropped** (a writable `emptyDir` is mounted at `/tmp`). Grant
 the daemon's database/Redis roles the least privilege documented in
-[`deploy/`](../deploy/) — [`grants-*.sql`](../deploy/) for Postgres/MySQL and
-[`acl-*-redis.txt`](../deploy/) for Redis (note the explicit `+restore` on Redis
+[`deploy/`](https://github.com/rudimk/replicare/tree/main/deploy) — [`grants-*.sql`](https://github.com/rudimk/replicare/tree/main/deploy) for Postgres/MySQL and
+[`acl-*-redis.txt`](https://github.com/rudimk/replicare/tree/main/deploy) for Redis (note the explicit `+restore` on Redis
 targets). Mount a CA bundle via `extraVolumes`/`extraVolumeMounts` if you use
 `tls: verify-full`.
 

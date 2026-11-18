@@ -53,7 +53,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(replicare_target_up, sync)",
+        "definition": "label_values(replicare_table_phase_info, sync)",
         "hide": 0,
         "includeAll": true,
         "label": "Sync",
@@ -61,7 +61,7 @@
         "name": "sync",
         "options": [],
         "query": {
-          "query": "label_values(replicare_target_up, sync)",
+          "query": "label_values(replicare_table_phase_info, sync)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -101,7 +101,7 @@
           "type": "prometheus",
           "uid": "${datasource}"
         },
-        "definition": "label_values(replicare_delta_backlog_rows{sync=~\"$sync\"}, table)",
+        "definition": "label_values(replicare_table_phase_info{sync=~\"$sync\"}, table)",
         "hide": 0,
         "includeAll": true,
         "label": "Table",
@@ -109,7 +109,7 @@
         "name": "table",
         "options": [],
         "query": {
-          "query": "label_values(replicare_delta_backlog_rows{sync=~\"$sync\"}, table)",
+          "query": "label_values(replicare_table_phase_info{sync=~\"$sync\"}, table)",
           "refId": "StandardVariableQuery"
         },
         "refresh": 2,
@@ -157,13 +157,413 @@
   "panels": [
     {
       "type": "row",
-      "title": "Source",
+      "title": "Initial copy",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 0
+      },
+      "id": 24,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Initial copy (overall)",
+      "description": "Rows copied / the source's own row estimate, over the tables this run is copying. The estimate comes from database statistics, so it can land a little above or below 100% at the end.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 1
+      },
+      "id": 34,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum(replicare_rows_copied_total{sync=~\"$sync\"} and on (sync, table) replicare_initial_copy_rows_target{sync=~\"$sync\"}) / clamp_min(sum(replicare_initial_copy_rows_target{sync=~\"$sync\"}), 1)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tables still copying",
+      "description": "Tables in the initial-copy phase. Reaches 0 when every table is streaming.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 1
+      },
+      "id": 35,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(replicare_table_phase_info{sync=~\"$sync\", phase=\"initial_copy\"} == 1) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tables streaming",
+      "description": "Tables that finished their initial copy and are replicating changes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 1
+      },
+      "id": 36,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "count(replicare_table_phase_info{sync=~\"$sync\", phase=\"streaming\"} == 1) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Copy rate (rows/s)",
+      "description": "Rows per second being copied right now (all tables).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 1
+      },
+      "id": 37,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(replicare_rows_copied_total{sync=~\"$sync\"}[2m])) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Initial copy progress % (per table)",
+      "description": "100 * rows_copied / rows_target. Reaches 100% when a table finishes its initial copy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "id": 25,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineInterpolation": "linear",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"}) / clamp_min(sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"}), 1)",
+          "legendFormat": "{{table}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Rows copied vs target (per table)",
+      "description": "Absolute initial-copy progress.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "id": 26,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineInterpolation": "linear",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"})",
+          "legendFormat": "{{table}} copied",
+          "range": true,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"})",
+          "legendFormat": "{{table}} target",
+          "range": true,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Source",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 13
       },
       "id": 1,
       "panels": []
@@ -180,7 +580,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 1
+        "y": 14
       },
       "id": 2,
       "fieldConfig": {
@@ -268,7 +668,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 1
+        "y": 14
       },
       "id": 3,
       "fieldConfig": {
@@ -330,7 +730,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 1
+        "y": 14
       },
       "id": 4,
       "fieldConfig": {
@@ -392,7 +792,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 5
+        "y": 18
       },
       "id": 5,
       "fieldConfig": {
@@ -461,7 +861,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 26
       },
       "id": 6,
       "panels": []
@@ -478,7 +878,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 14
+        "y": 27
       },
       "id": 7,
       "fieldConfig": {
@@ -566,7 +966,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 14
+        "y": 27
       },
       "id": 8,
       "fieldConfig": {
@@ -628,7 +1028,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 14
+        "y": 27
       },
       "id": 9,
       "fieldConfig": {
@@ -690,7 +1090,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 31
       },
       "id": 10,
       "fieldConfig": {
@@ -759,7 +1159,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 39
       },
       "id": 11,
       "panels": []
@@ -776,7 +1176,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 27
+        "y": 40
       },
       "id": 12,
       "fieldConfig": {
@@ -846,7 +1246,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 27
+        "y": 40
       },
       "id": 13,
       "fieldConfig": {
@@ -916,7 +1316,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 27
+        "y": 40
       },
       "id": 14,
       "fieldConfig": {
@@ -987,7 +1387,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 35
+        "y": 48
       },
       "id": 15,
       "fieldConfig": {
@@ -1051,7 +1451,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 35
+        "y": 48
       },
       "id": 16,
       "fieldConfig": {
@@ -1108,7 +1508,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 56
       },
       "id": 17,
       "panels": []
@@ -1125,7 +1525,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 44
+        "y": 57
       },
       "id": 18,
       "fieldConfig": {
@@ -1189,7 +1589,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 44
+        "y": 57
       },
       "id": 19,
       "fieldConfig": {
@@ -1249,7 +1649,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 52
+        "y": 65
       },
       "id": 20,
       "panels": []
@@ -1266,7 +1666,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 53
+        "y": 66
       },
       "id": 21,
       "fieldConfig": {
@@ -1330,7 +1730,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 53
+        "y": 66
       },
       "id": 22,
       "fieldConfig": {
@@ -1394,7 +1794,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 61
+        "y": 74
       },
       "id": 23,
       "fieldConfig": {
@@ -1448,164 +1848,13 @@
     },
     {
       "type": "row",
-      "title": "Initial copy",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 69
-      },
-      "id": 24,
-      "panels": []
-    },
-    {
-      "type": "timeseries",
-      "title": "Initial copy progress % (per table)",
-      "description": "100 * rows_copied / rows_target. Reaches 100% when a table finishes its initial copy.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 70
-      },
-      "id": 25,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "lineInterpolation": "linear",
-            "axisPlacement": "auto",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          },
-          "min": 0,
-          "max": 100
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "100 * sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"}) / clamp_min(sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"}), 1)",
-          "legendFormat": "{{table}}",
-          "range": true,
-          "instant": false,
-          "refId": "A"
-        }
-      ]
-    },
-    {
-      "type": "timeseries",
-      "title": "Rows copied vs target (per table)",
-      "description": "Absolute initial-copy progress.",
-      "datasource": {
-        "type": "prometheus",
-        "uid": "${datasource}"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 70
-      },
-      "id": 26,
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 10,
-            "showPoints": "never",
-            "lineInterpolation": "linear",
-            "axisPlacement": "auto",
-            "stacking": {
-              "mode": "none",
-              "group": "A"
-            }
-          },
-          "color": {
-            "mode": "palette-classic"
-          }
-        },
-        "overrides": []
-      },
-      "options": {
-        "legend": {
-          "displayMode": "table",
-          "placement": "bottom",
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "desc"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (table) (replicare_rows_copied_total{sync=~\"$sync\", table=~\"$table\"})",
-          "legendFormat": "{{table}} copied",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "editorMode": "code",
-          "expr": "sum by (table) (replicare_initial_copy_rows_target{sync=~\"$sync\", table=~\"$table\"})",
-          "legendFormat": "{{table}} target",
-          "range": true,
-          "refId": "B"
-        }
-      ]
-    },
-    {
-      "type": "row",
       "title": "Throughput & apply latency",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 78
+        "y": 82
       },
       "id": 27,
       "panels": []
@@ -1622,7 +1871,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 79
+        "y": 83
       },
       "id": 28,
       "fieldConfig": {
@@ -1683,7 +1932,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 79
+        "y": 83
       },
       "id": 29,
       "fieldConfig": {
@@ -1740,7 +1989,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 87
+        "y": 91
       },
       "id": 30,
       "panels": []
@@ -1757,7 +2006,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 88
+        "y": 92
       },
       "id": 31,
       "fieldConfig": {
@@ -1818,7 +2067,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 88
+        "y": 92
       },
       "id": 32,
       "fieldConfig": {
@@ -1879,7 +2128,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 88
+        "y": 92
       },
       "id": 33,
       "fieldConfig": {

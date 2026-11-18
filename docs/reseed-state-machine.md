@@ -1,4 +1,4 @@
-# M5c — Delta purge, bounded retention & forced-reseed state machine
+# Delta purge, retention & the reseed state machine
 
 **Status: implemented and shipped.** This began as the design artifact for the
 purge/retention/reseed work and is now the reference for the code that ships it:
@@ -6,23 +6,23 @@ purge/retention/reseed work and is now the reference for the code that ships it:
 loop that enforces retention and drives reseeds every pass). It specifies the purge
 mechanics, the retention caps, and — the load-bearing part — the reseed state
 machine, with a stated invariant for **why no source change is lost across the
-handoff**. Section refs (§3.4, §4, §3.3, §8.1) point at `CLAUDE.md`.
+handoff**.
 
 This re-derives the two guarantees M5c has to hold together: **capture-first
-initial copy** (§4) and **crash-safe at-least-once consumption** (§3.3).
+initial copy** and **crash-safe at-least-once consumption**.
 
 ---
 
 ## 1. What M5c protects against
 
 The source-side delta table is a high-churn queue we write to a database we may
-not own (§3.4). A slow or down target *pins* it: a delta row cannot be purged
+not own. A slow or down target *pins* it: a delta row cannot be purged
 until **every** target has consumed it, so one laggard makes the source grow
 without bound. M5c bounds that growth in three layers:
 
 1. **Consumption-gated purge** — the baseline: a delta consumed by *all* targets
    is deleted. Batched + rate-limited; paired with the aggressive per-table
-   autovacuum already set at capture install (§3.4).
+   autovacuum already set at capture install.
 2. **Bounded retention (age + size)** — a cap on how far the queue may grow
    because of a laggard. When a target pushes the queue past the cap, that
    target is *sacrificed* rather than the source.
@@ -30,7 +30,7 @@ without bound. M5c bounds that growth in three layers:
    pinning deltas are dropped, and it is brought back to convergence by a fresh
    full copy + streaming resume. This is the state machine specified in §4.
 
-The `xmin` horizon (§3.4) is the residual risk the batched-DELETE path cannot
+The `xmin` horizon is the residual risk the batched-DELETE path cannot
 beat on old sources: autovacuum cannot reclaim dead tuples older than the
 source's oldest running transaction, so a long idle-in-transaction session makes
 the delta table bloat *regardless of purge*. M5c cannot fix that on an old
@@ -46,18 +46,18 @@ schema):
 
 - `replicare.delta_<rel_id>` — the dirty-key set. Columns: `delta_id bigserial`
   PK, `rc_op`, key columns `k1..kn`, and `rc_txid` / `rc_seq` / `rc_at`
-  (lag/ordering hints only, never a resume cursor — §3.3).
+  (lag/ordering hints only, never a resume cursor).
 - `replicare.track_<rel_id>` — per `(target, delta_id)` consumption record. A row
   means that target has applied that delta. PK `(target, delta_id)`.
 
-Daemon state (the `StateStore`, a *separate* Postgres schema — §9 "do not
-conflate"):
+Daemon state (the `StateStore`, a *separate* Postgres schema, not to be
+confused with the source-side tables):
 
 - `cursors(sync, target, table)` carries `phase` (`initial_copy` / `streaming`),
   `last_delta` (lag only), and **`needs_reseed`** — the flag M5c drives.
-- `copy_progress(sync, table)` — the resumable initial-copy watermark (§4.1).
+- `copy_progress(sync, table)` — the resumable initial-copy watermark.
 
-**Separation of concerns (§9):** `Source.Purge` touches *only* source objects
+**Separation of concerns:** `Source.Purge` touches *only* source objects
 (delta/track). It never writes the `StateStore`. It **returns** which targets it
 sacrificed; the engine-neutral orchestration (`internal/reseed`) is what writes
 `needs_reseed`, records events, and runs the re-copy. This keeps the delta
@@ -94,7 +94,7 @@ WHERE  delta_id IN (SELECT delta_id FROM purgeable);
 `count(*)` is exact because `track` PK is `(target, delta_id)` — each target
 tracks a `delta_id` at most once, so the count is the number of distinct targets
 that consumed it. When it equals `$ntargets`, all have. Deletes are always
-**by `delta_id`** (never by PK), preserving the §3.3 read-and-clear discipline.
+**by `delta_id`** (never by PK), preserving the read-and-clear discipline.
 
 ### 3.2 Retention evaluation (per target)
 
@@ -120,7 +120,7 @@ When a set `R` of targets is over-cap, Purge, in one pass:
 2. **Resets each `R`'s track:** `DELETE FROM track_<rel> WHERE target = ANY($R)`.
    A reseeded target is about to be re-derived from scratch, so its partial
    consumption record is void. (We reset to **empty**, never to a high-water
-   mark — a fast-forward would re-introduce the §3.3 commit-order hazard.)
+   mark — a fast-forward would re-introduce the commit-order hazard.)
 3. **Purges the now-unpinned deltas** — those consumed by all *remaining*
    (non-reseeding) targets, treating `R` as already satisfied:
 
@@ -143,7 +143,7 @@ That is exactly the intended behaviour: the one laggard is being reseeded, so al
 its deltas are discardable and the source is fully unpinned.
 
 **Why dropping `R`'s unconsumed deltas is safe:** because `R` gets a *full*
-re-copy of current source state (§4). A delta is a pointer to "PK X changed";
+re-copy of current source state. A delta is a pointer to "PK X changed";
 re-copy re-reads X's current value regardless. Discarding the pointer loses
 nothing the re-copy does not re-derive. See the invariant in §4.3.
 
@@ -172,7 +172,7 @@ the tables of its FK component:
                ▼
         ┌─────────────┐
         │  RECOPYING  │  per table: DeleteRange(nil,nil) → copy.Component (LoadDirect)
-        │             │  checkpointed by copy_progress watermark (§4.1)
+        │             │  checkpointed by copy_progress watermark
         └──────┬──────┘
                │ copy done for the component
                ▼
@@ -201,7 +201,7 @@ empty table. This re-derives `target = current source` exactly, deletes included
 
 After re-copy, `track_T` is empty, so the resume drain re-consumes **all**
 currently-retained deltas. Each is an idempotent re-read of the key's *current*
-value + upsert (§3.1 self-healing) — re-applying a delta the copy already covered
+value + upsert (self-healing) — re-applying a delta the copy already covered
 is a no-op-shaped upsert, never corruption. We deliberately do **not** fast-
 forward the track: emptiness is both correct (idempotent) and hazard-free
 (no commit-order skew). It re-consumes redundant work once; convergence is exact.
@@ -227,14 +227,14 @@ states are irrelevant and the two paths cannot disagree on the final value. A
 change after copy but before resume falls in (b). A delete of `X` at the source
 is path (a) (absent from the re-copy → not loaded) or path (b) (re-read finds `X`
 absent → delete-absent). Thus `X` converges to its current source state — which
-is the one-way guarantee (§6: source authoritative, target overwritten to match).
+is the one-way guarantee (source authoritative, target overwritten to match).
 The *only* thing discarded is `R`'s historical intermediate deltas, which reseed
 intentionally supersedes with a current-state copy. ∎
 
 ### 4.4 Crash safety across the handoff (at-least-once, no 2PC)
 
 Every transition is idempotent and independently checkpointed, so a crash at any
-point resumes correctly — the same discipline as §3.3, applied to the machine:
+point resumes correctly — the same delete-by-id discipline as consumption, applied to the machine:
 
 | Crash point | On restart |
 |---|---|
@@ -252,7 +252,7 @@ point resumes correctly — the same discipline as §3.3, applied to the machine
 The reseed must **reset `track_T` to empty**, never to `max(delta_id)` or any
 high-water mark. A high-water reset would declare late-committing low-`delta_id`
 rows "already consumed" and skip them forever — the exact commit-order hazard
-§3.3 was built to defeat. Emptiness re-consumes them idempotently instead. This
+the dirty-key consumption model was built to defeat. Emptiness re-consumes them idempotently instead. This
 is the single most important correctness rule of the machine.
 
 ---
@@ -273,10 +273,10 @@ larger surface that would delay a correct, universal M5c. Keeping one code path
 the bloat win, especially since retention/reseed already bounds *logical* growth
 and telemetry makes the `xmin`-horizon physical-bloat case loud. Partition+DROP
 is revisited as a tuning pass in M9 (partition granularity/cadence numbers are
-open there per plan §15). Until then it is an opt-in extension point, not a
+still open). Until then it is an opt-in extension point, not a
 promise.
 
-This resolves `CLAUDE.md` §15's "partition+DROP-as-default-on-PG≥10" question:
+This settles whether partition+DROP should be the default on PG≥10:
 **no, not default in v1; opt-in optimization, tune in M9.**
 
 ---
@@ -295,7 +295,7 @@ Purge/retention/reseed emit against the frozen F2 registry
 - events `retention.cap_approaching` (WARN, escalating with
   `retention_cap_proximity` toward 1.0) and `target.needs_reseed` (ERROR).
 
-The §3.4/§10 cross-channel rule holds: a target pushing the queue toward the cap
+The cross-channel rule holds: a target pushing the queue toward the cap
 is visible in **metrics** (climbing backlog/age + proximity), **logs**
 (escalating WARN→ERROR), and **traces** (reseed span) simultaneously.
 
