@@ -58,6 +58,21 @@ func (tx *pgApplyTx) StageUpsert(ctx context.Context, t engine.TableRef, cols []
 	if tx.sink.origin {
 		return tx.stageUpsertCluster(ctx, t, cols, reread)
 	}
+	return tx.stage(ctx, t, cols, reread, true)
+}
+
+// StagePresent stages the re-read present rows without upserting them (see
+// engine.PresentStager), for a delete phase whose upsert is blocked by a unique clash.
+func (tx *pgApplyTx) StagePresent(ctx context.Context, t engine.TableRef, cols []string, reread io.Reader) error {
+	if tx.sink.origin {
+		return tx.stageUpsertCluster(ctx, t, cols, reread)
+	}
+	return tx.stage(ctx, t, cols, reread, false)
+}
+
+// stage copies the re-read into a per-table TEMP staging table and, when upsert is set,
+// upserts it into the target table.
+func (tx *pgApplyTx) stage(ctx context.Context, t engine.TableRef, cols []string, reread io.Reader, upsert bool) error {
 	conn := tx.sink.conn
 	table, err := tx.sink.tableMeta(ctx, t)
 	if err != nil {
@@ -103,8 +118,10 @@ func (tx *pgApplyTx) StageUpsert(ctx context.Context, t engine.TableRef, cols []
 	if nc := tx.cyclicCols[t]; len(nc) > 0 {
 		upsertCols = subtractCols(cols, nc)
 	}
-	if _, err := conn.Exec(ctx, mergeInsertSQL(t, stg, upsertCols, keyCols, colSetOf(keyCols), identity)); err != nil {
-		return fmt.Errorf("postgres: apply: upsert %s: %w", t, classifyFKViolation(err))
+	if upsert {
+		if _, err := conn.Exec(ctx, mergeInsertSQL(t, stg, upsertCols, keyCols, colSetOf(keyCols), identity)); err != nil {
+			return fmt.Errorf("postgres: apply: upsert %s: %w", t, classifyUpsertViolation(err))
+		}
 	}
 	tx.staging[t] = stagingInfo{name: stg, keyCols: keyCols}
 	return nil
@@ -203,6 +220,22 @@ func classifyFKViolation(err error) error {
 		return &engine.TransientConstraintError{Err: err}
 	}
 	return err
+}
+
+// classifyUpsertViolation is classifyFKViolation for a streaming upsert, which also
+// treats a unique-key clash (SQLSTATE 23505) as transient. The upsert is keyed on the
+// primary key, so it cannot get past a target row that still holds the incoming row's
+// unique value under another key: typically a row the source deleted (an account deleted
+// and re-created under a new id with the same email), whose delete has not been applied
+// yet because deletes run after upserts. The drain runs the table's delete phase anyway
+// and retries the upsert on the next pass, by which time the old row is gone.
+func classifyUpsertViolation(err error) error {
+	err = withPgDetail(err)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return &engine.TransientConstraintError{Err: err, Unique: true}
+	}
+	return classifyFKViolation(err)
 }
 
 // Rollback rolls back the apply transaction if it has not committed.

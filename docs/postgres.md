@@ -55,7 +55,12 @@ Change capture runs in four steps:
    high-water-mark cursor would fall straight into.
 3. Apply. Changes land as idempotent upserts keyed on the PK(`INSERT … ON CONFLICT DO UPDATE`)
    and deletes by PK, ordered by FK dependency within each FK component - upserts go from
-   parent to child, deletes from child to parent - with a retry fallback for cycles.
+   parent to child, deletes from child to parent - with a retry fallback for cycles. The same
+   retry covers a unique value moving between rows within one pass: if a row was deleted and a
+   new one created with the same unique value(an account re-created with the same email, say),
+   the new row clashes with the old one, which is still on the target because deletes come
+   after upserts. `replicare` applies that table's deletes anyway and retries the new row on
+   the next pass, once the old one is gone.
 4. Checkpoint. Progress lives in the Postgres StateStore, so a crash safely replays from the
    last confirmed cursor; that's harmless, since applies are idempotent.
 

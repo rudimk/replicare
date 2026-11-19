@@ -139,6 +139,15 @@ func DrainComponentPool(ctx context.Context, pool []Conn, concurrency int,
 	// Upserts: parent -> child.
 	for _, w := range work {
 		if err := pipeStageUpsert(ctx, src, tx, w.ref, w.cols, w.distinct); err != nil {
+			if engine.IsTransientUnique(err) {
+				// See uniqueBlockedDeletes: the transaction is aborted, so apply this
+				// pass's deletes on their own, confirm nothing, and let the caller retry.
+				_ = tx.Rollback(ctx)
+				committed = true // rolled back; nothing left for the deferred rollback
+				if derr := deleteOnlyPass(ctx, src, sink, cyclic, tablesTopoOrder, work); derr != nil {
+					return 0, fmt.Errorf("apply component: stage %s: %w (and the deletes-only pass failed: %v)", w.ref, err, derr)
+				}
+			}
 			return 0, fmt.Errorf("apply component: stage %s: %w", w.ref, err)
 		}
 	}
@@ -161,6 +170,39 @@ func DrainComponentPool(ctx context.Context, pool []Conn, concurrency int,
 		recordApplied(ctx, w.ref, len(w.ids))
 	}
 	return total, nil
+}
+
+// deleteOnlyPass applies just a pass's deletes, child→parent, in one transaction, staging
+// the present rows without upserting them (engine.PresentStager). It is the single-
+// transaction path's form of uniqueBlockedDeletes. Nothing is confirmed: the next pass
+// re-reads the same dirty keys and applies them in full.
+func deleteOnlyPass(ctx context.Context, src engine.Source, sink engine.Sink, cyclic bool,
+	tables []engine.TableRef, work []tableWork) error {
+	tx, err := sink.BeginApply(ctx, cyclic, tables)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(context.Background())
+		}
+	}()
+	for _, w := range work {
+		if err := pipeStage(ctx, src, tx, w.ref, w.cols, w.distinct, true); err != nil {
+			return err
+		}
+	}
+	for i := len(work) - 1; i >= 0; i-- {
+		if err := tx.DeleteAbsent(ctx, work[i].ref, work[i].distinct); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
 }
 
 // drainAcyclic drains an acyclic component with PER-TABLE committed transactions
@@ -213,33 +255,40 @@ func drainAcyclicSeq(ctx context.Context, c Conn, work []tableWork, target engin
 	src, sink := c.Src, c.Sink
 	var transient error
 	upserted := make([]bool, len(work))
+	deletable := make([]bool, len(work)) // see uniqueBlockedDeletes
 
 	// Phase 1 — upserts, parents→children.
 	for i, w := range work {
 		if err := perTableUpsert(ctx, src, sink, w); err != nil {
 			if engine.IsTransientConstraint(err) {
 				transient = err
+				deletable[i] = engine.IsTransientUnique(err)
 				continue
 			}
 			return 0, fmt.Errorf("apply component: upsert %s: %w", w.ref, err)
 		}
 		upserted[i] = true
+		deletable[i] = true
 	}
 
-	// Phase 2 — deletes, children→parents. Only tables whose upsert committed are
-	// eligible; a table needs both phases before it is confirmed.
+	// Phase 2 — deletes, children→parents. Only tables whose upsert committed (or was
+	// blocked by a unique clash, see uniqueBlockedDeletes) are eligible; a table needs
+	// both phases before it is confirmed.
 	total := 0
 	for i := len(work) - 1; i >= 0; i-- {
-		if !upserted[i] {
+		if !deletable[i] {
 			continue
 		}
 		w := work[i]
-		if err := perTableDelete(ctx, src, sink, w); err != nil {
+		if err := perTableDelete(ctx, src, sink, w, !upserted[i]); err != nil {
 			if engine.IsTransientConstraint(err) {
 				transient = err
 				continue
 			}
 			return total, fmt.Errorf("apply component: delete %s: %w", w.ref, err)
+		}
+		if !upserted[i] {
+			continue // unique-blocked: deleted what the source no longer has; retried next pass
 		}
 		if err := src.ConfirmConsumed(ctx, w.ref, target, w.ids); err != nil {
 			return total, fmt.Errorf("apply component: confirm %s: %w", w.ref, err)
@@ -249,6 +298,13 @@ func drainAcyclicSeq(ctx context.Context, c Conn, work []tableWork, target engin
 	}
 	return total, transient
 }
+
+// uniqueBlockedDeletes: a table whose upsert was blocked by a unique-key clash
+// (engine.IsTransientUnique) still runs its delete phase in the same pass. The clash is
+// typically a row the source deleted, whose delete would otherwise never run (deletes
+// follow upserts, and only after a successful upsert), so the same upsert would fail on
+// every pass. Deleting the rows the source no longer has frees the value; the table is
+// not confirmed (and, if cyclic, not filled), so the next pass re-applies it in full.
 
 // drainAcyclicParallel is the concurrent acyclic drain: the same two FK-ordered
 // phases, but the tables WITHIN each phase apply across the pool (bounded to
@@ -266,23 +322,30 @@ func drainAcyclicParallel(ctx context.Context, pool []Conn, work []tableWork, ta
 		return perTableUpsert(ctx, c.Src, c.Sink, work[i])
 	})
 	upserted := make([]bool, n)
+	deletable := make([]bool, n) // see uniqueBlockedDeletes
 	for i, e := range e1 {
 		switch {
 		case e == nil:
 			upserted[i] = true
+			deletable[i] = true
 		case engine.IsTransientConstraint(e):
 			transient = e
+			deletable[i] = engine.IsTransientUnique(e)
 		default:
 			return 0, fmt.Errorf("apply component: upsert %s: %w", work[i].ref, e)
 		}
 	}
 
-	// Phase 2 — deletes + confirm, only tables whose upsert committed.
+	// Phase 2 — deletes + confirm, only tables whose upsert committed (or was blocked
+	// by a unique clash: deleted, not confirmed).
 	var mu sync.Mutex
 	total := 0
-	e2 := applyPhase(ctx, pool, n, reverseIdx(n, upserted), func(ctx context.Context, c Conn, i int) error {
-		if err := perTableDelete(ctx, c.Src, c.Sink, work[i]); err != nil {
+	e2 := applyPhase(ctx, pool, n, reverseIdx(n, deletable), func(ctx context.Context, c Conn, i int) error {
+		if err := perTableDelete(ctx, c.Src, c.Sink, work[i], !upserted[i]); err != nil {
 			return err
+		}
+		if !upserted[i] {
+			return nil
 		}
 		if err := c.Src.ConfirmConsumed(ctx, work[i].ref, target, work[i].ids); err != nil {
 			return err
@@ -357,27 +420,31 @@ func drainCyclicNullFillSeq(ctx context.Context, c Conn, work []tableWork,
 	src, sink := c.Src, c.Sink
 	var transient error
 	upserted := make([]bool, len(work))
+	deletable := make([]bool, len(work)) // see uniqueBlockedDeletes
 	deleted := make([]bool, len(work))
 	filled := make([]bool, len(work))
 
 	// Phase 1 — upsert (cyclic FK columns NULL), parents→children.
 	for i, w := range work {
-		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, false); err != nil {
+		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, false, false); err != nil {
 			if engine.IsTransientConstraint(err) {
 				transient = err
+				deletable[i] = engine.IsTransientUnique(err)
 				continue
 			}
 			return 0, fmt.Errorf("apply component: upsert %s: %w", w.ref, err)
 		}
 		upserted[i] = true
+		deletable[i] = true
 	}
 
-	// Phase 2 — deletes, children→parents (only tables whose upsert landed).
+	// Phase 2 — deletes, children→parents (only tables whose upsert landed, or was
+	// blocked by a unique clash).
 	for i := len(work) - 1; i >= 0; i-- {
-		if !upserted[i] {
+		if !deletable[i] {
 			continue
 		}
-		if err := perTableApplyCyclic(ctx, src, sink, work[i], tablesTopoOrder, true, false); err != nil {
+		if err := perTableApplyCyclic(ctx, src, sink, work[i], tablesTopoOrder, true, false, !upserted[i]); err != nil {
 			if engine.IsTransientConstraint(err) {
 				transient = err
 				continue
@@ -397,7 +464,7 @@ func drainCyclicNullFillSeq(ctx context.Context, c Conn, work []tableWork,
 		if !upserted[i] || !deleted[i] {
 			continue
 		}
-		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, true); err != nil {
+		if err := perTableApplyCyclic(ctx, src, sink, w, tablesTopoOrder, false, true, false); err != nil {
 			if engine.IsTransientConstraint(err) {
 				transient = err
 				continue
@@ -433,28 +500,32 @@ func drainCyclicNullFillParallel(ctx context.Context, pool []Conn, work []tableW
 
 	// Phase 1 — upsert (cyclic FK columns NULL).
 	e1 := applyPhase(ctx, pool, n, forwardIdx(n), func(ctx context.Context, c Conn, i int) error {
-		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, false)
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, false, false)
 	})
 	upserted := make([]bool, n)
+	deletable := make([]bool, n) // see uniqueBlockedDeletes
 	for i, e := range e1 {
 		switch {
 		case e == nil:
 			upserted[i] = true
+			deletable[i] = true
 		case engine.IsTransientConstraint(e):
 			transient = e
+			deletable[i] = engine.IsTransientUnique(e)
 		default:
 			return 0, fmt.Errorf("apply component: upsert %s: %w", work[i].ref, e)
 		}
 	}
 
-	// Phase 2 — deletes, only tables whose upsert landed.
-	e2 := applyPhase(ctx, pool, n, reverseIdx(n, upserted), func(ctx context.Context, c Conn, i int) error {
-		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, true, false)
+	// Phase 2 — deletes, only tables whose upsert landed (or was blocked by a unique
+	// clash).
+	e2 := applyPhase(ctx, pool, n, reverseIdx(n, deletable), func(ctx context.Context, c Conn, i int) error {
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, true, false, !upserted[i])
 	})
 	deleted := make([]bool, n)
 	for i, e := range e2 {
 		switch {
-		case !upserted[i]:
+		case !deletable[i]:
 		case e == nil:
 			deleted[i] = true
 		case engine.IsTransientConstraint(e):
@@ -478,7 +549,7 @@ func drainCyclicNullFillParallel(ctx context.Context, pool []Conn, work []tableW
 		}
 	}
 	e3 := applyPhase(ctx, pool, n, fillIdx, func(ctx context.Context, c Conn, i int) error {
-		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, true)
+		return perTableApplyCyclic(ctx, c.Src, c.Sink, work[i], tablesTopoOrder, false, true, false)
 	})
 	for _, i := range fillIdx {
 		switch e := e3[i]; {
@@ -564,7 +635,7 @@ func reverseIdx(n int, mask []bool) []int {
 // per phase: delete the dirty keys now absent at the source (del), and/or fill the
 // cyclic FK columns from the staging (fill). Phase 1 passes both false.
 func perTableApplyCyclic(ctx context.Context, src engine.Source, sink engine.Sink,
-	w tableWork, componentTables []engine.TableRef, del, fill bool) error {
+	w tableWork, componentTables []engine.TableRef, del, fill, presentOnly bool) error {
 	tx, err := sink.BeginApply(ctx, true, componentTables)
 	if err != nil {
 		return err
@@ -575,7 +646,7 @@ func perTableApplyCyclic(ctx context.Context, src engine.Source, sink engine.Sin
 			_ = tx.Rollback(context.Background())
 		}
 	}()
-	if err := pipeStageUpsert(ctx, src, tx, w.ref, w.cols, w.distinct); err != nil {
+	if err := pipeStage(ctx, src, tx, w.ref, w.cols, w.distinct, presentOnly); err != nil {
 		return err
 	}
 	if fill {
@@ -632,7 +703,7 @@ func perTableUpsert(ctx context.Context, src engine.Source, sink engine.Sink, w 
 // its own committed transaction. It re-stages the present rows (an idempotent
 // re-read + upsert) so DeleteAbsent can tell present from absent; the re-upsert is
 // bounded (batch) and harmless.
-func perTableDelete(ctx context.Context, src engine.Source, sink engine.Sink, w tableWork) error {
+func perTableDelete(ctx context.Context, src engine.Source, sink engine.Sink, w tableWork, presentOnly bool) error {
 	// See perTableUpsert: pass the table so MySQL pre-warms its metadata before pinning.
 	tx, err := sink.BeginApply(ctx, false, []engine.TableRef{w.ref})
 	if err != nil {
@@ -644,7 +715,7 @@ func perTableDelete(ctx context.Context, src engine.Source, sink engine.Sink, w 
 			_ = tx.Rollback(context.Background())
 		}
 	}()
-	if err := pipeStageUpsert(ctx, src, tx, w.ref, w.cols, w.distinct); err != nil {
+	if err := pipeStage(ctx, src, tx, w.ref, w.cols, w.distinct, presentOnly); err != nil {
 		return err
 	}
 	if err := tx.DeleteAbsent(ctx, w.ref, w.distinct); err != nil {
@@ -660,6 +731,18 @@ func perTableDelete(ctx context.Context, src engine.Source, sink engine.Sink, w 
 // pipeStageUpsert streams a table's re-read (source) into its staging (target tx).
 func pipeStageUpsert(ctx context.Context, src engine.Source, tx engine.ApplyTx,
 	ref engine.TableRef, cols []string, keys []engine.KeyValues) error {
+	return pipeStage(ctx, src, tx, ref, cols, keys, false)
+}
+
+// pipeStage streams a table's re-read into its staging. With presentOnly it stages without
+// upserting (engine.PresentStager), for a delete phase whose upsert is blocked by a unique
+// clash; an engine without that capability upserts as before.
+func pipeStage(ctx context.Context, src engine.Source, tx engine.ApplyTx,
+	ref engine.TableRef, cols []string, keys []engine.KeyValues, presentOnly bool) error {
+	stageFn := tx.StageUpsert
+	if ps, ok := tx.(engine.PresentStager); ok && presentOnly {
+		stageFn = ps.StagePresent
+	}
 	pr, pw := io.Pipe()
 	errc := make(chan error, 1)
 	go func() {
@@ -667,7 +750,7 @@ func pipeStageUpsert(ctx context.Context, src engine.Source, tx engine.ApplyTx,
 		_ = pw.CloseWithError(err)
 		errc <- err
 	}()
-	stageErr := tx.StageUpsert(ctx, ref, cols, pr)
+	stageErr := stageFn(ctx, ref, cols, pr)
 	_ = pr.CloseWithError(stageErr)
 	if rereadErr := <-errc; rereadErr != nil {
 		return fmt.Errorf("re-read: %w", rereadErr)

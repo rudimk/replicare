@@ -12,7 +12,14 @@ import (
 // (CLAUDE.md §3.3 retry fallback: cycles, self-references, cross-pass deps).
 // Engines wrap the underlying driver error; the drain loop retries these with
 // bounded backoff and halts loud on anything else (or on exhaustion).
-type TransientConstraintError struct{ Err error }
+type TransientConstraintError struct {
+	Err error
+	// Unique marks a unique-key clash (rather than an FK violation) in a streaming
+	// upsert: a row the source has since deleted, or changed, still holds the unique
+	// value the incoming row needs. Deleting the rows now gone from the source frees it,
+	// so the table's delete phase still runs and the upsert is retried next pass.
+	Unique bool
+}
 
 func (e *TransientConstraintError) Error() string { return e.Err.Error() }
 func (e *TransientConstraintError) Unwrap() error { return e.Err }
@@ -22,6 +29,13 @@ func (e *TransientConstraintError) Unwrap() error { return e.Err }
 func IsTransientConstraint(err error) bool {
 	var t *TransientConstraintError
 	return errors.As(err, &t)
+}
+
+// IsTransientUnique reports whether err is a transient unique-key clash (see
+// TransientConstraintError.Unique).
+func IsTransientUnique(err error) bool {
+	var t *TransientConstraintError
+	return errors.As(err, &t) && t.Unique
 }
 
 // TLSMode mirrors the libpq sslmode spectrum (CLAUDE.md §11). Connections are
@@ -187,6 +201,16 @@ type ApplyTx interface {
 	DeleteAbsent(ctx context.Context, t TableRef, dirtyKeys []KeyValues) error
 	Commit(ctx context.Context) error
 	Rollback(ctx context.Context) error
+}
+
+// PresentStager is an OPTIONAL ApplyTx capability: stage a table's re-read present rows
+// (exactly as StageUpsert does, so DeleteAbsent can tell which dirty keys the source no
+// longer has) WITHOUT upserting them. The drain uses it to run a table's delete phase when
+// the table's upsert was blocked by a unique-key clash (IsTransientUnique): re-running the
+// upsert there would hit the same clash before any delete. An engine without it keeps
+// using StageUpsert.
+type PresentStager interface {
+	StagePresent(ctx context.Context, t TableRef, cols []string, reread io.Reader) error
 }
 
 // KeyLister and KeyExister are OPTIONAL capabilities for engines whose deletes are
