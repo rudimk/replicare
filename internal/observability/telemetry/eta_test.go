@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"context"
 	"errors"
 	"math"
 	"testing"
@@ -108,7 +109,7 @@ func TestCatchupETA(t *testing.T) {
 	}
 
 	// Target down: not catching up, whatever the backlog did.
-	tel.TargetUnreachable(t.Context(), nil, "s", "dst", a, "c", engine.DeltaBacklog{Rows: 1}, 0, errors.New("down"))
+	tel.TargetUnreachable(context.Background(), nil, "s", "dst", a, "c", engine.DeltaBacklog{Rows: 1}, 0, errors.New("down"))
 	if v, ok := eta(); !ok || v != etaStalled {
 		t.Fatalf("ETA with the target down = %v (%v), want %v", v, ok, etaStalled)
 	}
