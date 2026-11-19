@@ -698,7 +698,11 @@ chunk counts once; parent re-copies for live-source skew and the cyclic-column f
 count). The shipped Grafana dashboard keys its sync/table filters on `replicare_table_phase_info`
 — filters fed by streaming-only metrics left every panel empty during a copy.
 **ETAs are computed in the daemon, not in PromQL (decision).** `replicare_initial_copy_eta_seconds{sync}`
-(rows left from the per-table estimates, minus finished tables, ÷ copy rate over a 10-minute window)
+(work left ÷ the rate it got done over a 10-minute window; **work is weighted by table size** where the
+source implements optional `engine.TableSizeEstimator` — PG heap+TOAST via `pg_relation_size`, MySQL
+`DATA_LENGTH`, no indexes — as `size × share of estimated rows still to copy`, else plain rows. Rows
+alone misled in production: a fast run of small `CreditTransaction` rows said 28 min with 67 GB of
+`Message` still to go)
 and `replicare_catchup_eta_seconds{sync,target}` (backlog ÷ its shrink rate over the window; `0` when
 nothing has waited over a minute, so a steady small backlog is "caught up"). `-1` = not moving
 (no copy progress / backlog not shrinking / target down); no series = under a minute of history.

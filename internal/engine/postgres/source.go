@@ -165,6 +165,51 @@ WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
 
 var _ engine.RowEstimator = (*Source)(nil)
 
+// EstimateTableBytes implements engine.TableSizeEstimator: the size of each table's
+// data and its TOAST table, without indexes (a partitioned table sums its partitions).
+// pg_relation_size reads the file sizes, no scan, and exists on every supported version.
+func (s *Source) EstimateTableBytes(ctx context.Context, tables []engine.TableRef) (map[engine.TableRef]int64, error) {
+	if s.conn == nil {
+		return nil, errNotConnected("source")
+	}
+	out := make(map[engine.TableRef]int64, len(tables))
+	if len(tables) == 0 {
+		return out, nil
+	}
+	pairs := make([]string, len(tables))
+	args := make([]any, 0, len(tables)*2)
+	for i, t := range tables {
+		pairs[i] = fmt.Sprintf("($%d,$%d)", 2*i+1, 2*i+2)
+		args = append(args, t.Schema, t.Name)
+	}
+	q := fmt.Sprintf(`SELECT n.nspname, c.relname,
+       (SELECT COALESCE(SUM(pg_relation_size(r.oid)
+                            + CASE WHEN r.reltoastrelid <> 0 THEN pg_relation_size(r.reltoastrelid) ELSE 0 END), 0)
+          FROM pg_class r
+         WHERE r.oid = c.oid
+            OR r.oid IN (SELECT i.inhrelid FROM pg_inherits i WHERE i.inhparent = c.oid))::bigint
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
+	rows, err := s.conn.Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("postgres: estimate table bytes: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var schema, name string
+		var n int64
+		if err := rows.Scan(&schema, &name, &n); err != nil {
+			return nil, fmt.Errorf("postgres: estimate table bytes: %w", err)
+		}
+		if n > 0 {
+			out[engine.TableRef{Schema: schema, Name: name}] = n
+		}
+	}
+	return out, rows.Err()
+}
+
+var _ engine.TableSizeEstimator = (*Source)(nil)
+
 // ServerVersion returns the numeric source server version (e.g. 90600 for 9.6).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {
 	if err := s.requireConn(); err != nil {

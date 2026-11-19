@@ -147,3 +147,31 @@ func TestETASeriesKeepsOneSampleBeforeTheWindow(t *testing.T) {
 		t.Errorf("rate = %v (%v), want 1/s", r, ok)
 	}
 }
+
+// TestInitialCopyETAWeighsBySize: a fast run of small rows must not make a table of big
+// rows look quick. Table a: 100,000 small rows, 1 GB. Table b: 10,000 large rows, 9 GB.
+// Copying a at 1,000 rows/s moves 10 MB/s, so the 9.9 GB left takes ~990s, where a row
+// count would have said (99,000 + 10,000) / 1,000 = 109s.
+func TestInitialCopyETAWeighsBySize(t *testing.T) {
+	tel, reg, now := etaTel()
+	a, b := engine.TableRef{Schema: "public", Name: "a"}, engine.TableRef{Schema: "public", Name: "b"}
+	labels := map[string]string{"sync": "s"}
+	const gb = 1_000_000_000
+	for _, tb := range []engine.TableRef{a, b} {
+		tel.SetPhase("s", tb, "initial_copy")
+	}
+	tel.SetRowsCopiedTarget("s", a, 100_000)
+	tel.SetRowsCopiedTarget("s", b, 10_000)
+	tel.SetCopyTableBytes("s", a, 1*gb)
+	tel.SetCopyTableBytes("s", b, 9*gb)
+
+	*now = now.Add(30 * time.Second)
+	tel.AddRowsCopied("s", a, 30_000)
+	*now = now.Add(30 * time.Second)
+	tel.AddRowsCopied("s", a, 30_000)
+	// 60,000 rows of a in 60s = 0.6 GB in 60s = 10 MB/s; left: 0.4 GB of a + 9 GB of b.
+	v, ok := gaugeValue(t, reg, observability.MetricInitialCopyETA, labels)
+	if !ok || math.Abs(v-940) > 1 {
+		t.Fatalf("ETA = %v (%v), want 940s (9.4 GB left at 10 MB/s)", v, ok)
+	}
+}

@@ -311,6 +311,15 @@ type RowEstimator interface {
 	EstimateRows(ctx context.Context, tables []TableRef) (map[TableRef]int64, error)
 }
 
+// TableSizeEstimator is an OPTIONAL Source capability: each table's data size in bytes
+// (table data plus out-of-line values, no indexes), from the engine's catalogues without
+// a scan. It weights the initial-copy ETA, so a table of large rows counts for what it is
+// rather than for its row count. Tables with no figure are left out of the result.
+// Postgres: pg_relation_size of the table and its TOAST table; MySQL: DATA_LENGTH.
+type TableSizeEstimator interface {
+	EstimateTableBytes(ctx context.Context, tables []TableRef) (map[TableRef]int64, error)
+}
+
 // DBSizer is an OPTIONAL Source/Sink capability: report on-disk sizes the
 // pipeline emits as size metrics. Relational engines implement it (Postgres
 // pg_database_size / pg_total_relation_size, MySQL information_schema); an engine
