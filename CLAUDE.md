@@ -327,6 +327,17 @@ brittle across major-version gaps).
   range-delete + re-copy is exclusive and idempotent.
 - **Merge path (auto when target non-empty / opt-in):** `COPY` into a `TEMP` staging table then
   `INSERT … ON CONFLICT DO UPDATE`. Privilege-light, idempotent, ~2× write amplification.
+- **Cyclic components clear before reload (decision, from a production incident).** A cyclic
+  component is one coarse resume unit, so every (re)start re-copies it from scratch. Merging over
+  a previous unfinished attempt fails once the source has *moved a unique value between rows*
+  (delete + re-create under a new PK with the same `(email, parent)`, or a swap): the upsert is
+  keyed on the PK, so the stale target row blocks the new one (23505). So `CopyCyclicComponent`
+  first **empties the component's target tables** when any holds rows — `TRUNCATE` if permitted,
+  else one statement of data-modifying-CTE `DELETE`s (FK checks fire at statement end, so loops,
+  `RESTRICT` and `NOT NULL` cycles are fine). Same principle as the chunk DELETE-range resume.
+  **Skipped** (merge as before) for an **active-active member** (its rows are a peer's data) and
+  when a **table outside the component references** it (would fail the FK or cascade into data
+  we don't own). Postgres error messages now carry the DETAIL line (the offending key).
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a

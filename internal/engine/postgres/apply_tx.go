@@ -197,6 +197,7 @@ func cyclicFillSQL(ref engine.TableRef, info stagingInfo, cols []string) string 
 // cross-pass dependencies (§3.3). Deferred FK checks surface at COMMIT, so
 // Commit classifies too. Every other error stays as-is and halts loud.
 func classifyFKViolation(err error) error {
+	err = withPgDetail(err)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
 		return &engine.TransientConstraintError{Err: err}

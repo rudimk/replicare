@@ -89,6 +89,13 @@ func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, table
 		return fmt.Errorf("postgres: cyclic copy: component has a NOT NULL non-deferrable cyclic FK; make it DEFERRABLE or break the cycle")
 	}
 
+	// The component is copied from scratch on every (re)start; if an earlier, unfinished
+	// attempt left rows on the target, clear them first so the copy loads into empty
+	// tables instead of merging over rows the source may since have moved.
+	if _, err := s.clearComponentForReload(ctx, tables); err != nil {
+		return fmt.Errorf("postgres: cyclic copy: %w", err)
+	}
+
 	// All cyclic FKs deferrable -> one deferred transaction over the whole component.
 	// classifyFKViolation marks a live-source transient FK skew (§3.3/§4) transient so
 	// the syncer's coarse retry recovers instead of the daemon crash-looping.
