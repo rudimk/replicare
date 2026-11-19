@@ -350,6 +350,15 @@ brittle across major-version gaps).
   still load one at a time in non-cyclic topo order. Parent re-copies from parallel chunks are
   serialized (mutex); a 40P01 deadlock on a chunk is retried. On error no new chunk starts and
   in-flight ones finish — never cancel a pgx query midway (it breaks the connection).
+- **Live-source parent skew fetches only the referenced parent rows (decision, from a production
+  slowdown).** A child chunk failing on a missing parent (23503) used to re-copy the **whole** parent
+  table (and on a grandparent miss, restart that whole re-copy) — minutes per failed chunk on a big
+  parent, and it could run out of retries and fall into the syncer's coarse retry, which clears and
+  re-copies the whole component. Now `parentFetch` stages from the source only the parent rows the
+  chunk points at (`(parentCols) IN (SELECT childCols FROM child WHERE <chunk range>)`, nested one
+  level per hop for grandparents) and inserts **only the missing ones** (`ON CONFLICT DO NOTHING`;
+  existing rows reach their current value through the delta queue). keepReal / keyless parents still
+  fall back to the whole re-copy.
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a

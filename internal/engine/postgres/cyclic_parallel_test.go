@@ -178,7 +178,7 @@ func TestCyclicCopyParallelParentSkew(t *testing.T) {
 			return one(ctx, p)
 		}
 	}
-	if err := copyTableChunkedWithParentRetry(ctx, conns, childRef, transportColumns(byRef[childRef]), []engine.TableRef{hubRef}, recopyOn); err != nil {
+	if err := copyTableChunkedWithParentRetry(ctx, conns, childRef, transportColumns(byRef[childRef]), []engine.TableRef{hubRef}, recopyOn, nil); err != nil {
 		t.Fatalf("parallel chunked copy with parent skew: %v", err)
 	}
 	for _, sel := range []string{
@@ -189,4 +189,85 @@ func TestCyclicCopyParallelParentSkew(t *testing.T) {
 			t.Errorf("did not converge: %s", sel)
 		}
 	}
+}
+
+// TestCyclicCopyFetchesOnlyReferencedParents: when a child chunk fails on parent rows the
+// target lacks, only the parent rows that chunk points at are brought across, not the
+// whole parent table, and rows already on the target are left as they are. It walks up a
+// level when the fetched parents point at grandparent rows the target lacks too.
+func TestCyclicCopyFetchesOnlyReferencedParents(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	usrDDL := "CREATE TABLE rc_it.usr (id int PRIMARY KEY, name text)"
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, usr_id int NOT NULL REFERENCES rc_it.usr(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, usrDDL, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	for _, d := range []string{usrDDL, hubDDL, childDDL} {
+		mustExecTarget(t, ctx, sink, d)
+	}
+	// Source: 300 users, 300 hubs (hub g belongs to user g), and 200 children that point
+	// only at hubs 1..100.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.usr SELECT g, 'u'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, g, 'h'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%100), 'c'||g FROM generate_series(1,200) g")
+	// Target: users and hubs lag far behind (only 1..3, with stale names).
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.usr SELECT g, 'stale' FROM generate_series(1,3) g")
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.hub SELECT g, g, 'stale' FROM generate_series(1,3) g")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.usr", "rc_it.hub", "rc_it.child"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	members := schema.Tables
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range members {
+		byRef[tb.Ref] = tb
+	}
+	usrRef, hubRef, childRef := ref("rc_it.usr"), ref("rc_it.hub"), ref("rc_it.child")
+	parents := nonCyclicParents(members, map[string]bool{})
+	var mu sync.Mutex
+	wholeRecopies := 0
+	recopyOn := func(c copyConn) parentRecopier {
+		return func(ctx context.Context, p engine.TableRef) error {
+			wholeRecopies++
+			return recopyOmitting(c.src, c.sink, byRef, map[engine.TableRef][]string{})(ctx, p)
+		}
+	}
+	pf := newParentFetch(members, map[string]bool{}, parents, map[engine.TableRef][]string{}, map[engine.TableRef][]string{}, recopyOn, &mu)
+	fetchOn := func(c copyConn) referencedFetcher {
+		return func(ctx context.Context, w string) error { return pf.fetch(ctx, c, childRef, w) }
+	}
+	conns := []copyConn{{src: src, sink: sink}}
+	for _, h := range []engine.ConnPair{helperPair(t, ctx), helperPair(t, ctx)} {
+		conns = append(conns, copyConn{src: h.Src.(*Source), sink: h.Sink.(*Sink)})
+	}
+	if err := copyTableChunkedWithParentRetry(ctx, conns, childRef, transportColumns(byRef[childRef]), parents[childRef], recopyOn, fetchOn); err != nil {
+		t.Fatalf("copy with targeted parent fetch: %v", err)
+	}
+
+	sel := "SELECT id::text, hub_id::text, note FROM rc_it.child ORDER BY id"
+	if !eqLines(dumpText(t, ctx, src.conn, sel), dumpText(t, ctx, sink.conn, sel)) {
+		t.Error("child did not converge")
+	}
+	if wholeRecopies != 0 {
+		t.Errorf("fell back to %d whole-table parent re-copies, want 0", wholeRecopies)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.hub"); n != 100 {
+		t.Errorf("target hub has %d rows, want 100 (only the hubs the children point at)", n)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.usr"); n != 100 {
+		t.Errorf("target usr has %d rows, want 100 (only the users those hubs point at)", n)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.hub WHERE name = 'stale'"); n != 3 {
+		t.Errorf("%d stale hub rows left, want 3 (rows already there are left alone)", n)
+	}
+	_ = usrRef
+	_ = hubRef
 }

@@ -133,6 +133,14 @@ the target yet, which is the usual case once the group has been emptied, goes in
 `COPY` straight into the table. A chunk that already has rows there is merged instead, through a
 staging table and `INSERT … ON CONFLICT`.
 
+The source keeps changing while this runs, so a chunk can hold a row that points at a parent row
+created after that parent table was copied, which the target refuses. When that happens,
+`replicare` copies across just the parent rows that chunk points at, and only the ones the target
+doesn't have yet, then retries the chunk. If those parent rows in turn point at rows the target
+doesn't have, it fetches those too, one level up at a time. It never copies a whole parent table
+again for this, so a busy source doesn't slow the copy down much. The one exception is a table
+that's loaded in a single statement(see above), which is copied again whole.
+
 On a large target, it's the indexes that slow a copy like this down most. Every row added has to
 go into every index on the table, and once those indexes outgrow the target's memory, most of
 that becomes waiting on disk reads. When a big copy crawls, dropping the target's non-unique
