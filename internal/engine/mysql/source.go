@@ -125,6 +125,43 @@ FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (`+strings.Jo
 
 var _ engine.RowEstimator = (*Source)(nil)
 
+// EstimateTableBytes implements engine.TableSizeEstimator from information_schema's
+// DATA_LENGTH (the clustered index, i.e. the rows; secondary indexes excluded).
+func (s *Source) EstimateTableBytes(ctx context.Context, tables []engine.TableRef) (map[engine.TableRef]int64, error) {
+	if s.db == nil {
+		return nil, errNotConnected
+	}
+	out := make(map[engine.TableRef]int64, len(tables))
+	if len(tables) == 0 {
+		return out, nil
+	}
+	pairs := make([]string, len(tables))
+	args := make([]any, 0, len(tables)*2)
+	for i, t := range tables {
+		pairs[i] = "(?, ?)"
+		args = append(args, t.Schema, t.Name)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(DATA_LENGTH, 0)
+FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (`+strings.Join(pairs, ", ")+`)`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("mysql: estimate table bytes: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var schema, name string
+		var n int64
+		if err := rows.Scan(&schema, &name, &n); err != nil {
+			return nil, fmt.Errorf("mysql: estimate table bytes: %w", err)
+		}
+		if n > 0 {
+			out[engine.TableRef{Schema: schema, Name: name}] = n
+		}
+	}
+	return out, rows.Err()
+}
+
+var _ engine.TableSizeEstimator = (*Source)(nil)
+
 // ServerVersion returns the numeric server version (e.g. 50744 for 5.7.44) and
 // refuses MariaDB (out of scope for v1).
 func (s *Source) ServerVersion(ctx context.Context) (int, error) {

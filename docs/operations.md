@@ -410,7 +410,7 @@ table exactly.
 |---|---|---|---|
 | `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy, counted once they're committed on the target(a retried chunk counts once). Tables linked in a loop count too; rows re-copied only to catch up with a busy source don't. Restarts from 0 with the daemon. |
 | `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy(the progress denominator), from the source's own statistics(Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy, and left unset for a table that's never been analysed. |
-| `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the rows still to copy(each copying table's row estimate, less what it has copied) divided by the copy rate over the last 10 minutes. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate. |
+| `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the work still to do divided by how fast it got done over the last 10 minutes. Work is measured by size where the source reports table sizes(Postgres, MySQL): each table counts for its data size on the source, times the share of its estimated rows still to copy, so a table of large rows weighs what it holds, not its row count. Otherwise it's measured in rows. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate. |
 | `replicare_catchup_eta_seconds` | gauge | `sync`, `target` | Estimated seconds until the target's delta backlog is cleared, at the rate it shrank over the last 10 minutes. `0` when caught up(no backlog, or nothing waiting longer than a minute), `-1` when the backlog is flat or growing or the target is unreachable. No series until there's a minute of history. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply / copy throughput. `0` on an idle, caught-up pass. |
 | `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table`, `component` | Replication lag, the age of the oldest unconsumed delta(`0` when caught up). |
@@ -626,6 +626,53 @@ replicare reseed <config> --sync <name> --target <name>
 This flags the target in the state store, and the running daemon re-copies it on its next pass,
 then resumes streaming. The command signals the owning daemon rather than acting directly, which
 honours single-active ownership.
+
+## Starting again from a blank slate
+
+To take `replicare` off a Postgres source completely, for example to start a sync again from
+nothing, in this order:
+
+1. Stop the daemon(scale it to 0). A running daemon puts capture back when it next starts.
+2. Remove capture from the source:
+
+   ```sh
+   replicare capture remove <config>
+   ```
+
+   For each replicated table this drops the trigger, its function and the table's queued-changes
+   tables. It waits at most 2 seconds for each table's lock, so it never holds up the
+   application; if a busy table makes it give up, it names the table, and running it again
+   finishes the job. Dropping a trigger needs table ownership(see
+   [least-privilege grants](#least-privilege-grants)).
+3. Check that no trigger is left on the source:
+
+   ```sql
+   SELECT tgrelid::regclass AS table_name, tgname
+   FROM pg_trigger
+   WHERE tgname LIKE 'replicare\_trg\_%';
+   ```
+
+4. Only once that returns nothing, drop the `replicare` schema on the source, which holds the
+   rest(the list of captured tables and the schema version):
+
+   ```sql
+   SET lock_timeout = '2s';
+   DROP SCHEMA replicare CASCADE;
+   ```
+
+   If a trigger were still there, `CASCADE` would drop it too, and that needs a heavy lock on the
+   application's table; hence step 3 first.
+5. Clear the daemon's own progress records, on the database the `state_store` points at:
+
+   ```sql
+   DROP SCHEMA replicare_state CASCADE;
+   ```
+
+   Without this, the next start would treat tables as already copied.
+
+The next start installs capture afresh and copies everything again. The target can stay as it is:
+a group of tables linked in a loop is emptied on the target before it's copied, and any other table
+that already holds rows is merged into rather than duplicated.
 
 ## Sequences & identity counters: DR / promotion
 

@@ -357,3 +357,35 @@ func TestCyclicCopyRetryReadsOneSnapshot(t *testing.T) {
 	}
 	_ = hubRef
 }
+
+// TestEstimateTableBytes: table sizes come from the catalogue, include out-of-line
+// (TOAST) values, and leave indexes out, so a table of wide rows weighs more than a table
+// of narrow ones with more rows.
+func TestEstimateTableBytes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src,
+		"CREATE TABLE rc_it.narrow (id int PRIMARY KEY, n int)",
+		"CREATE TABLE rc_it.wide (id int PRIMARY KEY, body text)")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.narrow SELECT g, g FROM generate_series(1,20000) g")
+	// Incompressible 20 kB values, stored out of line in the TOAST table.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.wide SELECT g, (SELECT string_agg(md5(random()::text), '') FROM generate_series(1,625)) FROM generate_series(1,200) g")
+	got, err := src.EstimateTableBytes(ctx, []engine.TableRef{ref("rc_it.narrow"), ref("rc_it.wide"), ref("rc_it.missing")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow, wide := got[ref("rc_it.narrow")], got[ref("rc_it.wide")]
+	if narrow <= 0 || wide <= 0 {
+		t.Fatalf("sizes = %v, want both tables", got)
+	}
+	if wide < 3_000_000 {
+		t.Errorf("wide = %d bytes, want its out-of-line values (~4 MB) counted", wide)
+	}
+	if wide <= narrow {
+		t.Errorf("wide (%d bytes, 200 rows) should outweigh narrow (%d bytes, 20,000 rows)", wide, narrow)
+	}
+	if _, ok := got[ref("rc_it.missing")]; ok {
+		t.Error("a table that doesn't exist should be left out")
+	}
+}

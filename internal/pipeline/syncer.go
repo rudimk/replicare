@@ -177,6 +177,19 @@ func (s *Syncer) publishCopyTargets(ctx context.Context) {
 			s.Tel.SetRowsCopiedTarget(s.Name, t, n)
 		}
 	}
+	// Table sizes weight the copy ETA, so a table of large rows (message bodies) counts
+	// for its size, not its row count. Best-effort: without them the ETA counts rows.
+	if sizer, ok := s.Source.(engine.TableSizeEstimator); ok {
+		bctx, bcancel := context.WithTimeout(ctx, healthTimeout)
+		defer bcancel()
+		if sizes, err := sizer.EstimateTableBytes(bctx, todo); err == nil {
+			for _, t := range todo {
+				if b, ok := sizes[t]; ok && rows[t] > 0 {
+					s.Tel.SetCopyTableBytes(s.Name, t, b)
+				}
+			}
+		}
+	}
 }
 
 // installCapture installs the appropriate capture variant for this syncer: origin-

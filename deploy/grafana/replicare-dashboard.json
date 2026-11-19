@@ -234,7 +234,7 @@
     {
       "type": "stat",
       "title": "Initial copy ETA",
-      "description": "How long the initial copy has left, worked out by replicare from the rows still to copy and the copy rate over the last 10 minutes. 'Not moving' means no rows were copied in the last 10 minutes. The row counts come from the source's statistics and the link-filling pass for tables linked in a loop isn't included, so treat it as a guide.",
+      "description": "How long the initial copy has left, worked out by replicare from how much is still to copy and how fast it went over the last 10 minutes. Each table counts for its size on the source, so a table of large rows isn't made to look quick by a run of small ones. 'Not moving' means nothing was copied in the last 10 minutes. The sizes and row counts are the source's own estimates and the link-filling pass for tables linked in a loop isn't included, so treat it as a guide.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
