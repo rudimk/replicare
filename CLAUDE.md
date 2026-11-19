@@ -338,6 +338,18 @@ brittle across major-version gaps).
   **Skipped** (merge as before) for an **active-active member** (its rows are a peer's data) and
   when a **table outside the component references** it (would fail the FK or cascade into data
   we don't own). Postgres error messages now carry the DETAIL line (the offending key).
+- **Cyclic copy: direct COPY into empty ranges, chunks over the idle pool (decision, from a
+  production slowdown).** The NULL-then-fill copy used to stage every 50k-row chunk into a TEMP
+  table and `INSERT … ON CONFLICT` it, on one connection — row-at-a-time inserts, and one disk read
+  outstanding at a time once the target's indexes outgrew memory. Now a chunk whose key range is
+  **empty on the target** (probed per chunk; the usual case after the clear above) is a plain `COPY`
+  straight into the table (safe: only the copier writes a table during its initial copy), and only
+  an occupied range (parent re-copy, mesh member, uncleared target) takes staging + upsert. A
+  table's chunks, and its pass-2 fill, are shared out over the copy pool's other pairs
+  (`engine.ParallelCyclicCopier`; the pool is idle because components copy one at a time). Tables
+  still load one at a time in non-cyclic topo order. Parent re-copies from parallel chunks are
+  serialized (mutex); a 40P01 deadlock on a chunk is retried. On error no new chunk starts and
+  in-flight ones finish — never cancel a pgx query midway (it breaks the connection).
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a

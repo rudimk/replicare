@@ -6,6 +6,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rudimk/replicare/internal/engine"
@@ -25,8 +26,8 @@ import (
 // The NOT NULL + non-deferrable cyclic case is unloadable without disabling
 // constraints and is rejected at M1 pre-flight — it never reaches here.
 //
-// Cyclic components are small, so these paths copy whole tables (unchunked) and
-// run serially on one Source/Sink.
+// The NULL-then-fill path copies each table in key-range chunks, shared out over the
+// copy pool's connections; the deferred and self-reference paths load a table whole.
 
 // CopyCyclicComponent is the engine.CyclicComponentCopier entry point: it copies
 // an FK component that contains a cycle or self-reference (single- or multi-table)
@@ -42,10 +43,19 @@ import (
 // the old single-table self-ref null-fill to multi-table cycles (e.g. orders.user_id
 // <-> users.primary_order_id).
 //
-// Tables are copied whole (unchunked) here — a documented tradeoff: a cyclic
-// component gives up chunked/parallel copy for a correct load. The blocked case
-// (NOT NULL + non-deferrable) never reaches here (pre-flight fails loud).
+// Tables load one at a time in that order. On the NULL-then-fill path each table is
+// copied in key-range chunks (see CopyCyclicComponentWith for spreading them over more
+// connections); the deferred path and a self-reference that must keep its real values
+// load a table whole. The blocked case (NOT NULL + non-deferrable) never reaches here
+// (pre-flight fails loud).
 func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
+	return s.CopyCyclicComponentWith(ctx, src, nil, tables, progress)
+}
+
+// CopyCyclicComponentWith is engine.ParallelCyclicCopier: CopyCyclicComponent with each
+// table's chunks (and its fill pass) spread over the helper connection pairs as well.
+// A helper that is not a connected Postgres pair is skipped.
+func (s *Sink) CopyCyclicComponentWith(ctx context.Context, src engine.Source, helpers []engine.ConnPair, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
 	ctx = withCopyProgress(ctx, progress)
 	pgSrc, ok := src.(*Source)
 	if !ok {
@@ -53,6 +63,14 @@ func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, table
 	}
 	if s.conn == nil {
 		return errNotConnected("sink")
+	}
+	conns := []copyConn{{src: pgSrc, sink: s}}
+	for _, h := range helpers {
+		hs, okS := h.Src.(*Source)
+		hk, okK := h.Sink.(*Sink)
+		if okS && okK && hs != pgSrc && hk != s && hs.conn != nil && hk.conn != nil {
+			conns = append(conns, copyConn{src: hs, sink: hk})
+		}
 	}
 
 	// Introspect the component tables to get columns, FKs, and nullability.
@@ -104,14 +122,16 @@ func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, table
 	}
 
 	// NULL-then-fill: null every cyclic FK column, copy in non-cyclic order, then fill.
-	return classifyFKViolation(s.nullFillComponent(ctx, pgSrc, members, cyc))
+	return classifyFKViolation(s.nullFillComponent(ctx, conns, members, cyc))
 }
 
 // nullFillComponent runs the multi-table NULL-then-fill: copy each table with its
 // cyclic FK columns omitted (in an order that respects only the non-cyclic FK
 // edges, so a table always loads after its non-cyclic parents), then fill the
-// cyclic FK columns from the source.
-func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []engine.Table, cyc []CyclicFK) error {
+// cyclic FK columns from the source. conns[0] is (src, s); any further pairs share
+// the chunks of each table.
+func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members []engine.Table, cyc []CyclicFK) error {
+	src := conns[0].src
 	byRef := make(map[engine.TableRef]engine.Table, len(members))
 	for _, t := range members {
 		byRef[t.Ref] = t
@@ -151,17 +171,31 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 
 	// Re-copying a parent (live-source skew recovery) must use the same load shape the
 	// parent was first loaded with: a whole-loaded table in one statement with its real
-	// self-link, anything else as the chunked upsert with its nullCols left empty.
-	recopyOne := func(ctx context.Context, p engine.TableRef) error {
-		if len(keepReal[p]) > 0 {
-			return s.loadSelfRefWhole(ctx, src, p, byRef[p], nullCols[p])
+	// self-link, anything else as the chunked upsert with its nullCols left empty. It runs
+	// on the connection pair of the chunk that needed it.
+	recopyOneOn := func(c copyConn) parentRecopier {
+		return func(ctx context.Context, p engine.TableRef) error {
+			if len(keepReal[p]) > 0 {
+				return c.sink.loadSelfRefWhole(ctx, c.src, p, byRef[p], nullCols[p])
+			}
+			return copyOrUpsert(ctx, c.src, c.sink, p, subtractCols(transportColumns(byRef[p]), nullCols[p]))
 		}
-		return copyOrUpsert(ctx, src, s, p, subtractCols(transportColumns(byRef[p]), nullCols[p]))
 	}
 	// The re-copy of a parent can itself hit the same skew one level up (the parent now
 	// carries a row pointing at a grandparent row newer than the grandparent's copy), so
 	// it walks the whole chain of non-cyclic parents rather than giving up after one hop.
-	recopy := transitiveRecopier(recopyOne, parents)
+	// Re-copies from chunks running side by side take turns: two upserts of the same
+	// parent rows at once would only wait on each other (or deadlock).
+	var recopyMu sync.Mutex
+	recopyOn := func(c copyConn) parentRecopier {
+		one := recopyOneOn(c)
+		return transitiveRecopier(func(ctx context.Context, p engine.TableRef) error {
+			recopyMu.Lock()
+			defer recopyMu.Unlock()
+			return one(ctx, p)
+		}, parents)
+	}
+	recopy := recopyOn(conns[0])
 
 	// Pass 1: copy every table, omitting its nullCols (empty on the target). Empty target
 	// → a plain streaming COPY (light: no staging, no whole-table upsert); non-empty target
@@ -183,7 +217,7 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 			continue
 		}
 		cols := subtractCols(transportColumns(table), nullCols[ref])
-		if err := copyTableChunkedWithParentRetry(ctx, src, s, ref, cols, parents[ref], recopy); err != nil {
+		if err := copyTableChunkedWithParentRetry(ctx, conns, ref, cols, parents[ref], recopyOn); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 1 (%s): %w", ref, err)
 		}
 	}
@@ -200,7 +234,7 @@ func (s *Sink) nullFillComponent(ctx context.Context, src *Source, members []eng
 		if len(pk) == 0 {
 			return fmt.Errorf("postgres: cyclic null-fill: %s has no usable key to fill by", ref)
 		}
-		if err := src.fillFKColumns(ctx, s, ref, table, pk, fkCols); err != nil {
+		if err := fillFKColumnsOn(ctx, conns, ref, table, pk, fkCols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 2 (%s): %w", ref, err)
 		}
 	}
@@ -534,30 +568,35 @@ func LoadCyclicNullFill(ctx context.Context, src *Source, sink *Sink, ref engine
 // TEMP table and UPDATEs that range, in its own committed transaction. A keyless/tiny
 // table (no keyset chunking) fills whole in a single transaction.
 func (s *Source) fillFKColumns(ctx context.Context, sink *Sink, ref engine.TableRef, table engine.Table, pk []captureCol, fkCols []string) error {
-	tgt, err := sink.tableMeta(ctx, ref)
+	return fillFKColumnsOn(ctx, []copyConn{{src: s, sink: sink}}, ref, table, pk, fkCols)
+}
+
+// fillFKColumnsOn is fillFKColumns with the key-range chunks shared out over conns.
+// Each chunk updates its own rows, so chunks running side by side never touch the
+// same row.
+func fillFKColumnsOn(ctx context.Context, conns []copyConn, ref engine.TableRef, table engine.Table, pk []captureCol, fkCols []string) error {
+	first := conns[0]
+	tgt, err := first.sink.tableMeta(ctx, ref)
 	if err != nil {
 		return err
 	}
 	var chunks []engine.Chunk
 	if len(pk) > 0 {
-		chunks, err = s.PlanChunks(ctx, ref, engine.ChunkOptions{Method: engine.ChunkKeyset, TargetRows: copyChunkRows})
+		chunks, err = first.src.PlanChunks(ctx, ref, engine.ChunkOptions{Method: engine.ChunkKeyset, TargetRows: copyChunkRows})
 		if err != nil {
 			return err
 		}
 	}
 	if !allKeyset(chunks) {
-		return s.fillFKRange(ctx, sink, ref, tgt, pk, fkCols, "TRUE")
+		return first.src.fillFKRange(ctx, first.sink, ref, tgt, pk, fkCols, "TRUE")
 	}
-	for _, ch := range chunks {
+	return runChunks(ctx, conns, chunks, func(ctx context.Context, c copyConn, ch engine.Chunk) error {
 		pred, err := keysetPredicate(pk, ch.Lo, ch.Hi)
 		if err != nil {
 			return err
 		}
-		if err := s.fillFKRange(ctx, sink, ref, tgt, pk, fkCols, pred); err != nil {
-			return err
-		}
-	}
-	return nil
+		return c.src.fillFKRange(ctx, c.sink, ref, tgt, pk, fkCols, pred)
+	})
 }
 
 // fillFKRange fills the cyclic FK columns for one key range (WHERE where): it stages the
@@ -808,6 +847,17 @@ func copyRange(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef
 		if ctx.Err() != nil {
 			return err
 		}
+		if isDeadlock(err) {
+			// Chunks running side by side, or a parent re-copy next to them, can lock the
+			// same parent rows in opposite orders; Postgres cancels one of them. Its
+			// transaction rolled back, so running it again is safe.
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(cyclicConnBackoff):
+			}
+			continue
+		}
 		if !pgEndpointDown(ctx, src.HealthCheck) && !pgEndpointDown(ctx, sink.HealthCheck) {
 			return err // healthy connections → real data error (or FK skew), halt/handle upstream
 		}
@@ -854,10 +904,11 @@ func pgReconnectConn(ctx context.Context, healthCheck, closeConn, connect func(c
 }
 
 // copyRangeOnce copies one keyset key-range [lo, hi) of a column subset from source to
-// target as a single committed per-chunk staged UPSERT: COPY the range into a TEMP staging
-// table, then INSERT ... ON CONFLICT DO UPDATE from it (staging holds only this range's
-// rows, so the upsert is chunk-bounded). It performs NO DELETE — so it never violates or
-// stalls on a child FK by removing a parent row — and is idempotent, so a re-run converges.
+// target in a single committed transaction: a plain COPY when the target holds none of the
+// range yet, otherwise a staged UPSERT (COPY the range into a TEMP staging table, then
+// INSERT ... ON CONFLICT DO UPDATE from it; staging holds only this range's rows, so the
+// upsert is chunk-bounded). It performs NO DELETE — so it never violates or stalls on a
+// child FK by removing a parent row — and is idempotent, so a re-run converges.
 func copyRangeOnce(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, meta rangeUpsertMeta, lo, hi engine.KeyValues) error {
 	pred, err := keysetPredicate(meta.pk, lo, hi)
 	if err != nil {
@@ -872,6 +923,27 @@ func copyRangeOnce(ctx context.Context, src *Source, sink *Sink, ref engine.Tabl
 			_, _ = sink.conn.Exec(context.Background(), "ROLLBACK")
 		}
 	}()
+	// A range the target holds no rows of yet (the normal case: the component's tables are
+	// emptied before its copy) is loaded with one plain COPY straight into the table, with
+	// no staging table and no per-row conflict check. Only the copier writes a table during
+	// its initial copy, so the range stays empty until this transaction commits. A range
+	// that already has rows (a parent re-copied after live-source skew, or a mesh member's
+	// own data) takes the staged upsert, which converges over what is there.
+	var occupied bool
+	if err := sink.conn.QueryRow(ctx, fmt.Sprintf("SELECT EXISTS (SELECT 1 FROM %s WHERE %s)", qualifyTable(ref), pred)).Scan(&occupied); err != nil {
+		return fmt.Errorf("postgres: cyclic copy range: probe %s: %w", ref, err)
+	}
+	if !occupied {
+		direct := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
+		if err := pipeCopyWhere(ctx, src, ref, cols, pred, sink, direct); err != nil {
+			return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, err)
+		}
+		if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
+			return fmt.Errorf("postgres: cyclic copy range: commit: %w", err)
+		}
+		committed = true
+		return nil
+	}
 	const stg = "replicare_stg"
 	if _, err := sink.conn.Exec(ctx, fmt.Sprintf("CREATE TEMP TABLE %s (%s) ON COMMIT DROP",
 		quoteIdentifier(stg), meta.stgDDL)); err != nil {
@@ -986,31 +1058,105 @@ func copyChildWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref 
 // copyTableChunkedWithParentRetry loads one component table in bounded keyset chunks
 // (so a huge table never rides one giant COPY), with the live-source parent-skew retry
 // applied PER CHUNK: only the failing chunk is retried and only the child's parents are
-// re-copied, never the whole table. A keyless/tiny table (no keyset chunking) falls back
-// to the whole-table copyChildWithParentRetry.
-func copyTableChunkedWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef, cols []string, parentRefs []engine.TableRef, recopy parentRecopier) error {
-	tgt, err := sink.tableMeta(ctx, ref)
+// re-copied, never the whole table. The chunks are shared out over conns, each running
+// one chunk at a time; recopyOn gives the parent re-copy for a chunk's own connection
+// pair. A keyless/tiny table (no keyset chunking) falls back to the whole-table
+// copyChildWithParentRetry on conns[0].
+func copyTableChunkedWithParentRetry(ctx context.Context, conns []copyConn, ref engine.TableRef, cols []string, parentRefs []engine.TableRef, recopyOn func(copyConn) parentRecopier) error {
+	first := conns[0]
+	tgt, err := first.sink.tableMeta(ctx, ref)
 	if err != nil {
 		return err
 	}
 	pk := captureColsFor(tgt)
 	var chunks []engine.Chunk
 	if len(pk) > 0 {
-		chunks, err = src.PlanChunks(ctx, ref, engine.ChunkOptions{Method: engine.ChunkKeyset, TargetRows: copyChunkRows})
+		chunks, err = first.src.PlanChunks(ctx, ref, engine.ChunkOptions{Method: engine.ChunkKeyset, TargetRows: copyChunkRows})
 		if err != nil {
 			return err
 		}
 	}
 	if !allKeyset(chunks) {
-		return copyChildWithParentRetry(ctx, src, sink, ref, cols, parentRefs, recopy)
+		return copyChildWithParentRetry(ctx, first.src, first.sink, ref, cols, parentRefs, recopyOn(first))
 	}
 	meta := buildRangeUpsertMeta(tgt, cols)
-	for _, ch := range chunks {
-		if err := copyRangeWithParentRetry(ctx, src, sink, ref, cols, meta, ch.Lo, ch.Hi, parentRefs, recopy); err != nil {
-			return err
+	recopies := make(map[*Sink]parentRecopier, len(conns))
+	for _, c := range conns {
+		recopies[c.sink] = recopyOn(c)
+	}
+	return runChunks(ctx, conns, chunks, func(ctx context.Context, c copyConn, ch engine.Chunk) error {
+		return copyRangeWithParentRetry(ctx, c.src, c.sink, ref, cols, meta, ch.Lo, ch.Hi, parentRefs, recopies[c.sink])
+	})
+}
+
+// copyConn is one source/target connection pair the cyclic copy can run a chunk on.
+type copyConn struct {
+	src  *Source
+	sink *Sink
+}
+
+// runChunks runs do for every chunk, sharing the chunks out over conns with one chunk at
+// a time per pair, in chunk order. With one pair it is a plain loop. On the first error
+// no further chunks start, the ones already running finish (a pgx query is never
+// cancelled midway: that would break its connection for the retries that follow), and
+// that first error is returned.
+func runChunks(ctx context.Context, conns []copyConn, chunks []engine.Chunk, do func(context.Context, copyConn, engine.Chunk) error) error {
+	if len(conns) == 1 || len(chunks) < 2 {
+		for _, ch := range chunks {
+			if err := do(ctx, conns[0], ch); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	var (
+		mu       sync.Mutex
+		next     int
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	take := func() (engine.Chunk, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		if firstErr != nil || next >= len(chunks) || ctx.Err() != nil {
+			return engine.Chunk{}, false
+		}
+		ch := chunks[next]
+		next++
+		return ch, true
+	}
+	fail := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if firstErr == nil {
+			firstErr = err
 		}
 	}
-	return nil
+	n := len(conns)
+	if n > len(chunks) {
+		n = len(chunks)
+	}
+	for _, c := range conns[:n] {
+		wg.Add(1)
+		go func(c copyConn) {
+			defer wg.Done()
+			for {
+				ch, ok := take()
+				if !ok {
+					return
+				}
+				if err := do(ctx, c, ch); err != nil {
+					fail(err)
+					return
+				}
+			}
+		}(c)
+	}
+	wg.Wait()
+	if firstErr != nil {
+		return firstErr
+	}
+	return ctx.Err()
 }
 
 // copyRangeWithParentRetry copies one key-range chunk with the live-source parent-skew

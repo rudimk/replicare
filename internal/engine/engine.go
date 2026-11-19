@@ -421,6 +421,22 @@ type CyclicComponentCopier interface {
 	CopyCyclicComponent(ctx context.Context, src Source, tables []TableRef, progress func(TableRef, int64)) error
 }
 
+// ConnPair is one Source/Sink connection pair. A Source or Sink is not safe for
+// concurrent use, so work spread over several connections takes several pairs.
+type ConnPair struct {
+	Src  Source
+	Sink Sink
+}
+
+// ParallelCyclicCopier is an OPTIONAL extension of CyclicComponentCopier: the same
+// copy, but each table's key-range chunks are spread over helpers (extra, otherwise
+// idle connection pairs) as well as the receiver and src. Tables still load one at a
+// time in the component's order; only the chunks of one table run side by side.
+// helpers may be empty, which is exactly CopyCyclicComponent.
+type ParallelCyclicCopier interface {
+	CopyCyclicComponentWith(ctx context.Context, src Source, helpers []ConnPair, tables []TableRef, progress func(TableRef, int64)) error
+}
+
 // NullFillCyclicSink is an OPTIONAL Sink capability that streams a cyclic FK
 // component with per-table NULL-then-fill instead of one component-wide
 // transaction (CLAUDE.md §4.1, §8.1). It reports, for a component, the nullable

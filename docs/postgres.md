@@ -125,6 +125,23 @@ allowed to, and a single `DELETE` otherwise. It leaves the tables alone, and mer
 when a table outside the group points into them, or when the target is an active-active node,
 whose rows are its own data.
 
+The group's tables load one at a time, parents first, and each table is copied in chunks of about
+50,000 rows. The chunks of a table are shared out over the copy pool's connections(sized by
+`pool.max_source_connections` and `max_target_connections`), so several of them load at once, and
+the same goes for the pass that fills the link columns in afterwards. A chunk whose rows aren't on
+the target yet, which is the usual case once the group has been emptied, goes in with a plain
+`COPY` straight into the table. A chunk that already has rows there is merged instead, through a
+staging table and `INSERT … ON CONFLICT`.
+
+On a large target, it's the indexes that slow a copy like this down most. Every row added has to
+go into every index on the table, and once those indexes outgrow the target's memory, most of
+that becomes waiting on disk reads. When a big copy crawls, dropping the target's non-unique
+indexes on the biggest tables for the duration of the copy helps a lot. We'd keep the primary
+keys and unique indexes, save each dropped index's definition with `pg_get_indexdef`, and
+rebuild them with `CREATE INDEX CONCURRENTLY` once the copy is done, before relying on the target
+for reads. Rebuild them promptly too: deleting a parent row is slow while its child table has no
+index on the linking column.
+
 ## Installing capture on a busy source
 
 Adding a trigger locks the table for an instant, but if something else already holds a
