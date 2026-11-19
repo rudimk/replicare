@@ -60,6 +60,7 @@ This section sits at the top, since the initial copy is the first thing a new sy
 | Panel | Query | Reading |
 |---|---|---|
 | Initial copy (overall) | `sum(replicare_rows_copied_total) / sum(replicare_initial_copy_rows_target)` | Percent of the rows this run has to copy. The target is the source database's own row estimate(statistics, no scan), so the end can read a little over or under 100% |
+| Initial copy ETA | `replicare_initial_copy_eta_seconds` | How long the copy has left, as a duration. `replicare` works it out from the rows still to copy and the copy rate over the last 10 minutes. It reads "Not moving" when nothing was copied in that time, "Done" at the end, and "Working it out…" for the first minute. A guide, not a promise: the row counts are the source's estimates, and the pass that fills in the links for tables linked in a loop isn't counted |
 | Tables still copying / Tables streaming | `count(replicare_table_phase_info{phase=…})` | How many tables are in each phase; copying reaches 0 once the whole sync is streaming |
 | Copy rate (rows/s) | `rate(replicare_rows_copied_total[2m])` | Current copy speed |
 | Initial copy progress % (per table) / Rows copied vs target (per table) | the same, `by (table)` | Which tables are done, and which are still moving |
@@ -95,7 +96,7 @@ This is the headline lag section:
 | Panel | Query | Reading |
 |---|---|---|
 | Max replication lag (SLO) | `max(replicare_replication_lag_seconds)` | Worst lag; green below 30s, amber below 5m, red beyond |
-| Catch-up ETA | `sum(replicare_delta_backlog_rows) / clamp_min(sum(replicare_throughput_rows_per_second), 1)` | Estimated seconds to converge at the current apply rate |
+| Catch-up ETA | `replicare_catchup_eta_seconds` | How long until the target has applied every waiting change, as a duration, from the backlog and how fast it shrank over the last 10 minutes. "Caught up" means nothing has been waiting longer than a minute; "Not catching up" means the backlog is flat or growing, or the target is unreachable |
 | Inflow vs drain (rows/s) | `sum(replicare_throughput_rows_per_second)` vs `sum(replicare_throughput_rows_per_second) + sum(rate(replicare_delta_backlog_rows[5m]))` | Inflow above drain means the backlog is growing |
 | Replication lag / Total backlog | `replicare_replication_lag_seconds`, `sum(replicare_delta_backlog_rows)` | Per-table lag; total rows still to apply |
 

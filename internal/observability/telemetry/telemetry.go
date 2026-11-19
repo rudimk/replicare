@@ -34,6 +34,7 @@ type Telemetry struct {
 	tracer *tracing.Tracer
 	log    *slog.Logger
 	events EventSink
+	eta    *etaTracker
 }
 
 // New builds a Telemetry. A nil registry disables metrics; a nil tracer becomes
@@ -46,7 +47,7 @@ func New(reg *prom.Registry, tracer *tracing.Tracer, log *slog.Logger, events Ev
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Telemetry{reg: reg, tracer: tracer, log: log, events: events}
+	return &Telemetry{reg: reg, tracer: tracer, log: log, events: events, eta: newETATracker()}
 }
 
 // --- Metric emitters (all guard a nil registry) ---
@@ -124,6 +125,7 @@ func (t *Telemetry) SetBacklog(sync string, target engine.TargetID, table engine
 	t.reg.Gauge(observability.MetricDeltaBacklog).WithLabelValues(sync, string(target), tbl, component).Set(float64(bl.Rows))
 	t.reg.Gauge(observability.MetricDeltaBacklogBytes).WithLabelValues(sync, string(target), tbl, component).Set(float64(bl.Bytes))
 	t.reg.Gauge(observability.MetricDeltaOldestAgeSeconds).WithLabelValues(sync, string(target), tbl, component).Set(bl.OldestAge.Seconds())
+	t.etaBacklog(sync, target, table, bl)
 }
 
 // AddPurged advances the purged-delta counter.
@@ -199,6 +201,7 @@ func (t *Telemetry) SetPhase(sync string, table engine.TableRef, phase string) {
 		}
 	}
 	g.WithLabelValues(sync, table.String(), phase).Set(1)
+	t.etaPhase(sync, table, phase)
 }
 
 // tablePhases are the values replicare_table_phase_info's phase label takes (the
@@ -211,6 +214,7 @@ func (t *Telemetry) AddRowsCopied(sync string, table engine.TableRef, n int64) {
 		return
 	}
 	t.reg.Counter(observability.MetricRowsCopiedTotal).WithLabelValues(sync, table.String()).Add(float64(n))
+	t.etaRowsCopied(sync, table, n)
 }
 
 // SetRowsCopiedTarget publishes the estimated total rows to copy for a table (the
@@ -220,6 +224,7 @@ func (t *Telemetry) SetRowsCopiedTarget(sync string, table engine.TableRef, tota
 		return
 	}
 	t.reg.Gauge(observability.MetricRowsCopiedTarget).WithLabelValues(sync, table.String()).Set(float64(total))
+	t.etaCopyEstimate(sync, table, total)
 }
 
 // IncError advances the error counter for a category (e.g. "drain", "apply").
@@ -258,6 +263,9 @@ func (t *Telemetry) TargetUnreachable(ctx context.Context, span trace.Span, sync
 	}
 	t.SetTargetUp(sync, target, false)
 	t.SetBacklog(sync, target, table, component, bl)
+	if t.reg != nil {
+		t.etaTargetDown(sync, target)
+	}
 
 	t.log.LogAttrs(ctx, slog.LevelError, "target unreachable",
 		slog.String("event", observability.EventTargetUnreachable),

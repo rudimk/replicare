@@ -682,6 +682,14 @@ when committed on the target, on every copy path including the cyclic component 
 chunk counts once; parent re-copies for live-source skew and the cyclic-column fill pass do not
 count). The shipped Grafana dashboard keys its sync/table filters on `replicare_table_phase_info`
 — filters fed by streaming-only metrics left every panel empty during a copy.
+**ETAs are computed in the daemon, not in PromQL (decision).** `replicare_initial_copy_eta_seconds{sync}`
+(rows left from the per-table estimates, minus finished tables, ÷ copy rate over a 10-minute window)
+and `replicare_catchup_eta_seconds{sync,target}` (backlog ÷ its shrink rate over the window; `0` when
+nothing has waited over a minute, so a steady small backlog is "caught up"). `-1` = not moving
+(no copy progress / backlog not shrinking / target down); no series = under a minute of history.
+The window ends *now*, not at the last update, and `RefreshETAs` runs on the copy's size ticker, so a
+stall shows. A table's phase flips to `streaming` at its component's cutover, so finished tables
+leave the copy ETA. Dashboard stat panels show them as durations with value mappings.
 
 **The CLI live surface — visibility without Grafana (decision).** Where the daemon must run somewhere a
 metrics stack can't reach it (e.g. *inside the source cluster*, the only path to the source

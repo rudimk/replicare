@@ -224,6 +224,9 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 		if err := s.Store.SaveCursor(ctx, s.Name, cur); err != nil {
 			return fmt.Errorf("syncer %s: cutover cursor %s: %w", s.Name, t, err)
 		}
+		// The table's copy is finished: say so now rather than when the last component's
+		// copy is done and streaming starts, so the copy ETA stops counting it.
+		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
 	}
 	s.recordEvent(ctx, state.Event{
 		Sync: s.Name, Target: string(s.Target), Level: "INFO", Event: observability.EventCutover,
@@ -387,6 +390,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 			case <-t.C:
 				s.measureDBSizes(ctx)
 				s.lastDBSize = time.Now()
+				s.Tel.RefreshETAs() // a copy that has stopped moving shows it
 			}
 		}
 	}()
