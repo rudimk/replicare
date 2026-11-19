@@ -246,3 +246,42 @@ func checkNullColliding(t *testing.T, side string, s *engine.Schema, want map[st
 		}
 	}
 }
+
+// TestCyclicCopySelfRefOverStaleTarget is the production failure after a pause: the target
+// holds an earlier, unfinished copy, and the source has changed since. An account was
+// deleted and re-created under a new id with the same (email, parent), and two accounts
+// swapped emails. The stale target rows hold those unique values under other ids, which an
+// upsert keyed on the id can neither match nor get past:
+//
+//	cyclic whole-load (public.Account): upsert: ERROR: duplicate key value violates
+//	unique constraint "Account_email_parent_unique" (SQLSTATE 23505)
+//
+// A cyclic component's copy restarts from scratch anyway, so the copy clears the
+// component's tables on the target first and loads into empty tables.
+func TestCyclicCopySelfRefOverStaleTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src, sink := setupAcct(t, ctx, acctSrcConstraintDDL, acctTgtConstraintDDL, "ASC")
+	acct := ref("rc_it.acct")
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{acct}, nil); err != nil {
+		t.Fatalf("first copy: %v", err)
+	}
+	requireConverged(t, ctx, src, sink)
+
+	// Overnight on the source. 250 (e2, parent 51) has no children.
+	mustExec(t, ctx, src.conn, "DELETE FROM rc_it.acct WHERE id = 250")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.acct VALUES (5000, 'e2', 51, 'recreated')")
+	// 300 (e3, parent 1) and 400 (e4, parent 1) swap emails.
+	mustExec(t, ctx, src.conn, "UPDATE rc_it.acct SET email = 'tmp' WHERE id = 300")
+	mustExec(t, ctx, src.conn, "UPDATE rc_it.acct SET email = 'e3' WHERE id = 400")
+	mustExec(t, ctx, src.conn, "UPDATE rc_it.acct SET email = 'e4' WHERE id = 300")
+
+	var copied int64
+	if err := sink.CopyCyclicComponent(ctx, src, []engine.TableRef{acct}, func(_ engine.TableRef, n int64) { copied += n }); err != nil {
+		t.Fatalf("copy over a stale target: %v", err)
+	}
+	requireConverged(t, ctx, src, sink)
+	if want := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.acct"); copied != int64(want) {
+		t.Errorf("reported rows copied = %d, want %d", copied, want)
+	}
+}

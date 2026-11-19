@@ -81,7 +81,7 @@ func DrainComponentRetryingPool(ctx context.Context, pool []Conn, concurrency in
 			backoff = policy.MaxBackoff
 		}
 	}
-	return total, fmt.Errorf("apply component HALTED: FK dependency unresolved after %d attempts; "+
+	return total, fmt.Errorf("apply component HALTED: FK / unique-key dependency unresolved after %d attempts; "+
 		"deltas remain dirty and will re-apply once the dependency lands: %w",
 		policy.MaxAttempts, lastErr)
 }

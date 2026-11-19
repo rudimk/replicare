@@ -55,7 +55,12 @@ Change capture runs in four steps:
    high-water-mark cursor would fall straight into.
 3. Apply. Changes land as idempotent upserts keyed on the PK(`INSERT … ON CONFLICT DO UPDATE`)
    and deletes by PK, ordered by FK dependency within each FK component - upserts go from
-   parent to child, deletes from child to parent - with a retry fallback for cycles.
+   parent to child, deletes from child to parent - with a retry fallback for cycles. The same
+   retry covers a unique value moving between rows within one pass: if a row was deleted and a
+   new one created with the same unique value(an account re-created with the same email, say),
+   the new row clashes with the old one, which is still on the target because deletes come
+   after upserts. `replicare` applies that table's deletes anyway and retries the new row on
+   the next pass, once the old one is gone.
 4. Checkpoint. Progress lives in the Postgres StateStore, so a crash safely replays from the
    last confirmed cursor; that's harmless, since applies are idempotent.
 
@@ -109,6 +114,16 @@ schema change:
   and a restart re-copies it from the start.
 - A loop across two or more tables has no safe load order, so pre-flight stops the sync before
   anything is copied and asks for the FK to be made `DEFERRABLE`.
+
+Tables linked in a loop are copied as one group, and the group only counts as copied once every
+table in it has finished, so a restart(or a pause) copies the whole group again from the start.
+Before it does, `replicare` empties the group's tables on the target, so the copy never has to
+merge over what the unfinished attempt left behind: by then the source may have moved a unique
+value from one row to another(an account deleted and re-created under a new id with the same
+email, say), and the old row would block the new one. It uses `TRUNCATE` where the target role is
+allowed to, and a single `DELETE` otherwise. It leaves the tables alone, and merges as before,
+when a table outside the group points into them, or when the target is an active-active node,
+whose rows are its own data.
 
 ## Installing capture on a busy source
 
