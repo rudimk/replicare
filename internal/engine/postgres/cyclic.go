@@ -881,6 +881,14 @@ func copyWhere(ctx context.Context, src *Source, sink *Sink, ref engine.TableRef
 		if ctx.Err() != nil {
 			return err
 		}
+		if engine.IsTransientConstraint(classifyFKViolation(err)) {
+			// A missing parent row: running the same copy again cannot help, the caller
+			// fetches the parent first. A target-side failure in the middle of the COPY makes
+			// the driver close the source connection, so put both back before returning.
+			pgReconnectConn(ctx, src.HealthCheck, src.Close, src.Connect)
+			pgReconnectConn(ctx, sink.HealthCheck, sink.Close, sink.Connect)
+			return err
+		}
 		if isDeadlock(err) {
 			// Chunks running side by side, or a parent re-copy next to them, can lock the
 			// same parent rows in opposite orders; Postgres cancels one of them. Its
@@ -1316,11 +1324,54 @@ func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref 
 			return copyWhere(ctx, src, sink, ref, cols, meta, pred, loadAuto)
 		})
 	}
-	var fixFn func(context.Context) error
-	if fix != nil {
-		fixFn = func(ctx context.Context) error { return fix(ctx, pred) }
+	err = load()
+	for attempt := 0; err != nil && attempt < cyclicCopyRetries; attempt++ {
+		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
+			return err // not an FK skew — halt loud
+		}
+		if fix == nil {
+			break
+		}
+		// Fetch the missing parents and re-read the chunk from ONE source snapshot. The
+		// source enforces the FK, so every row the chunk holds in that snapshot points at a
+		// parent row the same snapshot holds, and the fetch brings exactly those across: the
+		// retry cannot trip over a row the app created in between. (A dropped source
+		// connection loses the snapshot; the retry is then as before, still converging.)
+		err = inSourceSnapshot(ctx, src, func() error {
+			if e := fix(ctx, pred); e != nil {
+				return e
+			}
+			return load()
+		})
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(cyclicRetryBackoff(attempt)):
+			}
+		}
 	}
-	return retryOnFK(ctx, load, fixFn)
+	if err != nil {
+		return classifyFKViolation(err)
+	}
+	return nil
+}
+
+// inSourceSnapshot runs fn with every read on src inside one REPEATABLE READ, read-only
+// transaction, so they all see the source as of the same instant. If the transaction
+// cannot be opened, fn runs without it.
+func inSourceSnapshot(ctx context.Context, src *Source, fn func() error) error {
+	if src.conn == nil {
+		return fn()
+	}
+	if _, err := src.conn.Exec(ctx, "BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY"); err != nil {
+		return fn()
+	}
+	err := fn()
+	if src.conn != nil && !src.conn.IsClosed() {
+		_, _ = src.conn.Exec(context.Background(), "ROLLBACK") // read-only: nothing to keep
+	}
+	return err
 }
 
 // referencedWhere is a predicate on a parent table selecting the rows that child rows

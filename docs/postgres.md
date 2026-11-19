@@ -136,7 +136,8 @@ staging table and `INSERT … ON CONFLICT`.
 The source keeps changing while this runs, so a chunk can hold a row that points at a parent row
 created after that parent table was copied, which the target refuses. When that happens,
 `replicare` copies across just the parent rows that chunk points at, and only the ones the target
-doesn't have yet, then retries the chunk. If those parent rows in turn point at rows the target
+doesn't have yet, then retries the chunk. It reads those parent rows and the retried chunk from the
+source at the same instant, so a row the app adds in between can't make the retry fail again. If those parent rows in turn point at rows the target
 doesn't have, it fetches those too, one level up at a time. It never copies a whole parent table
 again for this, so a busy source doesn't slow the copy down much. The one exception is a table
 that's loaded in a single statement(see above), which is copied again whole.

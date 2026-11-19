@@ -358,7 +358,13 @@ brittle across major-version gaps).
   chunk points at (`(parentCols) IN (SELECT childCols FROM child WHERE <chunk range>)`, nested one
   level per hop for grandparents) and inserts **only the missing ones** (`ON CONFLICT DO NOTHING`;
   existing rows reach their current value through the delta queue). keepReal / keyless parents still
-  fall back to the whole re-copy.
+  fall back to the whole re-copy. The fetch **and the retried chunk read one source snapshot** (`inSourceSnapshot`:
+  `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` on the chunk's source conn): the source enforces
+  the FK, so every row the chunk holds in that snapshot has its parent in the same snapshot, and the
+  retry succeeds first time — on a busy app the tail chunk otherwise kept catching a message for a
+  conversation created after the fetch. A transient FK error is not re-run by `copyWhere`'s
+  connection retry (re-running cannot help, and a target-side failure mid-COPY makes pgx close the
+  source conn): it reconnects and returns at once.
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a

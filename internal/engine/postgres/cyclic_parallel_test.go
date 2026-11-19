@@ -271,3 +271,89 @@ func TestCyclicCopyFetchesOnlyReferencedParents(t *testing.T) {
 	_ = usrRef
 	_ = hubRef
 }
+
+// TestCyclicCopyRetryReadsOneSnapshot: a busy app keeps adding parents and children
+// that point at them while a failed chunk is being fixed. The fetch and the retried chunk
+// read the source at the same instant, so the retry succeeds first time: every chunk is
+// fixed at most once, even though a new child (pointing at a new parent) lands in the
+// chunk's range between the fetch and the retry.
+func TestCyclicCopyRetryReadsOneSnapshot(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	// Even child ids only, so the "app" can add odd ids inside any chunk's range.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, 'h'||g FROM generate_series(1,100) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g*2, 1+((g-1)%100), 'c'||g FROM generate_series(1,200) g")
+	// The target has none of the hubs, so every chunk fails once.
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.hub", "rc_it.child"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	hubRef, childRef := ref("rc_it.hub"), ref("rc_it.child")
+	parents := nonCyclicParents(schema.Tables, map[string]bool{})
+	var mu sync.Mutex
+	recopyOn := func(c copyConn) parentRecopier {
+		return recopyOmitting(c.src, c.sink, byRef, map[engine.TableRef][]string{})
+	}
+	pf := newParentFetch(schema.Tables, map[string]bool{}, parents, map[engine.TableRef][]string{}, map[engine.TableRef][]string{}, recopyOn, &mu)
+
+	app := helperPair(t, ctx).Src.(*Source) // the busy app, on its own connection
+	var fixMu sync.Mutex
+	fixes := map[string]int{}
+	newHub := 1000
+	fetchOn := func(c copyConn) referencedFetcher {
+		return func(ctx context.Context, w string) error {
+			if err := pf.fetch(ctx, c, childRef, w); err != nil {
+				return err
+			}
+			fixMu.Lock()
+			defer fixMu.Unlock()
+			fixes[w]++
+			newHub++
+			// Between the fetch and the retry: a new hub, and a new child inside this
+			// chunk's range pointing at it.
+			var lo int
+			if err := app.conn.QueryRow(ctx, "SELECT min(id) FROM rc_it.child WHERE "+w).Scan(&lo); err != nil {
+				return err
+			}
+			if _, err := app.conn.Exec(ctx, "INSERT INTO rc_it.hub VALUES ($1, 'new')", newHub); err != nil {
+				return err
+			}
+			_, err := app.conn.Exec(ctx, "INSERT INTO rc_it.child VALUES ($1, $2, 'new')", lo+1, newHub)
+			return err
+		}
+	}
+	conns := []copyConn{{src: src, sink: sink}}
+	if err := copyTableChunkedWithParentRetry(ctx, conns, childRef, transportColumns(byRef[childRef]), parents[childRef], recopyOn, fetchOn); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	for w, n := range fixes {
+		if n != 1 {
+			t.Errorf("chunk %s was fixed %d times, want 1 (the retry should read the same snapshot as the fetch)", w, n)
+		}
+	}
+	if len(fixes) == 0 {
+		t.Fatal("no chunk needed a fix; the test did not exercise the retry")
+	}
+	sel := "SELECT id::text, hub_id::text, note FROM rc_it.child WHERE id % 2 = 0 ORDER BY id"
+	if !eqLines(dumpText(t, ctx, src.conn, sel), dumpText(t, ctx, sink.conn, sel)) {
+		t.Error("the original children did not converge")
+	}
+	_ = hubRef
+}
