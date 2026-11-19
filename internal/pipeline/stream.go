@@ -351,7 +351,7 @@ const healthTimeout = 10 * time.Second
 
 // dbSizeInterval throttles the source/target DB-size metric: the queries scan
 // catalogs, so they run on this cadence rather than every drain pass.
-const dbSizeInterval = 30 * time.Second
+var dbSizeInterval = 30 * time.Second // a var so tests can shorten it
 
 // componentOf returns the FK-component id of a table (the component's first sorted
 // member, per CLAUDE.md §8.1), for the per-component metric label. Built once.
@@ -392,6 +392,11 @@ func (s *Syncer) refreshDBSizes(ctx context.Context) {
 		return
 	}
 	s.lastDBSize = now
+	s.measureDBSizes(ctx)
+}
+
+// measureDBSizes queries and emits the size gauges, unthrottled (see refreshDBSizes).
+func (s *Syncer) measureDBSizes(ctx context.Context) {
 	if sz, ok := s.Source.(engine.DBSizer); ok {
 		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
 		if b, err := sz.DatabaseSize(qctx); err == nil {

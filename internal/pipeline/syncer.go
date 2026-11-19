@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rudimk/replicare/internal/copy"
@@ -201,15 +202,19 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 	// fail; delegate the whole component to the engine's cycle-safe copier when it
 	// offers one (Postgres/MySQL). Acyclic components (and engines without a cyclic
 	// copier) take the normal chunked path.
+	stopSizes := s.measureSizesWhileCopying(ctx)
 	if comp.HasCycle() {
 		if err := s.copyCyclicComponent(ctx, comp); err != nil {
+			stopSizes()
 			return err
 		}
 	} else {
 		if err := copy.Component(ctx, s.Workers, s.Store, s.Name, s.Target, comp.Order, s.ChunkOpts, s.copyOptions()...); err != nil {
+			stopSizes()
 			return fmt.Errorf("syncer %s: copy component: %w", s.Name, err)
 		}
 	}
+	stopSizes()
 	for _, t := range comp.Order {
 		cur, err := s.Store.LoadCursor(ctx, s.Name, s.Target, t)
 		if err != nil {
@@ -344,4 +349,40 @@ func (s *Syncer) recordEvent(ctx context.Context, e state.Event) {
 		return
 	}
 	_ = s.Store.RecordEvent(ctx, e)
+}
+
+// measureSizesWhileCopying re-measures the source / target size gauges every
+// dbSizeInterval while a component copies, and returns a func that stops it and waits for
+// any measurement in flight. Without it the gauges kept their bring-up values for the whole
+// copy (a large cyclic component is one long copy), so the dashboard showed a target stuck
+// at its starting size while it grew by gigabytes.
+//
+// It measures on the primary Source/Sink pair, which the copy never uses (the copy runs on
+// the Workers), and it is stopped before the cutover, which does use the pair: a pgx
+// connection is not safe for concurrent use. A measurement is never cancelled midway by
+// stop (cancelling a pgx query closes the connection); only daemon shutdown cancels ctx.
+func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
+	quit := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(dbSizeInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				s.measureDBSizes(ctx)
+				s.lastDBSize = time.Now()
+			}
+		}
+	}()
+	var once sync.Once
+	return func() {
+		once.Do(func() { close(quit) })
+		<-done
+	}
 }
