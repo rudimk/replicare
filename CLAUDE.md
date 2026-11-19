@@ -338,6 +338,33 @@ brittle across major-version gaps).
   **Skipped** (merge as before) for an **active-active member** (its rows are a peer's data) and
   when a **table outside the component references** it (would fail the FK or cascade into data
   we don't own). Postgres error messages now carry the DETAIL line (the offending key).
+- **Cyclic copy: direct COPY into empty ranges, chunks over the idle pool (decision, from a
+  production slowdown).** The NULL-then-fill copy used to stage every 50k-row chunk into a TEMP
+  table and `INSERT … ON CONFLICT` it, on one connection — row-at-a-time inserts, and one disk read
+  outstanding at a time once the target's indexes outgrew memory. Now a chunk whose key range is
+  **empty on the target** (probed per chunk; the usual case after the clear above) is a plain `COPY`
+  straight into the table (safe: only the copier writes a table during its initial copy), and only
+  an occupied range (parent re-copy, mesh member, uncleared target) takes staging + upsert. A
+  table's chunks, and its pass-2 fill, are shared out over the copy pool's other pairs
+  (`engine.ParallelCyclicCopier`; the pool is idle because components copy one at a time). Tables
+  still load one at a time in non-cyclic topo order. Parent re-copies from parallel chunks are
+  serialized (mutex); a 40P01 deadlock on a chunk is retried. On error no new chunk starts and
+  in-flight ones finish — never cancel a pgx query midway (it breaks the connection).
+- **Live-source parent skew fetches only the referenced parent rows (decision, from a production
+  slowdown).** A child chunk failing on a missing parent (23503) used to re-copy the **whole** parent
+  table (and on a grandparent miss, restart that whole re-copy) — minutes per failed chunk on a big
+  parent, and it could run out of retries and fall into the syncer's coarse retry, which clears and
+  re-copies the whole component. Now `parentFetch` stages from the source only the parent rows the
+  chunk points at (`(parentCols) IN (SELECT childCols FROM child WHERE <chunk range>)`, nested one
+  level per hop for grandparents) and inserts **only the missing ones** (`ON CONFLICT DO NOTHING`;
+  existing rows reach their current value through the delta queue). keepReal / keyless parents still
+  fall back to the whole re-copy. The fetch **and the retried chunk read one source snapshot** (`inSourceSnapshot`:
+  `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY` on the chunk's source conn): the source enforces
+  the FK, so every row the chunk holds in that snapshot has its parent in the same snapshot, and the
+  retry succeeds first time — on a busy app the tail chunk otherwise kept catching a message for a
+  conversation created after the fetch. A transient FK error is not re-run by `copyWhere`'s
+  connection retry (re-running cannot help, and a target-side failure mid-COPY makes pgx close the
+  source conn): it reconnects and returns at once.
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a
@@ -670,6 +697,14 @@ when committed on the target, on every copy path including the cyclic component 
 chunk counts once; parent re-copies for live-source skew and the cyclic-column fill pass do not
 count). The shipped Grafana dashboard keys its sync/table filters on `replicare_table_phase_info`
 — filters fed by streaming-only metrics left every panel empty during a copy.
+**ETAs are computed in the daemon, not in PromQL (decision).** `replicare_initial_copy_eta_seconds{sync}`
+(rows left from the per-table estimates, minus finished tables, ÷ copy rate over a 10-minute window)
+and `replicare_catchup_eta_seconds{sync,target}` (backlog ÷ its shrink rate over the window; `0` when
+nothing has waited over a minute, so a steady small backlog is "caught up"). `-1` = not moving
+(no copy progress / backlog not shrinking / target down); no series = under a minute of history.
+The window ends *now*, not at the last update, and `RefreshETAs` runs on the copy's size ticker, so a
+stall shows. A table's phase flips to `streaming` at its component's cutover, so finished tables
+leave the copy ETA. Dashboard stat panels show them as durations with value mappings.
 
 **The CLI live surface — visibility without Grafana (decision).** Where the daemon must run somewhere a
 metrics stack can't reach it (e.g. *inside the source cluster*, the only path to the source

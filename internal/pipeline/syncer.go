@@ -224,6 +224,9 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 		if err := s.Store.SaveCursor(ctx, s.Name, cur); err != nil {
 			return fmt.Errorf("syncer %s: cutover cursor %s: %w", s.Name, t, err)
 		}
+		// The table's copy is finished: say so now rather than when the last component's
+		// copy is done and streaming starts, so the copy ETA stops counting it.
+		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
 	}
 	s.recordEvent(ctx, state.Event{
 		Sync: s.Name, Target: string(s.Target), Level: "INFO", Event: observability.EventCutover,
@@ -294,9 +297,19 @@ const cyclicCopyMaxAttempts = 10
 func (s *Syncer) copyCyclicWithRetry(ctx context.Context, copier engine.CyclicComponentCopier, comp engine.Component) error {
 	var lastErr error
 	for attempt := 0; attempt < cyclicCopyMaxAttempts; attempt++ {
-		err := copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables, func(t engine.TableRef, n int64) {
-			s.Tel.AddRowsCopied(s.Name, t, n)
-		})
+		progress := func(t engine.TableRef, n int64) { s.Tel.AddRowsCopied(s.Name, t, n) }
+		var err error
+		if pc, ok := copier.(engine.ParallelCyclicCopier); ok {
+			// The rest of the copy pool is idle while a cyclic component loads (components
+			// copy one at a time), so lend it to the copier for a table's chunks.
+			helpers := make([]engine.ConnPair, 0, len(s.Workers)-1)
+			for _, w := range s.Workers[1:] {
+				helpers = append(helpers, engine.ConnPair{Src: w.Src, Sink: w.Sink})
+			}
+			err = pc.CopyCyclicComponentWith(ctx, s.Workers[0].Src, helpers, comp.Tables, progress)
+		} else {
+			err = copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables, progress)
+		}
 		if err == nil {
 			return nil
 		}
@@ -377,6 +390,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 			case <-t.C:
 				s.measureDBSizes(ctx)
 				s.lastDBSize = time.Now()
+				s.Tel.RefreshETAs() // a copy that has stopped moving shows it
 			}
 		}
 	}()

@@ -178,7 +178,7 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
+        "w": 5,
         "x": 0,
         "y": 1
       },
@@ -233,6 +233,87 @@
     },
     {
       "type": "stat",
+      "title": "Initial copy ETA",
+      "description": "How long the initial copy has left, worked out by replicare from the rows still to copy and the copy rate over the last 10 minutes. 'Not moving' means no rows were copied in the last 10 minutes. The row counts come from the source's statistics and the link-filling pass for tables linked in a loop isn't included, so treat it as a guide.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 5,
+        "x": 5,
+        "y": 1
+      },
+      "id": 38,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dtdurations",
+          "decimals": 0,
+          "noValue": "Working it out\u2026",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "Not moving",
+                  "color": "red",
+                  "index": 0
+                },
+                "0": {
+                  "text": "Done",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "(min(replicare_initial_copy_eta_seconds{sync=~\"$sync\"}) == -1) or max(replicare_initial_copy_eta_seconds{sync=~\"$sync\"})",
+          "legendFormat": "eta",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
       "title": "Tables still copying",
       "description": "Tables in the initial-copy phase. Reaches 0 when every table is streaming.",
       "datasource": {
@@ -241,8 +322,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 6,
+        "w": 5,
+        "x": 10,
         "y": 1
       },
       "id": 35,
@@ -303,8 +384,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 12,
+        "w": 5,
+        "x": 15,
         "y": 1
       },
       "id": 36,
@@ -365,8 +446,8 @@
       },
       "gridPos": {
         "h": 4,
-        "w": 6,
-        "x": 18,
+        "w": 4,
+        "x": 20,
         "y": 1
       },
       "id": 37,
@@ -1237,7 +1318,7 @@
     {
       "type": "stat",
       "title": "Catch-up ETA",
-      "description": "Estimated time to converge: total backlog rows / current apply throughput. '~0' when caught up; blank/high when throughput is 0.",
+      "description": "How long until the target has applied every waiting change, worked out by replicare from the backlog and how fast it has shrunk over the last 10 minutes. 'Caught up' means nothing has been waiting longer than a minute. 'Not catching up' means the backlog is flat or growing, or the target is unreachable.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -1251,7 +1332,9 @@
       "id": 13,
       "fieldConfig": {
         "defaults": {
-          "unit": "s",
+          "unit": "dtdurations",
+          "decimals": 0,
+          "noValue": "Working it out\u2026",
           "color": {
             "mode": "thresholds"
           },
@@ -1259,25 +1342,34 @@
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 60
-              },
-              {
-                "color": "red",
-                "value": 600
               }
             ]
-          }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "-1": {
+                  "text": "Not catching up",
+                  "color": "red",
+                  "index": 0
+                },
+                "0": {
+                  "text": "Caught up",
+                  "color": "green",
+                  "index": 1
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
       "options": {
         "colorMode": "value",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "auto",
         "orientation": "auto",
         "reduceOptions": {
@@ -1296,10 +1388,10 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(replicare_delta_backlog_rows{sync=~\"$sync\", target=~\"$target\"}) / clamp_min(sum(replicare_throughput_rows_per_second{sync=~\"$sync\"}), 1)",
+          "expr": "(min(replicare_catchup_eta_seconds{sync=~\"$sync\", target=~\"$target\"}) == -1) or max(replicare_catchup_eta_seconds{sync=~\"$sync\", target=~\"$target\"})",
           "legendFormat": "eta",
-          "range": true,
-          "instant": false,
+          "range": false,
+          "instant": true,
           "refId": "A"
         }
       ]

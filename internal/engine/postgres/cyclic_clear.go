@@ -155,6 +155,12 @@ SELECT c.conname || ' on ' || c.conrelid::regclass::text
 	return out, rows.Err()
 }
 
+// isDeadlock reports a transaction Postgres cancelled to break a deadlock (40P01).
+func isDeadlock(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
+}
+
 func isInsufficientPrivilege(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "42501"

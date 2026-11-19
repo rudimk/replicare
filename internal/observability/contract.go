@@ -65,6 +65,11 @@ const (
 	// Redis, whose deletes are found by the target-vs-source sweep, publishes them.
 	MetricDeleteReconcileLag = "replicare_delete_reconciliation_lag_seconds"
 	MetricDeletesReconciled  = "replicare_deletes_reconciled_total"
+	// ETAs, computed in the daemon so a dashboard shows a duration, not a ratio.
+	// -1 means "not moving" (no copy progress, or a backlog that is not shrinking);
+	// no series means not enough history yet.
+	MetricInitialCopyETA = "replicare_initial_copy_eta_seconds"
+	MetricCatchupETA     = "replicare_catchup_eta_seconds"
 )
 
 // Metrics is the full metric registry. M6 asserts the running registry matches.
@@ -89,6 +94,8 @@ var Metrics = []Metric{
 	{MetricPhaseInfo, Gauge, "Table phase (initial_copy/streaming) as an info gauge", []string{LabelSync, LabelTable, LabelPhase}},
 	{MetricDeleteReconcileLag, Gauge, "Seconds the last completed delete-reconciliation sweep took (staleness of capture-less deletes)", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricDeletesReconciled, Counter, "Keys deleted by the target-vs-source delete sweep", []string{LabelSync, LabelTarget, LabelTable}},
+	{MetricInitialCopyETA, Gauge, "Estimated seconds until the initial copy finishes (-1: no progress in the last 10 minutes)", []string{LabelSync}},
+	{MetricCatchupETA, Gauge, "Estimated seconds until the target's delta backlog is cleared at its current rate of shrinking (0: caught up; -1: not shrinking or target down)", []string{LabelSync, LabelTarget}},
 }
 
 // Span names for OTel traces. Drain/apply spans against an unreachable target
