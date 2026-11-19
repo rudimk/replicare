@@ -140,6 +140,10 @@ stick with the two-step form above.
 For active-active, run this against every node before starting, and apply any later schema change
 to every node first(see [active-active replication](active-active.md)).
 
+For a big first copy on Postgres, it's worth dropping the target's plain indexes at this point and
+rebuilding them once the copy is done; see
+[speeding up a big first copy](#speeding-up-a-big-first-copy).
+
 ### 2. Grant least-privilege roles
 
 Run the grant scripts, either editing the role / schema / db values in them or passing them with
@@ -256,6 +260,114 @@ Install the binary and the sample
 [Docker image](https://github.com/rudimk/replicare#install), or deploy on Kubernetes with the Helm
 chart, as described in [Kubernetes(Helm)](kubernetes.md). [operations.md](operations.md) covers
 tuning, monitoring, retention / reseed and troubleshooting.
+
+## Speeding up a big first copy
+
+On a large Postgres target, the indexes are what slow the first copy down most. Every row copied
+has to go into every index on its table, and once those indexes are bigger than the target's
+memory, most of the copy's time goes on waiting for disk reads. A copy that starts at thousands
+of rows a second can drop to a few hundred.
+
+The way round it is to drop the target's plain(non-unique) indexes before the copy and rebuild
+them once it's finished. Primary keys and unique indexes stay, since `replicare` needs them to
+apply changes. Nothing here touches the source, and it's all plain SQL, run with `psql` as an
+admin on the target. `\gexec` is a `psql` feature that runs each row of a query's result as a
+statement.
+
+### 1. Save the index definitions
+
+Do this after the target tables are created and before `replicare` starts. It saves every plain
+index's definition in a small table of its own, in a separate schema that `replicare` never
+touches:
+
+```sql
+CREATE SCHEMA IF NOT EXISTS index_backup;
+
+CREATE TABLE index_backup.dropped AS
+SELECT t.relname AS table_name,
+       i.relname AS index_name,
+       regexp_replace(pg_get_indexdef(x.indexrelid), '^CREATE INDEX', 'CREATE INDEX CONCURRENTLY') AS recreate_sql,
+       'DROP INDEX ' || quote_ident(n.nspname) || '.' || quote_ident(i.relname) AS drop_sql
+FROM pg_index x
+JOIN pg_class i     ON i.oid = x.indexrelid
+JOIN pg_class t     ON t.oid = x.indrelid
+JOIN pg_namespace n ON n.oid = t.relnamespace
+WHERE n.nspname = 'public'
+  AND NOT x.indisunique
+  AND NOT x.indisprimary
+  AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conindid = x.indexrelid);
+  -- to cover only the biggest tables, add: AND t.relname IN ('orders', 'events')
+
+SELECT table_name, index_name FROM index_backup.dropped ORDER BY table_name, index_name;
+```
+
+### 2. Drop them
+
+```sql
+SELECT drop_sql FROM index_backup.dropped \gexec
+```
+
+On empty tables this is instant. To drop them while a copy is already running, use
+`DROP INDEX CONCURRENTLY` instead, so the copy isn't blocked: run
+`SELECT replace(drop_sql, 'DROP INDEX', 'DROP INDEX CONCURRENTLY') FROM index_backup.dropped \gexec`.
+
+### 3. Run the copy
+
+Start `replicare` as usual and wait until every table shows streaming in `replicare status`.
+For tables linked in a loop, a second pass fills the links in after the rows are copied, and it's
+much faster without the indexes, so it's worth waiting for streaming rather than for 100%.
+
+### 4. Rebuild the indexes
+
+`replicare` can keep running: `CREATE INDEX CONCURRENTLY` lets writes carry on while it builds.
+Large tables can take a while, so run this somewhere that won't drop, such as `tmux`:
+
+```sql
+SET statement_timeout = 0;
+SET maintenance_work_mem = '1GB';  -- '256MB' on an instance with under 8 GB of RAM
+
+SELECT recreate_sql
+FROM index_backup.dropped
+ORDER BY (index_name ILIKE '%id_idx') DESC, table_name, index_name
+\gexec
+```
+
+The order puts the indexes on linking columns(names ending in `id_idx`) first. Deleting a parent
+row is slow while the child table has no index on the column that points at it, so those matter
+most to streaming. Streaming carries on during the rebuild, a little slower since it shares the
+disk.
+
+### 5. Check every index is back and usable
+
+An index build that's interrupted leaves the index behind marked invalid: unused by queries but
+still slowing writes. This lists any that are missing or broken:
+
+```sql
+SELECT d.table_name, d.index_name,
+       CASE WHEN i.oid IS NULL THEN 'missing' ELSE 'broken' END AS problem,
+       d.recreate_sql
+FROM index_backup.dropped d
+LEFT JOIN pg_class i ON i.relname = d.index_name AND i.relnamespace = 'public'::regnamespace
+LEFT JOIN pg_index x ON x.indexrelid = i.oid
+WHERE i.oid IS NULL OR NOT x.indisvalid;
+```
+
+For a missing one, run its `recreate_sql`. For a broken one, drop it first with
+`DROP INDEX CONCURRENTLY`, then run its `recreate_sql`. Repeat until the query returns nothing.
+
+### 6. Refresh statistics and clean up
+
+After a load this size, Postgres's statistics for these tables are out of date and queries can
+pick poor plans until they catch up. `ANALYZE` only samples each table, so it's quick:
+
+```sql
+SELECT DISTINCT 'ANALYZE public.' || quote_ident(table_name) FROM index_backup.dropped \gexec
+
+DROP SCHEMA index_backup CASCADE;
+```
+
+Only drop `index_backup` once step 5 comes back empty; until then, it's the only record of the
+indexes.
 
 ## Where to go next
 
