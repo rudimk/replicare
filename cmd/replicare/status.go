@@ -227,6 +227,9 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 		if rep.LiveError != "" {
 			fmt.Fprintf(w, "  live: partial (%s)\n", rep.LiveError)
 		}
+		for _, ix := range rep.Indexes {
+			fmt.Fprintf(w, "  %s\n", indexLine(ix))
+		}
 		if len(rep.Tables) == 0 {
 			fmt.Fprintln(w, "  (no tables tracked yet)")
 		}
@@ -278,6 +281,20 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 		}
 		fmt.Fprintln(w)
 	}
+}
+
+// indexLine summarises a target's deferred indexes: all back, or how many are still
+// missing (a warning, since the target is slower without them until they are built).
+func indexLine(ix status.IndexStatus) string {
+	if ix.Built == ix.Total {
+		return fmt.Sprintf("indexes on %s: all %d taken down for the copy are built again", ix.Target, ix.Total)
+	}
+	next := ""
+	if len(ix.Pending) > 0 {
+		next = "; next: " + ix.Pending[0]
+	}
+	return fmt.Sprintf("[WARN] indexes on %s: %d of %d built again, %d still missing (replicare builds them while streaming; "+
+		"`replicare indexes restore` builds them now)%s", ix.Target, ix.Built, ix.Total, ix.Total-ix.Built, next)
 }
 
 // countCell renders a live count, "-" when the signal is absent (endpoint

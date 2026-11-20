@@ -37,6 +37,11 @@ type Deps struct {
 	Workers []copy.Worker
 	Store   state.StateStore
 	Log     *slog.Logger
+	// BeforeCopy, if set, runs after a reseed has emptied the target tables and before
+	// it copies them again: the pipeline takes the target's plain indexes down here. Not
+	// earlier, since emptying a parent table checks every child for references, which
+	// is far slower without the child's index on the linking column.
+	BeforeCopy func(ctx context.Context, tables []engine.TableRef)
 }
 
 func (d Deps) logger() *slog.Logger {
@@ -149,6 +154,9 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 		if err := d.Store.SaveCopyProgress(ctx, syncName, state.CopyProgress{Target: target, Table: t}); err != nil {
 			return fmt.Errorf("reseed %s: reset progress %s: %w", target, t, err)
 		}
+	}
+	if d.BeforeCopy != nil {
+		d.BeforeCopy(ctx, tablesTopo)
 	}
 	// 3. Re-copy parents-first (chunks parallel across the workers).
 	if err := copy.Component(ctx, d.Workers, d.Store, syncName, target, tablesTopo, opts); err != nil {

@@ -87,6 +87,31 @@ type Event struct {
 	CreatedAt time.Time // set on read (RecentEvents); ignored on write
 }
 
+// SavedIndex is one target index replicare took down for the initial copy, kept so
+// it can be built again (CLAUDE.md §4.1 "deferred target indexes"). Built is false
+// from the moment it is saved (just before it is dropped) until the rebuilt index
+// is valid on the target.
+type SavedIndex struct {
+	Target    engine.TargetID
+	Index     engine.DeferredIndex
+	Built     bool
+	UpdatedAt time.Time // read-only
+}
+
+// IndexStore is the optional StateStore capability for deferred target indexes. The
+// Postgres backend implements it; a store without it simply means no indexes are
+// deferred.
+type IndexStore interface {
+	// SaveIndexes records indexes about to be dropped as not yet built. An index
+	// already recorded under the same (sync, target, schema, name) takes the new
+	// definition and goes back to not built (a reseed drops it again).
+	SaveIndexes(ctx context.Context, sync string, target engine.TargetID, idx []engine.DeferredIndex) error
+	// ListIndexes returns every saved index of a sync, all targets.
+	ListIndexes(ctx context.Context, sync string) ([]SavedIndex, error)
+	// MarkIndexBuilt records that the index is back and usable on the target.
+	MarkIndexBuilt(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef, name string) error
+}
+
 // StateStore persists daemon state and provides single-active ownership. The
 // Postgres implementation lands in M2; this is the contract.
 type StateStore interface {

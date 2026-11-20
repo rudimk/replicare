@@ -32,6 +32,7 @@ const (
 	LabelPhase     = "phase"
 	LabelEngine    = "engine"
 	LabelComponent = "component"
+	LabelIndex     = "index"
 )
 
 // Metric names. Prefix everything with "replicare_".
@@ -77,6 +78,13 @@ const (
 	// and the rows the pass will touch (the table's row estimate).
 	MetricLinkFillRowsTotal  = "replicare_link_fill_rows_total"
 	MetricLinkFillRowsTarget = "replicare_link_fill_rows_target"
+	// Deferred target indexes: plain indexes taken down for the initial copy and built
+	// again once the sync streams. Total saved and how many are back, per target, and the
+	// build in flight: which index, its phase, and how far through that phase it is.
+	MetricIndexesDeferred      = "replicare_deferred_indexes"
+	MetricIndexesBuilt         = "replicare_deferred_indexes_built"
+	MetricIndexBuildInfo       = "replicare_index_build_info"
+	MetricIndexBuildPhaseRatio = "replicare_index_build_phase_progress_ratio"
 )
 
 // Metrics is the full metric registry. M6 asserts the running registry matches.
@@ -105,6 +113,10 @@ var Metrics = []Metric{
 	{MetricInitialCopyProgress, Gauge, "Share of the initial copy done, 0..1: size-weighted, counting the link-filling pass; under 1 until every table is done", []string{LabelSync}},
 	{MetricLinkFillRowsTotal, Counter, "Rows whose links the link-filling pass has set, for tables in a loop of foreign keys", []string{LabelSync, LabelTable}},
 	{MetricLinkFillRowsTarget, Gauge, "Rows the link-filling pass will touch (the table's row estimate)", []string{LabelSync, LabelTable}},
+	{MetricIndexesDeferred, Gauge, "Plain target indexes taken down for the initial copy, to be built again once the sync streams", []string{LabelSync, LabelTarget}},
+	{MetricIndexesBuilt, Gauge, "Of those, how many have been built again and are usable", []string{LabelSync, LabelTarget}},
+	{MetricIndexBuildInfo, Gauge, "1 for the index being built right now, labelled with its table, name and build phase", []string{LabelSync, LabelTarget, LabelTable, LabelIndex, LabelPhase}},
+	{MetricIndexBuildPhaseRatio, Gauge, "How far the index build in flight is through its current phase, 0 to 1 (phases that report no progress read 0)", []string{LabelSync, LabelTarget}},
 	{MetricCatchupETA, Gauge, "Estimated seconds until the target's delta backlog is cleared at its current rate of shrinking (0: caught up; -1: not shrinking or target down)", []string{LabelSync, LabelTarget}},
 }
 
@@ -160,4 +172,14 @@ const (
 	EventCopyComponentStarted = "copy.component_started"
 	EventLinkFillStarted      = "copy.link_fill_started"
 	EventLinkFillDone         = "copy.link_fill_done"
+	// Deferred target indexes: an index taken down before its table's copy (the message
+	// carries its full CREATE statement, so it can always be rebuilt by hand), a table
+	// whose indexes are left in place and why, the rebuild starting, each index back,
+	// a build that failed (retried), and every index back.
+	EventIndexDropped        = "index.dropped"
+	EventIndexKept           = "index.kept"
+	EventIndexRebuildStarted = "index.rebuild_started"
+	EventIndexBuilt          = "index.built"
+	EventIndexBuildFailed    = "index.build_failed"
+	EventIndexRebuildDone    = "index.rebuild_done"
 )

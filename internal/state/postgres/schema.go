@@ -129,5 +129,30 @@ var schemaSet = migrate.Set{
 				`ALTER TABLE replicare_state.cursors ADD COLUMN last_applied_rows bigint NOT NULL DEFAULT 0`,
 			},
 		},
+		{
+			Version: 4,
+			Name:    "deferred_indexes",
+			// Plain target indexes taken down for the initial copy and built again once
+			// the sync streams (CLAUDE.md §4.1 "deferred target indexes"). A row is
+			// written, not built, BEFORE its index is dropped, so the definition is never
+			// lost to a crash between the two; built flips once the rebuilt index is
+			// valid. Additive: a new table, nothing existing changes.
+			Statements: []string{
+				`CREATE TABLE replicare_state.deferred_indexes (
+					sync        text NOT NULL REFERENCES replicare_state.syncs(name) ON DELETE CASCADE,
+					target      text NOT NULL,
+					schema_name text NOT NULL,
+					table_name  text NOT NULL,
+					index_name  text NOT NULL,
+					definition  text NOT NULL,
+					tablespace  text NOT NULL DEFAULT '',
+					after_sql   text[] NOT NULL DEFAULT '{}',
+					link        boolean NOT NULL DEFAULT false,
+					built       boolean NOT NULL DEFAULT false,
+					updated_at  timestamptz NOT NULL DEFAULT now(),
+					PRIMARY KEY (sync, target, schema_name, index_name)
+				)`,
+			},
+		},
 	},
 }

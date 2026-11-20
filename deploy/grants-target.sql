@@ -20,6 +20,15 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA :"app_schema" TO :"
 ALTER DEFAULT PRIVILEGES IN SCHEMA :"app_schema"
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO :"role";
 
+-- --- Faster initial copy: deferred target indexes (on by default) ---
+-- replicare takes each table's plain indexes down for the initial copy and builds
+-- them again afterwards, which needs ownership of the table (or membership of the
+-- role that owns it). With only the DML grants above, tables keep their indexes and
+-- copy more slowly, with a warning; nothing fails. To let it defer them, either run
+-- replicare as the role that created the target tables, or grant it the owning role
+-- (pass -v owner_role=<the role that owns the tables> and uncomment):
+-- GRANT :"owner_role" TO :"role";
+
 -- --- Optional: StateStore on this database ---
 -- replicare's own operational state (sync progress, cursors, ownership lock)
 -- lives in a dedicated `replicare_state` schema it creates and owns. If you point

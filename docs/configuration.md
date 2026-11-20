@@ -175,6 +175,8 @@ syncs:
     targets: [warehouse]      # keys in `targets` (one or more; fan-out)
     enabled: true             # optional; false PAUSES just this sync (see below)
     sync_sequences: false     # optional; true keeps DR counters warm (see below)
+    defer_indexes:            # optional; Postgres only, on unless set false (see below)
+      enabled: true
     include: ["public.*"]     # selection globs (schema.table)
     exclude: ["*_audit"]      # excluded from the include set
     tuning: { ... }           # optional (see below)
@@ -196,6 +198,43 @@ setting is refused at config load when the target is also a member of an active-
 cluster, since advancing a counter across a mesh is silent data loss; use UUID / ULID keys
 there instead. See
 [sequences & identity counters in operations](operations.md#keeping-counters-warm-continuously-sync_sequences).
+
+### Faster first copies: `defer_indexes`
+
+On a Postgres sync, `replicare` takes the target's plain indexes down just before each table's
+initial copy and builds them again once every table is streaming. A large copy goes much faster
+this way, since otherwise every copied row has to go into every index on its table. It's on by
+default:
+
+```yaml
+syncs:
+  - name: app-to-warehouse
+    # ...
+    defer_indexes:
+      enabled: true               # default; false copies with the indexes in place
+      maintenance_work_mem: 1GB   # optional; memory per index build (default: the server's)
+      parallel_workers: 4         # optional; extra workers per build (default: the server's)
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | on | `false` leaves the target's indexes alone and copies with them in place, as before. |
+| `maintenance_work_mem` | the target server's setting | Memory each index build may sort in, as Postgres accepts it(`512MB`, `2GB`). About an eighth of the target's RAM, at most `2GB`, is a good size. |
+| `parallel_workers` | the target server's setting | How many extra workers each build may use(Postgres `max_parallel_maintenance_workers`). `4` suits a target with 4 or more cores. |
+
+Only plain indexes are taken down: primary keys, unique indexes and indexes behind a constraint
+always stay, since `replicare` needs them to apply changes. A table the target role doesn't own
+keeps its indexes too, since only the owner may drop and create them; `replicare` logs a
+warning naming each such table. The indexes of partitioned tables are left alone as well.
+
+It's never used on a target that is also a member of an active-active cluster, since that node
+serves live traffic: unset, it's simply off there, and `enabled: true` is refused at config load.
+Setting `enabled: true` on a MySQL or Redis sync is refused too. How it runs, how to watch it, and
+how to put the indexes back by hand are in
+[operations](operations.md#target-indexes-during-the-first-copy).
+
+With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
+sync setting.
 
 ### Pausing a sync: `enabled`
 

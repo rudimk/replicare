@@ -10,6 +10,7 @@ package telemetry
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"go.opentelemetry.io/otel/trace"
 
@@ -35,6 +36,11 @@ type Telemetry struct {
 	log    *slog.Logger
 	events EventSink
 	eta    *etaTracker
+
+	// mu guards indexBuild: the label values of each target's index-build info series,
+	// so the next update can remove it (one series per target).
+	mu         sync.Mutex
+	indexBuild map[string][]string
 }
 
 // New builds a Telemetry. A nil registry disables metrics; a nil tracer becomes

@@ -705,13 +705,276 @@
     },
     {
       "type": "row",
-      "title": "Source",
+      "title": "Index rebuild",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 19
+      },
+      "id": 40,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Indexes built again",
+      "description": "Plain target indexes replicare took down for the initial copy, and how many are built again. They are built once every table is streaming, one at a time, without blocking writes. Empty when no indexes were taken down.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 20
+      },
+      "id": 41,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_deferred_indexes_built{sync=~\"$sync\"}) / sum(replicare_deferred_indexes{sync=~\"$sync\"}) * 100",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Indexes still to build",
+      "description": "How many of the indexes taken down for the initial copy are not built yet. The target answers queries more slowly without them, so this should reach 0 not long after the copy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 6,
+        "y": 20
+      },
+      "id": 42,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_deferred_indexes{sync=~\"$sync\"}) - sum(replicare_deferred_indexes_built{sync=~\"$sync\"})",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Building now",
+      "description": "The index being built right now, and the stage its build is at: reading the table, sorting, writing the index, then reading the table a second time to pick up rows written meanwhile. Shows nothing when no build is running.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 11,
+        "y": 20
+      },
+      "id": 43,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (table, index, phase) (replicare_index_build_info{sync=~\"$sync\"})",
+          "legendFormat": "{{index}} on {{table}}: {{phase}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Current stage progress",
+      "description": "How far the build in flight is through its current stage. Sorting and waiting stages report no progress and read 0%.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 4,
+        "x": 20,
+        "y": 20
+      },
+      "id": 44,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * max(replicare_index_build_phase_progress_ratio{sync=~\"$sync\"})",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Source",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 25
       },
       "id": 1,
       "panels": []
@@ -728,7 +991,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 20
+        "y": 26
       },
       "id": 2,
       "fieldConfig": {
@@ -816,7 +1079,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 20
+        "y": 26
       },
       "id": 3,
       "fieldConfig": {
@@ -878,7 +1141,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 20
+        "y": 26
       },
       "id": 4,
       "fieldConfig": {
@@ -940,7 +1203,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 30
       },
       "id": 5,
       "fieldConfig": {
@@ -1009,7 +1272,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 38
       },
       "id": 6,
       "panels": []
@@ -1026,7 +1289,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 33
+        "y": 39
       },
       "id": 7,
       "fieldConfig": {
@@ -1114,7 +1377,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 33
+        "y": 39
       },
       "id": 8,
       "fieldConfig": {
@@ -1176,7 +1439,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 33
+        "y": 39
       },
       "id": 9,
       "fieldConfig": {
@@ -1238,7 +1501,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 37
+        "y": 43
       },
       "id": 10,
       "fieldConfig": {
@@ -1307,7 +1570,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 45
+        "y": 51
       },
       "id": 11,
       "panels": []
@@ -1324,7 +1587,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 46
+        "y": 52
       },
       "id": 12,
       "fieldConfig": {
@@ -1394,7 +1657,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 46
+        "y": 52
       },
       "id": 13,
       "fieldConfig": {
@@ -1475,7 +1738,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 46
+        "y": 52
       },
       "id": 14,
       "fieldConfig": {
@@ -1546,7 +1809,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 54
+        "y": 60
       },
       "id": 15,
       "fieldConfig": {
@@ -1610,7 +1873,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 54
+        "y": 60
       },
       "id": 16,
       "fieldConfig": {
@@ -1667,7 +1930,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 62
+        "y": 68
       },
       "id": 17,
       "panels": []
@@ -1684,7 +1947,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 63
+        "y": 69
       },
       "id": 18,
       "fieldConfig": {
@@ -1748,7 +2011,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 63
+        "y": 69
       },
       "id": 19,
       "fieldConfig": {
@@ -1808,7 +2071,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 71
+        "y": 77
       },
       "id": 20,
       "panels": []
@@ -1825,7 +2088,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 72
+        "y": 78
       },
       "id": 21,
       "fieldConfig": {
@@ -1889,7 +2152,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 72
+        "y": 78
       },
       "id": 22,
       "fieldConfig": {
@@ -1953,7 +2216,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 80
+        "y": 86
       },
       "id": 23,
       "fieldConfig": {
@@ -2013,7 +2276,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 88
+        "y": 94
       },
       "id": 27,
       "panels": []
@@ -2030,7 +2293,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 89
+        "y": 95
       },
       "id": 28,
       "fieldConfig": {
@@ -2091,7 +2354,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 89
+        "y": 95
       },
       "id": 29,
       "fieldConfig": {
@@ -2148,7 +2411,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 97
+        "y": 103
       },
       "id": 30,
       "panels": []
@@ -2165,7 +2428,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 98
+        "y": 104
       },
       "id": 31,
       "fieldConfig": {
@@ -2226,7 +2489,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 98
+        "y": 104
       },
       "id": 32,
       "fieldConfig": {
@@ -2287,7 +2550,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 98
+        "y": 104
       },
       "id": 33,
       "fieldConfig": {
