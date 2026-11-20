@@ -18,8 +18,9 @@ Every sync goes through the same five stages, in order:
 2. Capture first. The daemon installs trigger-based CDC on the source's selected tables, so
    changes start queuing into per-table delta tables straight away.
 3. Initial copy. A chunked, parallel copy of each FK component(parents first) runs while
-   capture is active. It's resumable - a restart carries on from the last checkpoint, not from the
-   top.
+   capture is active. A restart carries on from the last finished chunk, with one big exception:
+   a group of tables linked in a loop is copied again from the start, its target tables emptied
+   first(see [Watching a big first copy](#watching-a-big-first-copy)).
 4. Cutover to streaming. Once a component is copied, it flips to continuous streaming; each pass
    re-reads the current source values of dirty keys and applies them idempotently, in FK order.
 5. Purge, retention & reseed. Consumed deltas are purged, and a target that falls too far behind
@@ -214,6 +215,155 @@ MySQL-only items:
     ```
 - (MySQL only) A Postgres database for `replicare`'s state is still required for a MySQL to MySQL
     sync(see [the MySQL page](mysql.md#1-a-mysql-sync-still-needs-a-postgres-for-state)).
+
+## Watching a big first copy
+
+A first copy of a large database can run for many hours. This section covers how to tell where
+it's up to, what's normal along the way, and when it's finished. The SQL below is all read-only and
+takes no locks, so it's safe to run against a busy source.
+
+> ⚠️ Avoid restarting `replicare` while a large group of linked tables is still copying. Tables
+> linked in a loop are copied as one group, and the group only counts as copied once every table
+> in it has finished. A restart of any kind(a deploy, an upgrade, a config change, a pod moved to
+> another node) copies the whole group again from the start, and empties its tables on the target
+> first(the reasons are on [the Postgres engine page](postgres.md#requirements)). On a schema
+> where most tables link to each other, that group is most of the database, and hours of copying
+> are lost. Groups that have already switched to streaming aren't affected, and nor are tables
+> outside a loop, which carry on from their last finished chunk. If a new version comes out
+> mid-copy, it's usually better to wait for the copy to finish before deploying it.
+
+### How a group of linked tables is copied
+
+The tables in a group load one at a time, parents first, each in parallel chunks of about 50,000
+rows. A table linked in a loop is copied in two stages:
+
+1. The rows go in with their link columns(the ones that close the loop, such as a message's
+   `replyToMessageId`) left empty, so no row is refused for pointing at a row that isn't there yet.
+2. Once every table in the group has its rows in, a second pass, the link-filling pass, sets those
+   columns to their real values with `UPDATE`s.
+
+When both stages are done for every table, the whole group switches to streaming at once.
+
+### Knowing when it's finished
+
+The copy is over when every table is streaming. Any of these shows it:
+
+- `replicare status` shows `streaming` for every table.
+- The logs show a `table.cutover_to_streaming` event for each group, then `sync streaming` once all
+  of them are done. After a restart, it can take a few minutes for `sync streaming` to appear, while
+  the daemon checks capture and plans the work.
+- In Grafana, "Tables still copying" reaches 0, and "Initial copy (overall)" reaches 100%.
+
+Rows copied reaching 100% doesn't mean it's finished: the link-filling pass comes after the rows,
+and on a big table it can take hours.
+
+### What's normal along the way
+
+- **The copy rate drops to 0 for a while.** There are three usual reasons:
+  - Before copying a table, `replicare` reads through its key column on the source once to plan
+    the chunks. Nothing is copied during that read, and on a big table it can take many minutes.
+  - The link-filling pass writes `UPDATE`s, which don't count as copied rows.
+  - Rows only count once their chunk is committed, so when chunks take longer than the panel's
+    2-minute window, the rate reads 0 in between.
+- **Rows copied goes past 100%.** The target is the source's own row estimate, which can be low on
+  a table that has grown since it was last analysed.
+- **Tables called `replicare_stg` and `replicare_fill` appear in the target's activity.** They're
+  temporary tables `replicare` loads into on its way to the real ones, and they go away by
+  themselves.
+- **The target grows faster during the link-filling pass.** Each `UPDATE` writes a new copy of the
+  row and leaves the old one dead until autovacuum clears it, so a table can grow to roughly double
+  its size for a while. It's worth keeping an eye on the target's free disk space.
+- **Autovacuum runs for a long time on the biggest tables**, during the link-filling pass and after
+  it. That's the clean-up after the pass, and it's best left to run. A `CREATE INDEX CONCURRENTLY`
+  on the same table cancels it, which is harmless: it starts again later.
+- **The delta backlog grows during the copy.** Changes made on the source meanwhile queue up, and
+  each group drains its backlog once it switches to streaming. The "Catch-up ETA" panel shows how
+  long that's taking.
+
+### Seeing what it's doing, from the databases
+
+When the dashboard alone doesn't say enough, the databases show what `replicare` is running right
+now. On the **target**:
+
+```sql
+SELECT pid,
+       state,
+       wait_event_type || '/' || wait_event AS waiting_on,
+       now() - xact_start AS running_for,
+       left(query, 150) AS query
+FROM pg_stat_activity
+WHERE datname = current_database()
+  AND backend_type = 'client backend'
+  AND state <> 'idle'
+  AND pid <> pg_backend_pid()
+ORDER BY xact_start;
+```
+
+And on the **source**:
+
+```sql
+SELECT pid,
+       state,
+       wait_event_type || '/' || wait_event AS waiting_on,
+       now() - query_start AS running_for,
+       left(query, 150) AS query
+FROM pg_stat_activity
+WHERE datname = current_database()
+  AND backend_type = 'client backend'
+  AND state <> 'idle'
+  AND pid <> pg_backend_pid()
+  AND (query LIKE '%row_number() OVER%' OR query LIKE 'COPY%' OR query LIKE '%replicare%')
+ORDER BY query_start;
+```
+
+How to read them:
+
+| What shows up | What it means |
+|---|---|
+| `row_number() OVER` on the source | Planning the chunks of the table it names. Leave it running |
+| `COPY (SELECT …)` on the source, `COPY` on the target | Copying rows |
+| `waiting_on` of `IO/DataFileRead` | Reading from disk. Normal on a big table, but a lot of it means the database is disk-bound |
+| `UPDATE … FROM "replicare_fill"` on the target | The link-filling pass |
+| `INSERT … "replicare_stg"` on the target | Loading a chunk that already had rows on the target, by merging |
+| `waiting_on` starting with `Lock/` | Something is holding `replicare` up. `SELECT pg_blocking_pids(pid)`, with that row's `pid`, names the session in the way |
+| Nothing on either side, for more than a few minutes | Worth checking the pod's logs and restart count |
+
+### How far the link-filling pass has got
+
+The Grafana "Link-filling pass (per table)" panel shows it. To check from the source instead: the
+pass reads each table in order of its key, so the key it's reading now, placed in the source's own
+statistics for that column, gives a rough percentage. This assumes the table's key column is
+called `id`; for another name, change `s.attname = 'id'`:
+
+```sql
+WITH cur AS (
+  SELECT (regexp_match(query, 'FROM "public"\."([^"]+)"'))[1] AS table_name,
+         (regexp_match(query, '>= \(E?''([^'']*)'''))[1] AS batch_from_id
+  FROM pg_stat_activity
+  WHERE query LIKE 'COPY (SELECT %' AND pid <> pg_backend_pid()
+)
+SELECT cur.table_name,
+       max((SELECT round(100.0 * count(*) FILTER (WHERE b < cur.batch_from_id) / nullif(count(*), 0))
+              FROM pg_stats s, unnest(s.histogram_bounds::text::text[]) AS b
+             WHERE s.schemaname = 'public' AND s.tablename = cur.table_name AND s.attname = 'id')) AS pct_through_table
+FROM cur
+GROUP BY cur.table_name;
+```
+
+It moves in steps of about 1%. Running it again a few minutes later gives the pace: 10% in 5
+minutes means about 50 minutes for the whole table. No rows means it's between chunks, so it's
+worth running again. The same query works during the first stage too, for whichever table is
+being copied.
+
+### After the copy
+
+1. If the target's indexes were dropped to speed the copy up, rebuild them now(see
+   [Speeding up a big first copy](getting-started.md#speeding-up-a-big-first-copy)). Streaming
+   carries on during the rebuild.
+2. Wait for the target to catch up: "Caught up" on the Catch-up ETA panel, or a `BACKLOG` of `0`
+   in `replicare status`.
+3. Run `replicare verify <config>` to check the source and target hold the same data(see
+   [Checking progress from the CLI](#checking-progress-from-the-cli-no-grafana-required)).
 
 ## Tuning knobs, per sync under `tuning:`
 
@@ -771,7 +921,10 @@ Each sync runs under a single-active `pg_advisory_lock`; a second daemon pointed
 stands by. State(copy progress, cursors) is checkpointed in the Postgres state store, which is
 always Postgres regardless of the data engine, so MySQL syncs restart and resume through the same
 mechanism. A restarted or rescheduled process resumes cleanly from the last checkpoint, and an
-ungraceful kill replays at-least-once and converges idempotently.
+ungraceful kill replays at-least-once and converges idempotently. The exception is a group of
+tables linked in a loop that hasn't finished its initial copy: it has no checkpoint until every
+table in it is done, so a restart copies it again from the start(see
+[Watching a big first copy](#watching-a-big-first-copy)).
 
 One daemon can run Postgres, MySQL and Redis syncs side by side(each sync stays single-engine). A
 Redis sync only checkpoints a coarse phase(snapshot-complete per unit, with no resumable SCAN
