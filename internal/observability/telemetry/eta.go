@@ -83,6 +83,8 @@ type copyProgress struct {
 	copied   map[string]int64 // table -> rows copied this run
 	finished map[string]bool  // table no longer in initial copy
 	bytes    map[string]int64 // table -> source data size; when known, the ETA is by size
+	fill     map[string]bool  // table will get a link-filling pass after its rows are in
+	filled   map[string]int64 // table -> rows whose links the pass has set
 	total    etaSeries        // work done (see work), all tables
 }
 
@@ -90,21 +92,23 @@ type copyProgress struct {
 // are known it is in bytes: each table's size times the share of its rows copied, so a
 // table of large rows weighs what it holds rather than its row count. Otherwise it is in
 // rows. A table with an estimate but no size (none came back for it) weighs nothing.
+//
+// A table that gets a link-filling pass counts twice: once for its rows going in, once
+// for the pass that sets its links, which touches every row again. The pass is counted at
+// the same weight as the copy, an approximation (it rewrites each row but not its large
+// out-of-line values); the measured rate corrects for it as the pass runs.
 func (c *copyProgress) work() (done, remaining float64, copying bool) {
-	for tbl, est := range c.estimate {
-		if !c.finished[tbl] {
-			copying = true
-		}
+	stage := func(tbl string, est, n int64) {
 		if len(c.bytes) == 0 {
-			done += float64(c.copied[tbl])
-			if left := est - c.copied[tbl]; left > 0 && !c.finished[tbl] {
+			done += float64(n)
+			if left := est - n; left > 0 && !c.finished[tbl] {
 				remaining += float64(left)
 			}
-			continue
+			return
 		}
 		frac := 1.0
 		if est > 0 {
-			frac = min(float64(c.copied[tbl])/float64(est), 1)
+			frac = min(float64(n)/float64(est), 1)
 		}
 		size := float64(c.bytes[tbl])
 		done += size * frac
@@ -112,7 +116,30 @@ func (c *copyProgress) work() (done, remaining float64, copying bool) {
 			remaining += size * (1 - frac)
 		}
 	}
+	for tbl, est := range c.estimate {
+		if !c.finished[tbl] {
+			copying = true
+		}
+		stage(tbl, est, c.copied[tbl])
+		if c.fill[tbl] {
+			stage(tbl, est, c.filled[tbl])
+		}
+	}
 	return done, remaining, copying
+}
+
+// progress is the share of the copy done, 0 to 1, by the same measure as work. It stays
+// under 1 until every table has finished, so it never reads complete while a table is
+// still copying because the source under-estimated its rows.
+func (c *copyProgress) progress() (float64, bool) {
+	done, remaining, copying := c.work()
+	if !copying {
+		return 1, true
+	}
+	if done+remaining <= 0 {
+		return 0, false
+	}
+	return min(done/(done+remaining), 0.999), true
 }
 
 type catchupProgress struct {
@@ -136,7 +163,8 @@ func newETATracker() *etaTracker {
 func (e *etaTracker) copyFor(sync string) *copyProgress {
 	c := e.copy[sync]
 	if c == nil {
-		c = &copyProgress{estimate: map[string]int64{}, copied: map[string]int64{}, finished: map[string]bool{}, bytes: map[string]int64{}}
+		c = &copyProgress{estimate: map[string]int64{}, copied: map[string]int64{}, finished: map[string]bool{}, bytes: map[string]int64{},
+			fill: map[string]bool{}, filled: map[string]int64{}}
 		e.copy[sync] = c
 	}
 	return c
@@ -213,6 +241,14 @@ func (t *Telemetry) publishCopyETA(sync string) {
 	} else {
 		g.DeleteLabelValues(sync)
 	}
+	pg := t.reg.Gauge(observability.MetricInitialCopyProgress)
+	if c := t.eta.copy[sync]; c != nil && len(c.estimate) > 0 {
+		if v, ok := c.progress(); ok {
+			pg.WithLabelValues(sync).Set(v)
+			return
+		}
+	}
+	pg.DeleteLabelValues(sync)
 }
 
 func (t *Telemetry) publishCatchupETA(sync string, target engine.TargetID, c *catchupProgress) {
@@ -308,4 +344,40 @@ func (t *Telemetry) RefreshETAs() {
 	for k, c := range t.eta.catchup {
 		t.publishCatchupETA(k[0], engine.TargetID(k[1]), c)
 	}
+}
+
+// SetLinkFillPlanned records that a table will get a link-filling pass after its rows are
+// in (a table in a loop of foreign keys), so the copy's progress and ETA count that pass
+// from the start. Its target, the rows the pass will touch, is the table's row estimate.
+func (t *Telemetry) SetLinkFillPlanned(sync string, table engine.TableRef) {
+	if t.reg == nil {
+		return
+	}
+	t.eta.mu.Lock()
+	defer t.eta.mu.Unlock()
+	c := t.eta.copyFor(sync)
+	tbl := table.String()
+	c.fill[tbl] = true
+	if est, ok := c.estimate[tbl]; ok {
+		t.reg.Gauge(observability.MetricLinkFillRowsTarget).WithLabelValues(sync, tbl).Set(float64(est))
+	}
+	done, _, _ := c.work()
+	c.total = etaSeries{}
+	c.total.add(t.eta.now(), done)
+	t.publishCopyETA(sync)
+}
+
+// AddRowsFilled advances a table's link-filling progress by n rows whose links were set.
+func (t *Telemetry) AddRowsFilled(sync string, table engine.TableRef, n int64) {
+	if t.reg == nil || n <= 0 {
+		return
+	}
+	t.reg.Counter(observability.MetricLinkFillRowsTotal).WithLabelValues(sync, table.String()).Add(float64(n))
+	t.eta.mu.Lock()
+	defer t.eta.mu.Unlock()
+	c := t.eta.copyFor(sync)
+	c.filled[table.String()] += n
+	done, _, _ := c.work()
+	c.total.add(t.eta.now(), done)
+	t.publishCopyETA(sync)
 }

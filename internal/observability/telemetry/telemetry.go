@@ -334,6 +334,26 @@ func (t *Telemetry) RetentionApproaching(ctx context.Context, sync string, targe
 	}
 }
 
+// LogEvent writes an operational event to the structured log at its level (INFO when
+// unset), so the events a syncer records in the state store show in the logs too.
+func (t *Telemetry) LogEvent(ctx context.Context, e state.Event) {
+	level := slog.LevelInfo
+	switch e.Level {
+	case "WARN":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	}
+	attrs := []slog.Attr{slog.String("event", e.Event), slog.String(observability.AttrSync, e.Sync)}
+	if e.Target != "" {
+		attrs = append(attrs, slog.String(observability.AttrTarget, e.Target))
+	}
+	if e.Table != (engine.TableRef{}) {
+		attrs = append(attrs, slog.String(observability.AttrTable, e.Table.String()))
+	}
+	t.log.LogAttrs(ctx, level, e.Message, attrs...)
+}
+
 func (t *Telemetry) recordEvent(ctx context.Context, e state.Event) {
 	if t.events == nil {
 		return

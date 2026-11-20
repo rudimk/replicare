@@ -365,6 +365,16 @@ brittle across major-version gaps).
   conversation created after the fetch. A transient FK error is not re-run by `copyWhere`'s
   connection retry (re-running cannot help, and a target-side failure mid-COPY makes pgx close the
   source conn): it reconnects and returns at once.
+- **Parent fetches never rewrite target rows, and a deadlocked chunk retries (decision, from a
+  production crash).** The fetch for a **keepReal** (self-link-kept, one-statement) parent used to
+  fall back to the whole-table staged **upsert**. Its `DO UPDATE` row locks on existing parent rows
+  crossed the `FOR KEY SHARE` locks that parallel child-chunk `COPY`s take on the same parents (each
+  child row's FK check) → 40P01, which the fix path did not retry → daemon exit → restart → the whole
+  component re-copied. Now a keepReal parent is fetched like any other, **insert-missing-only**
+  (`ON CONFLICT DO NOTHING`), but over the **whole table** in one statement (a new row may point at
+  another new row of the same table; the self-FK is checked at statement end). Only keyless parents
+  still use the whole re-copy. And a 40P01 anywhere in a chunk's load-or-fix loop
+  (`copyRangeWithParentRetry`, `retryOnFK`) backs off and retries instead of failing the copy.
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a
@@ -709,6 +719,15 @@ nothing has waited over a minute, so a steady small backlog is "caught up"). `-1
 The window ends *now*, not at the last update, and `RefreshETAs` runs on the copy's size ticker, so a
 stall shows. A table's phase flips to `streaming` at its component's cutover, so finished tables
 leave the copy ETA. Dashboard stat panels show them as durations with value mappings.
+**The link-filling pass counts as copy work, and copy stages are logged (decision, from production).**
+A cyclic table's pass-2 fill used to be invisible: rows-copied hit 100%, the ETA said nothing, and
+nothing was logged, while the pass rewrote 56M `Message` rows. Now the copier reports it through
+`engine.CyclicCopyProgress` (`FillPlanned` before pass 1, `FillStarted`/`Filled`/`FillDone`), the
+ETA work counts a fill table twice (copy + fill, same weight), `replicare_initial_copy_progress_ratio`
+(same measure, capped under 1 until every table streams) drives the overall panel, and
+`replicare_link_fill_rows_total/_target` feed a per-table bar gauge. Syncer events
+(`copy.component_started`, `copy.link_fill_started/_done`, `copy.transient_retry`, cutover,
+`stream.pass_error`) now go to slog as well as the state store's events table.
 
 **The CLI live surface — visibility without Grafana (decision).** Where the daemon must run somewhere a
 metrics stack can't reach it (e.g. *inside the source cluster*, the only path to the source

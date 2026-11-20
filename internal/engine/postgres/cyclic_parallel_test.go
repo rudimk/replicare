@@ -3,10 +3,13 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -115,7 +118,7 @@ func TestCyclicCopyParallelMixedTarget(t *testing.T) {
 		copied[t] += n
 		mu.Unlock()
 	}
-	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, progress); err != nil {
+	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, engine.CyclicCopyProgress{Copied: progress}); err != nil {
 		t.Fatalf("parallel cyclic copy: %v", err)
 	}
 	if copied[ref("rc_it.hub")] != 600 || copied[ref("rc_it.child")] != 600 {
@@ -387,5 +390,187 @@ func TestEstimateTableBytes(t *testing.T) {
 	}
 	if _, ok := got[ref("rc_it.missing")]; ok {
 		t.Error("a table that doesn't exist should be left out")
+	}
+}
+
+// TestCyclicCopyFetchesSelfRefParentInsertOnly: the missing parent is a table loaded in
+// one statement with its real self-link (an account tree). The fetch takes the whole
+// table but only inserts the rows the target lacks, including a new account whose own
+// parent is new too, and leaves the rows already there untouched. Rewriting them would
+// take row locks that parallel child chunks hold the other way round: in production that
+// deadlocked and took the copy down.
+func TestCyclicCopyFetchesSelfRefParentInsertOnly(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	acctDDL := "CREATE TABLE rc_it.acct (id int PRIMARY KEY, parent int REFERENCES rc_it.acct(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, acct_id int NOT NULL REFERENCES rc_it.acct(id), note text)"
+	setupSourceTables(t, ctx, src, acctDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, acctDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	// A chain of accounts: each points at the one before it, so new accounts point at
+	// other new accounts.
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.acct SELECT g, NULLIF(g-1,0), 'a'||g FROM generate_series(1,50) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 40+(g%11), 'c'||g FROM generate_series(1,100) g")
+	mustExecTarget(t, ctx, sink, "INSERT INTO rc_it.acct VALUES (1,NULL,'stale'),(2,1,'stale'),(3,2,'stale')")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.acct", "rc_it.child"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	acctRef, childRef := ref("rc_it.acct"), ref("rc_it.child")
+	// The self-link is a cyclic edge: leave it out of the parent graph, as the copy does.
+	cyclicEdge := map[string]bool{}
+	for _, fk := range byRef[acctRef].ForeignKeys {
+		if fk.Parent == acctRef {
+			cyclicEdge[fkKey(fk)] = true
+		}
+	}
+	parents := nonCyclicParents(schema.Tables, cyclicEdge)
+	wholeRecopies := 0
+	recopyOn := func(c copyConn) parentRecopier {
+		return func(ctx context.Context, p engine.TableRef) error {
+			wholeRecopies++
+			return recopyOmitting(c.src, c.sink, byRef, map[engine.TableRef][]string{})(ctx, p)
+		}
+	}
+	var mu sync.Mutex
+	pf := newParentFetch(schema.Tables, cyclicEdge, parents,
+		map[engine.TableRef][]string{acctRef: {"parent"}}, map[engine.TableRef][]string{}, recopyOn, &mu)
+	fetchOn := func(c copyConn) referencedFetcher {
+		return func(ctx context.Context, w string) error { return pf.fetch(ctx, c, childRef, w) }
+	}
+	conns := []copyConn{{src: src, sink: sink}}
+	for _, h := range []engine.ConnPair{helperPair(t, ctx), helperPair(t, ctx)} {
+		conns = append(conns, copyConn{src: h.Src.(*Source), sink: h.Sink.(*Sink)})
+	}
+	if err := copyTableChunkedWithParentRetry(ctx, conns, childRef, transportColumns(byRef[childRef]), parents[childRef], recopyOn, fetchOn); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	if wholeRecopies != 0 {
+		t.Errorf("%d whole-table re-copies (upserts), want 0", wholeRecopies)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.acct"); n != 50 {
+		t.Errorf("target acct has %d rows, want 50 (every missing account, chain included)", n)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.acct WHERE name = 'stale'"); n != 3 {
+		t.Errorf("%d stale accounts left, want 3: rows already there must not be rewritten", n)
+	}
+	sel := "SELECT id::text, acct_id::text, note FROM rc_it.child ORDER BY id"
+	if !eqLines(dumpText(t, ctx, src.conn, sel), dumpText(t, ctx, sink.conn, sel)) {
+		t.Error("child did not converge")
+	}
+}
+
+// TestCyclicCopyRetriesADeadlockedFix: Postgres cancels a chunk's parent fetch to break
+// a deadlock with a chunk beside it. The chunk tries again rather than failing the copy.
+func TestCyclicCopyRetriesADeadlockedFix(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, 'h'||g FROM generate_series(1,10) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+(g%10), 'c'||g FROM generate_series(1,20) g")
+
+	schema, err := src.Introspect(ctx, engine.Selection{Include: []string{"rc_it.hub", "rc_it.child"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRef := map[engine.TableRef]engine.Table{}
+	for _, tb := range schema.Tables {
+		byRef[tb.Ref] = tb
+	}
+	childRef := ref("rc_it.child")
+	parents := nonCyclicParents(schema.Tables, map[string]bool{})
+	var mu sync.Mutex
+	pf := newParentFetch(schema.Tables, map[string]bool{}, parents, map[engine.TableRef][]string{}, map[engine.TableRef][]string{},
+		func(c copyConn) parentRecopier {
+			return recopyOmitting(c.src, c.sink, byRef, map[engine.TableRef][]string{})
+		}, &mu)
+	calls := 0
+	fix := func(ctx context.Context, w string) error {
+		calls++
+		if calls == 1 {
+			return fmt.Errorf("fetch: %w", &pgconn.PgError{Code: "40P01", Message: "deadlock detected"})
+		}
+		return pf.fetch(ctx, copyConn{src: src, sink: sink}, childRef, w)
+	}
+	tgt, err := sink.tableMeta(ctx, childRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cols := transportColumns(byRef[childRef])
+	if err := copyRangeWithParentRetry(ctx, src, sink, childRef, cols, buildRangeUpsertMeta(tgt, cols), nil, nil, fix); err != nil {
+		t.Fatalf("a deadlocked fix should be retried, got: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("fix ran %d times, want a retry after the deadlock", calls)
+	}
+	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.child"); n != 20 {
+		t.Errorf("child has %d rows, want 20", n)
+	}
+}
+
+// TestCyclicCopyReportsTheLinkFillPass: the copy announces which tables get a link-filling
+// pass before it copies anything, then reports the pass starting, its rows, and its end.
+func TestCyclicCopyReportsTheLinkFillPass(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%300), 'c'||g FROM generate_series(1,300) g")
+
+	var mu sync.Mutex
+	var events []string
+	filled := map[engine.TableRef]int64{}
+	copied := map[engine.TableRef]int64{}
+	note := func(s string) { mu.Lock(); events = append(events, s); mu.Unlock() }
+	progress := engine.CyclicCopyProgress{
+		Copied:      func(t engine.TableRef, n int64) { mu.Lock(); copied[t] += n; mu.Unlock() },
+		FillPlanned: func(t engine.TableRef) { note("planned " + t.Name) },
+		FillStarted: func(t engine.TableRef) { note("started " + t.Name) },
+		FillDone:    func(t engine.TableRef) { note("done " + t.Name) },
+		Filled:      func(t engine.TableRef, n int64) { mu.Lock(); filled[t] += n; mu.Unlock() },
+	}
+	helpers := []engine.ConnPair{helperPair(t, ctx), helperPair(t, ctx)}
+	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, progress); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	want := []string{"planned hub", "started hub", "done hub"}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Errorf("events = %v, want %v", events, want)
+	}
+	if filled[ref("rc_it.hub")] != 300 || len(filled) != 1 {
+		t.Errorf("filled = %v, want hub=300 only", filled)
+	}
+	if copied[ref("rc_it.hub")] != 300 || copied[ref("rc_it.child")] != 300 {
+		t.Errorf("copied = %v, want hub=300 child=300", copied)
 	}
 }

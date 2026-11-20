@@ -443,7 +443,25 @@ type ConnPair struct {
 // time in the component's order; only the chunks of one table run side by side.
 // helpers may be empty, which is exactly CopyCyclicComponent.
 type ParallelCyclicCopier interface {
-	CopyCyclicComponentWith(ctx context.Context, src Source, helpers []ConnPair, tables []TableRef, progress func(TableRef, int64)) error
+	CopyCyclicComponentWith(ctx context.Context, src Source, helpers []ConnPair, tables []TableRef, progress CyclicCopyProgress) error
+}
+
+// CyclicCopyProgress receives a cyclic component copy's progress. Every field may be nil.
+// A cyclic copy has two stages per table: the rows go in first (with any link column that
+// closes a loop left empty), then a link-filling pass sets those columns once every row
+// they point at exists. Both stages are reported so progress and ETAs can count the second.
+type CyclicCopyProgress struct {
+	// Copied: rows of a table written by the first stage, as each part commits (see
+	// CyclicComponentCopier's progress).
+	Copied func(TableRef, int64)
+	// FillPlanned: the table will get a link-filling pass. Called for every such table
+	// before anything is copied, so the work ahead is known from the start.
+	FillPlanned func(TableRef)
+	// FillStarted / FillDone: a table's link-filling pass begins / ends.
+	FillStarted func(TableRef)
+	FillDone    func(TableRef)
+	// Filled: rows whose links were set, as each part of the pass commits.
+	Filled func(TableRef, int64)
 }
 
 // NullFillCyclicSink is an OPTIONAL Sink capability that streams a cyclic FK

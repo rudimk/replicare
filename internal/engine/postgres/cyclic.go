@@ -49,14 +49,15 @@ import (
 // load a table whole. The blocked case (NOT NULL + non-deferrable) never reaches here
 // (pre-flight fails loud).
 func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
-	return s.CopyCyclicComponentWith(ctx, src, nil, tables, progress)
+	return s.CopyCyclicComponentWith(ctx, src, nil, tables, engine.CyclicCopyProgress{Copied: progress})
 }
 
 // CopyCyclicComponentWith is engine.ParallelCyclicCopier: CopyCyclicComponent with each
 // table's chunks (and its fill pass) spread over the helper connection pairs as well.
 // A helper that is not a connected Postgres pair is skipped.
-func (s *Sink) CopyCyclicComponentWith(ctx context.Context, src engine.Source, helpers []engine.ConnPair, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
-	ctx = withCopyProgress(ctx, progress)
+func (s *Sink) CopyCyclicComponentWith(ctx context.Context, src engine.Source, helpers []engine.ConnPair, tables []engine.TableRef, progress engine.CyclicCopyProgress) error {
+	ctx = withCopyProgress(ctx, progress.Copied)
+	ctx = withFillProgress(ctx, progress)
 	pgSrc, ok := src.(*Source)
 	if !ok {
 		return fmt.Errorf("postgres: cyclic copy: source is %T, want *postgres.Source", src)
@@ -208,6 +209,13 @@ func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members 
 		}
 	}
 
+	fill := fillProgressFrom(ctx)
+	for _, ref := range order {
+		if len(nullCols[ref]) > 0 && fill.FillPlanned != nil {
+			fill.FillPlanned(ref)
+		}
+	}
+
 	// Pass 1: copy every table, omitting its nullCols (empty on the target). Empty target
 	// → a plain streaming COPY (light: no staging, no whole-table upsert); non-empty target
 	// → an idempotent staged upsert so a re-copy over existing rows converges instead of
@@ -245,8 +253,14 @@ func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members 
 		if len(pk) == 0 {
 			return fmt.Errorf("postgres: cyclic null-fill: %s has no usable key to fill by", ref)
 		}
+		if fill.FillStarted != nil {
+			fill.FillStarted(ref)
+		}
 		if err := fillFKColumnsOn(ctx, conns, ref, table, pk, fkCols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 2 (%s): %w", ref, err)
+		}
+		if fill.FillDone != nil {
+			fill.FillDone(ref)
 		}
 	}
 	return nil
@@ -659,13 +673,17 @@ func (s *Source) fillFKRange(ctx context.Context, sink *Sink, ref engine.TableRe
 	}
 	upd := fmt.Sprintf("UPDATE %s t SET %s FROM %s s WHERE %s",
 		qualifyTable(ref), strings.Join(setParts, ", "), quoteIdentifier(stg), strings.Join(joinParts, " AND "))
-	if _, err := sink.conn.Exec(ctx, upd); err != nil {
+	tag, err := sink.conn.Exec(ctx, upd)
+	if err != nil {
 		return fmt.Errorf("postgres: null-fill pass 2: update: %w", err)
 	}
 	if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("postgres: null-fill pass 2: commit: %w", err)
 	}
 	committed = true
+	if f := fillProgressFrom(ctx).Filled; f != nil && tag.RowsAffected() > 0 {
+		f(ref, tag.RowsAffected())
+	}
 	return nil
 }
 
@@ -1088,10 +1106,18 @@ func retryOnFK(ctx context.Context, load func() error, fix func(context.Context)
 		if err == nil {
 			return nil
 		}
+		lastErr = err
+		if isDeadlock(err) {
+			// Cancelled to break a deadlock with a chunk running beside it; it rolled
+			// back, so run it again after the backoff below.
+			if e := sleepCtx(ctx, cyclicRetryBackoff(attempt)); e != nil {
+				return e
+			}
+			continue
+		}
 		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
 			return err // not an FK skew — halt loud
 		}
-		lastErr = err
 		if fix == nil {
 			break // nothing to re-copy — cannot make progress here
 		}
@@ -1214,13 +1240,22 @@ func (pf *parentFetch) fetch(ctx context.Context, c copyConn, child engine.Table
 			return err
 		}
 		meta := buildRangeUpsertMeta(tgt, cols)
-		if len(pf.keepReal[p]) > 0 || len(meta.pk) == 0 {
+		if len(meta.pk) == 0 {
 			if err := pf.recopyOn(c)(ctx, p); err != nil {
 				return err
 			}
 			continue
 		}
 		where := referencedWhere(child, pf.fksTo[child][p], childWhere)
+		if len(pf.keepReal[p]) > 0 {
+			// A table loaded in one statement with its real self-link: a new row may point
+			// at another new row of the same table, so take the whole table, still inserting
+			// only the rows the target lacks, in one statement (the self-FK is checked at the
+			// end of it). Never an upsert: rewriting rows the target already has would take
+			// row locks that chunks loading children hold the other way round (each child row
+			// locks its parent row), and Postgres would cancel one side as a deadlock.
+			where = "TRUE"
+		}
 		load := func() error {
 			pf.mu.Lock()
 			defer pf.mu.Unlock()
@@ -1326,6 +1361,15 @@ func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref 
 	}
 	err = load()
 	for attempt := 0; err != nil && attempt < cyclicCopyRetries; attempt++ {
+		if isDeadlock(err) {
+			// Postgres cancelled this chunk, or the parent fetch it ran, to break a deadlock
+			// with a chunk running beside it. Everything it did rolled back: try again.
+			if e := sleepCtx(ctx, cyclicRetryBackoff(attempt)); e != nil {
+				return e
+			}
+			err = load()
+			continue
+		}
 		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
 			return err // not an FK skew — halt loud
 		}
@@ -1404,6 +1448,16 @@ func insertMissingSQL(t engine.TableRef, stg string, cols []string, pk []capture
 	return fmt.Sprintf("INSERT INTO %s (%s)%s SELECT %s FROM %s ON CONFLICT (%s) DO NOTHING",
 		qualifyTable(t), quotedColumnList(cols), overriding, quotedColumnList(cols),
 		quoteIdentifier(stg), strings.Join(pkNames, ", "))
+}
+
+// sleepCtx waits d, or returns the context's error if it ends first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // cyclicRetryBackoff is a short, bounded backoff between parent re-copy attempts.

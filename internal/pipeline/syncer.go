@@ -216,6 +216,10 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 	// offers one (Postgres/MySQL). Acyclic components (and engines without a cyclic
 	// copier) take the normal chunked path.
 	stopSizes := s.measureSizesWhileCopying(ctx)
+	s.recordEvent(ctx, state.Event{Sync: s.Name, Target: string(s.Target), Level: "INFO",
+		Event:   observability.EventCopyComponentStarted,
+		Message: fmt.Sprintf("copying a component of %d tables (from %s)", len(comp.Order), comp.Order[0]),
+	})
 	if comp.HasCycle() {
 		if err := s.copyCyclicComponent(ctx, comp); err != nil {
 			stopSizes()
@@ -311,6 +315,19 @@ func (s *Syncer) copyCyclicWithRetry(ctx context.Context, copier engine.CyclicCo
 	var lastErr error
 	for attempt := 0; attempt < cyclicCopyMaxAttempts; attempt++ {
 		progress := func(t engine.TableRef, n int64) { s.Tel.AddRowsCopied(s.Name, t, n) }
+		stages := engine.CyclicCopyProgress{
+			Copied:      progress,
+			FillPlanned: func(t engine.TableRef) { s.Tel.SetLinkFillPlanned(s.Name, t) },
+			Filled:      func(t engine.TableRef, n int64) { s.Tel.AddRowsFilled(s.Name, t, n) },
+			FillStarted: func(t engine.TableRef) {
+				s.recordEvent(ctx, state.Event{Sync: s.Name, Target: string(s.Target), Table: t, Level: "INFO",
+					Event: observability.EventLinkFillStarted, Message: "rows copied; filling in the links between rows"})
+			},
+			FillDone: func(t engine.TableRef) {
+				s.recordEvent(ctx, state.Event{Sync: s.Name, Target: string(s.Target), Table: t, Level: "INFO",
+					Event: observability.EventLinkFillDone, Message: "links filled in"})
+			},
+		}
 		var err error
 		if pc, ok := copier.(engine.ParallelCyclicCopier); ok {
 			// The rest of the copy pool is idle while a cyclic component loads (components
@@ -319,7 +336,7 @@ func (s *Syncer) copyCyclicWithRetry(ctx context.Context, copier engine.CyclicCo
 			for _, w := range s.Workers[1:] {
 				helpers = append(helpers, engine.ConnPair{Src: w.Src, Sink: w.Sink})
 			}
-			err = pc.CopyCyclicComponentWith(ctx, s.Workers[0].Src, helpers, comp.Tables, progress)
+			err = pc.CopyCyclicComponentWith(ctx, s.Workers[0].Src, helpers, comp.Tables, stages)
 		} else {
 			err = copier.CopyCyclicComponent(ctx, s.Workers[0].Src, comp.Tables, progress)
 		}
@@ -371,6 +388,9 @@ func (s *Syncer) copyOptions() []copy.Option {
 // recordEvent persists an operational event when a StateStore is present, logging
 // a best-effort failure rather than aborting the lifecycle for an audit write.
 func (s *Syncer) recordEvent(ctx context.Context, e state.Event) {
+	if s.Tel != nil {
+		s.Tel.LogEvent(ctx, e)
+	}
 	if s.Store == nil {
 		return
 	}

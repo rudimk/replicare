@@ -175,3 +175,41 @@ func TestInitialCopyETAWeighsBySize(t *testing.T) {
 		t.Fatalf("ETA = %v (%v), want 940s (9.4 GB left at 10 MB/s)", v, ok)
 	}
 }
+
+// TestInitialCopyCountsTheLinkFillPass: a table linked in a loop is copied in two stages,
+// and the second (filling in its links) is part of the work. With its rows all in, the
+// copy is half done, not finished; the progress gauge only reads 1 once the table is done.
+func TestInitialCopyCountsTheLinkFillPass(t *testing.T) {
+	tel, reg, now := etaTel()
+	m := engine.TableRef{Schema: "public", Name: "msg"}
+	labels := map[string]string{"sync": "s"}
+	gauge := func(name string, l map[string]string) (float64, bool) { return gaugeValue(t, reg, name, l) }
+
+	tel.SetPhase("s", m, "initial_copy")
+	tel.SetRowsCopiedTarget("s", m, 1_000)
+	tel.SetCopyTableBytes("s", m, 1_000_000)
+	tel.SetLinkFillPlanned("s", m)
+	if v, ok := gauge(observability.MetricLinkFillRowsTarget, map[string]string{"sync": "s", "table": "public.msg"}); !ok || v != 1_000 {
+		t.Fatalf("link-fill target = %v (%v), want 1000", v, ok)
+	}
+
+	*now = now.Add(time.Minute)
+	tel.AddRowsCopied("s", m, 1_000)
+	if v, ok := gauge(observability.MetricInitialCopyProgress, labels); !ok || math.Abs(v-0.5) > 0.001 {
+		t.Fatalf("progress with the rows in but no links filled = %v (%v), want 0.5", v, ok)
+	}
+	// 1 MB of work in 60s; 1 MB (the fill) left: about 60s.
+	if v, ok := gauge(observability.MetricInitialCopyETA, labels); !ok || math.Abs(v-60) > 1 {
+		t.Fatalf("ETA = %v (%v), want ~60s for the link-filling pass still to run", v, ok)
+	}
+
+	*now = now.Add(time.Minute)
+	tel.AddRowsFilled("s", m, 1_000)
+	if v, ok := gauge(observability.MetricInitialCopyProgress, labels); !ok || v >= 1 {
+		t.Fatalf("progress before the table switched to streaming = %v (%v), want under 1", v, ok)
+	}
+	tel.SetPhase("s", m, "streaming")
+	if v, ok := gauge(observability.MetricInitialCopyProgress, labels); !ok || v != 1 {
+		t.Fatalf("progress when done = %v (%v), want 1", v, ok)
+	}
+}
