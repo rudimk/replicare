@@ -1088,10 +1088,18 @@ func retryOnFK(ctx context.Context, load func() error, fix func(context.Context)
 		if err == nil {
 			return nil
 		}
+		lastErr = err
+		if isDeadlock(err) {
+			// Cancelled to break a deadlock with a chunk running beside it; it rolled
+			// back, so run it again after the backoff below.
+			if e := sleepCtx(ctx, cyclicRetryBackoff(attempt)); e != nil {
+				return e
+			}
+			continue
+		}
 		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
 			return err // not an FK skew — halt loud
 		}
-		lastErr = err
 		if fix == nil {
 			break // nothing to re-copy — cannot make progress here
 		}
@@ -1214,13 +1222,22 @@ func (pf *parentFetch) fetch(ctx context.Context, c copyConn, child engine.Table
 			return err
 		}
 		meta := buildRangeUpsertMeta(tgt, cols)
-		if len(pf.keepReal[p]) > 0 || len(meta.pk) == 0 {
+		if len(meta.pk) == 0 {
 			if err := pf.recopyOn(c)(ctx, p); err != nil {
 				return err
 			}
 			continue
 		}
 		where := referencedWhere(child, pf.fksTo[child][p], childWhere)
+		if len(pf.keepReal[p]) > 0 {
+			// A table loaded in one statement with its real self-link: a new row may point
+			// at another new row of the same table, so take the whole table, still inserting
+			// only the rows the target lacks, in one statement (the self-FK is checked at the
+			// end of it). Never an upsert: rewriting rows the target already has would take
+			// row locks that chunks loading children hold the other way round (each child row
+			// locks its parent row), and Postgres would cancel one side as a deadlock.
+			where = "TRUE"
+		}
 		load := func() error {
 			pf.mu.Lock()
 			defer pf.mu.Unlock()
@@ -1326,6 +1343,15 @@ func copyRangeWithParentRetry(ctx context.Context, src *Source, sink *Sink, ref 
 	}
 	err = load()
 	for attempt := 0; err != nil && attempt < cyclicCopyRetries; attempt++ {
+		if isDeadlock(err) {
+			// Postgres cancelled this chunk, or the parent fetch it ran, to break a deadlock
+			// with a chunk running beside it. Everything it did rolled back: try again.
+			if e := sleepCtx(ctx, cyclicRetryBackoff(attempt)); e != nil {
+				return e
+			}
+			err = load()
+			continue
+		}
 		if !engine.IsTransientConstraint(classifyFKViolation(err)) {
 			return err // not an FK skew — halt loud
 		}
@@ -1404,6 +1430,16 @@ func insertMissingSQL(t engine.TableRef, stg string, cols []string, pk []capture
 	return fmt.Sprintf("INSERT INTO %s (%s)%s SELECT %s FROM %s ON CONFLICT (%s) DO NOTHING",
 		qualifyTable(t), quotedColumnList(cols), overriding, quotedColumnList(cols),
 		quoteIdentifier(stg), strings.Join(pkNames, ", "))
+}
+
+// sleepCtx waits d, or returns the context's error if it ends first.
+func sleepCtx(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
+		return nil
+	}
 }
 
 // cyclicRetryBackoff is a short, bounded backoff between parent re-copy attempts.
