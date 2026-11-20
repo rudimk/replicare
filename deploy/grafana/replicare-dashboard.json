@@ -171,7 +171,7 @@
     {
       "type": "stat",
       "title": "Initial copy (overall)",
-      "description": "Rows copied / the source's own row estimate, over the tables this run is copying. The estimate comes from database statistics, so it can land a little above or below 100% at the end.",
+      "description": "How much of the initial copy is done, worked out by replicare the same way as the ETA: each table counts for its size on the source, and tables linked in a loop count their link-filling pass too. It stays under 100% until every table has finished and switched to streaming.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -223,7 +223,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "100 * sum(replicare_rows_copied_total{sync=~\"$sync\"} and on (sync, table) replicare_initial_copy_rows_target{sync=~\"$sync\"}) / clamp_min(sum(replicare_initial_copy_rows_target{sync=~\"$sync\"}), 1)",
+          "expr": "100 * avg(replicare_initial_copy_progress_ratio{sync=~\"$sync\"})",
           "legendFormat": "__auto",
           "range": true,
           "instant": false,
@@ -637,6 +637,73 @@
       ]
     },
     {
+      "type": "bargauge",
+      "title": "Link-filling pass (per table)",
+      "description": "Tables linked in a loop of foreign keys are copied in two stages: the rows go in with the links between them left empty, then this pass fills the links in. Each bar is how far that pass has got for one table. A bar appears once its table's pass is planned and fills as it runs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 39,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "decimals": 1,
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "100 * (sum by (table) (replicare_link_fill_rows_total{sync=~\"$sync\", table=~\"$table\"}) or 0 * sum by (table) (replicare_link_fill_rows_target{sync=~\"$sync\", table=~\"$table\"})) / clamp_min(sum by (table) (replicare_link_fill_rows_target{sync=~\"$sync\", table=~\"$table\"}), 1)",
+          "legendFormat": "{{table}}",
+          "range": false,
+          "instant": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "type": "row",
       "title": "Source",
       "collapsed": false,
@@ -644,7 +711,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 19
       },
       "id": 1,
       "panels": []
@@ -661,7 +728,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 14
+        "y": 20
       },
       "id": 2,
       "fieldConfig": {
@@ -749,7 +816,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 14
+        "y": 20
       },
       "id": 3,
       "fieldConfig": {
@@ -811,7 +878,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 14
+        "y": 20
       },
       "id": 4,
       "fieldConfig": {
@@ -873,7 +940,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 24
       },
       "id": 5,
       "fieldConfig": {
@@ -942,7 +1009,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 32
       },
       "id": 6,
       "panels": []
@@ -959,7 +1026,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 27
+        "y": 33
       },
       "id": 7,
       "fieldConfig": {
@@ -1047,7 +1114,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 27
+        "y": 33
       },
       "id": 8,
       "fieldConfig": {
@@ -1109,7 +1176,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 27
+        "y": 33
       },
       "id": 9,
       "fieldConfig": {
@@ -1171,7 +1238,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 31
+        "y": 37
       },
       "id": 10,
       "fieldConfig": {
@@ -1240,7 +1307,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 39
+        "y": 45
       },
       "id": 11,
       "panels": []
@@ -1257,7 +1324,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 40
+        "y": 46
       },
       "id": 12,
       "fieldConfig": {
@@ -1327,7 +1394,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 40
+        "y": 46
       },
       "id": 13,
       "fieldConfig": {
@@ -1408,7 +1475,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 40
+        "y": 46
       },
       "id": 14,
       "fieldConfig": {
@@ -1479,7 +1546,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 48
+        "y": 54
       },
       "id": 15,
       "fieldConfig": {
@@ -1543,7 +1610,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 48
+        "y": 54
       },
       "id": 16,
       "fieldConfig": {
@@ -1600,7 +1667,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 56
+        "y": 62
       },
       "id": 17,
       "panels": []
@@ -1617,7 +1684,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 57
+        "y": 63
       },
       "id": 18,
       "fieldConfig": {
@@ -1681,7 +1748,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 57
+        "y": 63
       },
       "id": 19,
       "fieldConfig": {
@@ -1741,7 +1808,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 65
+        "y": 71
       },
       "id": 20,
       "panels": []
@@ -1758,7 +1825,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 66
+        "y": 72
       },
       "id": 21,
       "fieldConfig": {
@@ -1822,7 +1889,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 66
+        "y": 72
       },
       "id": 22,
       "fieldConfig": {
@@ -1886,7 +1953,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 74
+        "y": 80
       },
       "id": 23,
       "fieldConfig": {
@@ -1946,7 +2013,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 82
+        "y": 88
       },
       "id": 27,
       "panels": []
@@ -1963,7 +2030,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 83
+        "y": 89
       },
       "id": 28,
       "fieldConfig": {
@@ -2024,7 +2091,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 83
+        "y": 89
       },
       "id": 29,
       "fieldConfig": {
@@ -2081,7 +2148,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 91
+        "y": 97
       },
       "id": 30,
       "panels": []
@@ -2098,7 +2165,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 92
+        "y": 98
       },
       "id": 31,
       "fieldConfig": {
@@ -2159,7 +2226,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 92
+        "y": 98
       },
       "id": 32,
       "fieldConfig": {
@@ -2220,7 +2287,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 92
+        "y": 98
       },
       "id": 33,
       "fieldConfig": {

@@ -118,7 +118,7 @@ func TestCyclicCopyParallelMixedTarget(t *testing.T) {
 		copied[t] += n
 		mu.Unlock()
 	}
-	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, progress); err != nil {
+	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, engine.CyclicCopyProgress{Copied: progress}); err != nil {
 		t.Fatalf("parallel cyclic copy: %v", err)
 	}
 	if copied[ref("rc_it.hub")] != 600 || copied[ref("rc_it.child")] != 600 {
@@ -524,5 +524,53 @@ func TestCyclicCopyRetriesADeadlockedFix(t *testing.T) {
 	}
 	if n := tgtCount(t, ctx, sink, "SELECT count(*) FROM rc_it.child"); n != 20 {
 		t.Errorf("child has %d rows, want 20", n)
+	}
+}
+
+// TestCyclicCopyReportsTheLinkFillPass: the copy announces which tables get a link-filling
+// pass before it copies anything, then reports the pass starting, its rows, and its end.
+func TestCyclicCopyReportsTheLinkFillPass(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	sink := sinkTarget(t, ctx)
+	orig := copyChunkRows
+	copyChunkRows = 25
+	t.Cleanup(func() { copyChunkRows = orig })
+
+	hubDDL := "CREATE TABLE rc_it.hub (id int PRIMARY KEY, buddy_id int REFERENCES rc_it.hub(id), name text)"
+	childDDL := "CREATE TABLE rc_it.child (id int PRIMARY KEY, hub_id int NOT NULL REFERENCES rc_it.hub(id), note text)"
+	setupSourceTables(t, ctx, src, hubDDL, childDDL)
+	mustExecTarget(t, ctx, sink, "CREATE SCHEMA rc_it")
+	mustExecTarget(t, ctx, sink, hubDDL)
+	mustExecTarget(t, ctx, sink, childDDL)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.hub SELECT g, NULLIF(g-1,0), 'h'||g FROM generate_series(1,300) g")
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.child SELECT g, 1+((g-1)%300), 'c'||g FROM generate_series(1,300) g")
+
+	var mu sync.Mutex
+	var events []string
+	filled := map[engine.TableRef]int64{}
+	copied := map[engine.TableRef]int64{}
+	note := func(s string) { mu.Lock(); events = append(events, s); mu.Unlock() }
+	progress := engine.CyclicCopyProgress{
+		Copied:      func(t engine.TableRef, n int64) { mu.Lock(); copied[t] += n; mu.Unlock() },
+		FillPlanned: func(t engine.TableRef) { note("planned " + t.Name) },
+		FillStarted: func(t engine.TableRef) { note("started " + t.Name) },
+		FillDone:    func(t engine.TableRef) { note("done " + t.Name) },
+		Filled:      func(t engine.TableRef, n int64) { mu.Lock(); filled[t] += n; mu.Unlock() },
+	}
+	helpers := []engine.ConnPair{helperPair(t, ctx), helperPair(t, ctx)}
+	if err := sink.CopyCyclicComponentWith(ctx, src, helpers, []engine.TableRef{ref("rc_it.hub"), ref("rc_it.child")}, progress); err != nil {
+		t.Fatalf("copy: %v", err)
+	}
+	want := []string{"planned hub", "started hub", "done hub"}
+	if fmt.Sprint(events) != fmt.Sprint(want) {
+		t.Errorf("events = %v, want %v", events, want)
+	}
+	if filled[ref("rc_it.hub")] != 300 || len(filled) != 1 {
+		t.Errorf("filled = %v, want hub=300 only", filled)
+	}
+	if copied[ref("rc_it.hub")] != 300 || copied[ref("rc_it.child")] != 300 {
+		t.Errorf("copied = %v, want hub=300 child=300", copied)
 	}
 }

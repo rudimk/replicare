@@ -410,6 +410,8 @@ table exactly.
 |---|---|---|---|
 | `replicare_rows_copied_total` | counter | `sync`, `table` | Rows copied during the initial copy, counted once they're committed on the target(a retried chunk counts once). Tables linked in a loop count too; rows re-copied only to catch up with a busy source don't. Restarts from 0 with the daemon. |
 | `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy(the progress denominator), from the source's own statistics(Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy, and left unset for a table that's never been analysed. |
+| `replicare_initial_copy_progress_ratio` | gauge | `sync` | How much of the initial copy is done, from 0 to 1, by the same measure as the ETA: weighted by table size, and counting the link-filling pass of tables linked in a loop. It stays under 1 until every table has switched to streaming, so it never reads complete early. |
+| `replicare_link_fill_rows_total` / `replicare_link_fill_rows_target` | counter / gauge | `sync`, `table` | For a table linked in a loop: the rows whose links the link-filling pass has set, and the rows it will touch(the table's row estimate). |
 | `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the work still to do divided by how fast it got done over the last 10 minutes. Work is measured by size where the source reports table sizes(Postgres, MySQL): each table counts for its data size on the source, times the share of its estimated rows still to copy, so a table of large rows weighs what it holds, not its row count. Otherwise it's measured in rows. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate. |
 | `replicare_catchup_eta_seconds` | gauge | `sync`, `target` | Estimated seconds until the target's delta backlog is cleared, at the rate it shrank over the last 10 minutes. `0` when caught up(no backlog, or nothing waiting longer than a minute), `-1` when the backlog is flat or growing or the target is unreachable. No series until there's a minute of history. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply / copy throughput. `0` on an idle, caught-up pass. |
@@ -470,13 +472,21 @@ field to grep / alert on:
 | Event | Level | Meaning |
 |---|---|---|
 | `capture.installed` / `capture.removed` | INFO | capture lifecycle |
-| `table.cutover_to_streaming` | INFO | a table finished its initial copy |
+| `copy.component_started` | INFO | the initial copy of a group of linked tables(a component) began; the message names its size and first table |
+| `copy.link_fill_started` / `copy.link_fill_done` | INFO | for a table linked in a loop, its rows are in and the pass filling in the links between them began / ended |
+| `copy.transient_retry` | WARN | a group's copy hit a row whose parent the target didn't have yet, and is being retried |
+| `table.cutover_to_streaming` | INFO | a group of tables finished its initial copy and switched to streaming |
+| `stream.pass_error` | WARN | a streaming pass failed and will be retried |
 | `retention.cap_approaching` | INFO, then WARN, then ERROR | delta backlog nearing the retention cap(escalates as it gets closer) |
 | `target.unreachable` / `target.recovered` | ERROR / INFO | target connectivity, cross-channel with the `target_up` gauge and the errored span |
 | `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
 | `preflight.blocked` | ERROR | a sync refused to start on a blocking incompatibility |
 
 A degrading target shows up in metrics, traces *and* logs at once - never in just one channel.
+
+Once every group has finished copying, the daemon logs `sync streaming`(with the `sync` and
+`target` fields): from then on the sync is replicating changes. A large initial copy logs the
+stage events above as it goes, so the logs alone show where it's up to.
 
 ## The status HTTP API
 

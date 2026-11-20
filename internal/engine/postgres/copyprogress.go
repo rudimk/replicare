@@ -69,3 +69,16 @@ func countedLoad(ctx context.Context, ref engine.TableRef, load func(context.Con
 	reportCopied(ctx, ref, c.Load())
 	return nil
 }
+
+type fillProgressKey struct{}
+
+// withFillProgress attaches a cyclic copy's link-filling callbacks to ctx.
+func withFillProgress(ctx context.Context, p engine.CyclicCopyProgress) context.Context {
+	return context.WithValue(ctx, fillProgressKey{}, p)
+}
+
+// fillProgressFrom returns the link-filling callbacks on ctx (all nil if none).
+func fillProgressFrom(ctx context.Context) engine.CyclicCopyProgress {
+	p, _ := ctx.Value(fillProgressKey{}).(engine.CyclicCopyProgress)
+	return p
+}

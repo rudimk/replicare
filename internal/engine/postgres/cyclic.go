@@ -49,14 +49,15 @@ import (
 // load a table whole. The blocked case (NOT NULL + non-deferrable) never reaches here
 // (pre-flight fails loud).
 func (s *Sink) CopyCyclicComponent(ctx context.Context, src engine.Source, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
-	return s.CopyCyclicComponentWith(ctx, src, nil, tables, progress)
+	return s.CopyCyclicComponentWith(ctx, src, nil, tables, engine.CyclicCopyProgress{Copied: progress})
 }
 
 // CopyCyclicComponentWith is engine.ParallelCyclicCopier: CopyCyclicComponent with each
 // table's chunks (and its fill pass) spread over the helper connection pairs as well.
 // A helper that is not a connected Postgres pair is skipped.
-func (s *Sink) CopyCyclicComponentWith(ctx context.Context, src engine.Source, helpers []engine.ConnPair, tables []engine.TableRef, progress func(engine.TableRef, int64)) error {
-	ctx = withCopyProgress(ctx, progress)
+func (s *Sink) CopyCyclicComponentWith(ctx context.Context, src engine.Source, helpers []engine.ConnPair, tables []engine.TableRef, progress engine.CyclicCopyProgress) error {
+	ctx = withCopyProgress(ctx, progress.Copied)
+	ctx = withFillProgress(ctx, progress)
 	pgSrc, ok := src.(*Source)
 	if !ok {
 		return fmt.Errorf("postgres: cyclic copy: source is %T, want *postgres.Source", src)
@@ -208,6 +209,13 @@ func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members 
 		}
 	}
 
+	fill := fillProgressFrom(ctx)
+	for _, ref := range order {
+		if len(nullCols[ref]) > 0 && fill.FillPlanned != nil {
+			fill.FillPlanned(ref)
+		}
+	}
+
 	// Pass 1: copy every table, omitting its nullCols (empty on the target). Empty target
 	// → a plain streaming COPY (light: no staging, no whole-table upsert); non-empty target
 	// → an idempotent staged upsert so a re-copy over existing rows converges instead of
@@ -245,8 +253,14 @@ func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members 
 		if len(pk) == 0 {
 			return fmt.Errorf("postgres: cyclic null-fill: %s has no usable key to fill by", ref)
 		}
+		if fill.FillStarted != nil {
+			fill.FillStarted(ref)
+		}
 		if err := fillFKColumnsOn(ctx, conns, ref, table, pk, fkCols); err != nil {
 			return fmt.Errorf("postgres: cyclic null-fill pass 2 (%s): %w", ref, err)
+		}
+		if fill.FillDone != nil {
+			fill.FillDone(ref)
 		}
 	}
 	return nil
@@ -659,13 +673,17 @@ func (s *Source) fillFKRange(ctx context.Context, sink *Sink, ref engine.TableRe
 	}
 	upd := fmt.Sprintf("UPDATE %s t SET %s FROM %s s WHERE %s",
 		qualifyTable(ref), strings.Join(setParts, ", "), quoteIdentifier(stg), strings.Join(joinParts, " AND "))
-	if _, err := sink.conn.Exec(ctx, upd); err != nil {
+	tag, err := sink.conn.Exec(ctx, upd)
+	if err != nil {
 		return fmt.Errorf("postgres: null-fill pass 2: update: %w", err)
 	}
 	if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("postgres: null-fill pass 2: commit: %w", err)
 	}
 	committed = true
+	if f := fillProgressFrom(ctx).Filled; f != nil && tag.RowsAffected() > 0 {
+		f(ref, tag.RowsAffected())
+	}
 	return nil
 }
 

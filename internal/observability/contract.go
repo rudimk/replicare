@@ -70,6 +70,13 @@ const (
 	// no series means not enough history yet.
 	MetricInitialCopyETA = "replicare_initial_copy_eta_seconds"
 	MetricCatchupETA     = "replicare_catchup_eta_seconds"
+	// Initial-copy progress, 0..1, by the same measure as the ETA (size-weighted, and
+	// counting the link-filling pass of tables in a loop). Under 1 until every table is done.
+	MetricInitialCopyProgress = "replicare_initial_copy_progress_ratio"
+	// The link-filling pass of tables in a loop of foreign keys: rows whose links were set,
+	// and the rows the pass will touch (the table's row estimate).
+	MetricLinkFillRowsTotal  = "replicare_link_fill_rows_total"
+	MetricLinkFillRowsTarget = "replicare_link_fill_rows_target"
 )
 
 // Metrics is the full metric registry. M6 asserts the running registry matches.
@@ -95,6 +102,9 @@ var Metrics = []Metric{
 	{MetricDeleteReconcileLag, Gauge, "Seconds the last completed delete-reconciliation sweep took (staleness of capture-less deletes)", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricDeletesReconciled, Counter, "Keys deleted by the target-vs-source delete sweep", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricInitialCopyETA, Gauge, "Estimated seconds until the initial copy finishes (-1: no progress in the last 10 minutes)", []string{LabelSync}},
+	{MetricInitialCopyProgress, Gauge, "Share of the initial copy done, 0..1: size-weighted, counting the link-filling pass; under 1 until every table is done", []string{LabelSync}},
+	{MetricLinkFillRowsTotal, Counter, "Rows whose links the link-filling pass has set, for tables in a loop of foreign keys", []string{LabelSync, LabelTable}},
+	{MetricLinkFillRowsTarget, Gauge, "Rows the link-filling pass will touch (the table's row estimate)", []string{LabelSync, LabelTable}},
 	{MetricCatchupETA, Gauge, "Estimated seconds until the target's delta backlog is cleared at its current rate of shrinking (0: caught up; -1: not shrinking or target down)", []string{LabelSync, LabelTarget}},
 }
 
@@ -144,4 +154,10 @@ const (
 	EventCaptureRemoved    = "capture.removed"
 	EventCutover           = "table.cutover_to_streaming"
 	EventCopyRetry         = "copy.transient_retry"
+	// Initial-copy stages, logged at INFO so the copy's progress shows in the logs, not
+	// only in metrics: a component's copy begins, and a table's link-filling pass (tables
+	// in a loop of foreign keys) begins and ends.
+	EventCopyComponentStarted = "copy.component_started"
+	EventLinkFillStarted      = "copy.link_fill_started"
+	EventLinkFillDone         = "copy.link_fill_done"
 )
