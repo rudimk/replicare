@@ -133,10 +133,10 @@ func TestRedisUnitCursorChangeIDAndReseed(t *testing.T) {
 		t.Errorf("Redis unit cursor mismatch:\n got  %+v\n want %+v", got, saved)
 	}
 
-	// Clearing the reseed flag (post-reseed) also round-trips.
-	saved.NeedsReseed = false
-	if err := s.SaveCursor(ctx, "r", saved); err != nil {
-		t.Fatalf("SaveCursor(clear reseed): %v", err)
+	// Clearing the reseed flag (post-reseed) also round-trips. SaveCursor keeps it
+	// sticky, so the reseed clears it explicitly.
+	if err := s.ClearNeedsReseed(ctx, "r", "dst", unit); err != nil {
+		t.Fatalf("ClearNeedsReseed: %v", err)
 	}
 	got2, err := reopen(t, ctx).LoadCursor(ctx, "r", "dst", unit)
 	if err != nil {

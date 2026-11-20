@@ -273,3 +273,63 @@ func TestEnforceWithinCapNoReseed(t *testing.T) {
 		t.Fatalf("cursor should not be marked needs-reseed within cap")
 	}
 }
+
+// TestEnforceConsumersFlagsPeerUnderItsOwnJob: under fan-out (or a cluster mesh) one
+// consumer's retention pass can sacrifice ANOTHER consumer. The sacrificed target's
+// cursors must be flagged under that consumer's own job (for a cluster peer, a
+// different edge name), or its syncer never sees the flag: its track would be reset
+// and its deltas purged with no reseed. A consumer that is caught up is not
+// sacrificed, and no delta it still needs is purged.
+func TestEnforceConsumersFlagsPeerUnderItsOwnJob(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f := newFixture(t, ctx)
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	comp := []engine.TableRef{ref}
+
+	exec(t, ctx, f.rawSrc, ordersDDL)
+	exec(t, ctx, f.rawTgt, ordersDDL)
+	if err := f.deps.Src.InstallCapture(ctx, comp); err != nil {
+		t.Fatalf("install capture: %v", err)
+	}
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'v'||g FROM generate_series(1,4) g")
+	f.ageAllDeltas(t, ctx)
+
+	// "dst" (edge A->B) has consumed everything; "peer" (edge A->C) has consumed nothing.
+	keys, err := f.deps.Src.ReadDirtyKeys(ctx, ref, "dst", 0)
+	if err != nil {
+		t.Fatalf("ReadDirtyKeys: %v", err)
+	}
+	ids := make([]engine.DeltaID, len(keys))
+	for i, k := range keys {
+		ids[i] = k.DeltaID
+	}
+	if err := f.deps.Src.ConfirmConsumed(ctx, ref, "dst", ids); err != nil {
+		t.Fatalf("ConfirmConsumed: %v", err)
+	}
+
+	consumers := []Consumer{{Sync: "mesh::A->B", Target: "dst"}, {Sync: "mesh::A->C", Target: "peer"}}
+	// The daemon persists every sibling edge's definition (cursors reference it).
+	for _, c := range consumers {
+		if err := f.deps.Store.PutSync(ctx, state.SyncDef{Name: c.Sync, Source: "A", Targets: []engine.TargetID{c.Target}}); err != nil {
+			t.Fatalf("put sync %s: %v", c.Sync, err)
+		}
+	}
+	res, err := EnforceConsumers(ctx, f.deps, comp, consumers, engine.RetentionPolicy{MaxAgeSeconds: 3600})
+	if err != nil {
+		t.Fatalf("EnforceConsumers: %v", err)
+	}
+	if len(res.Reseeded) != 1 || res.Reseeded[0] != "peer" {
+		t.Fatalf("reseeded = %v, want [peer]", res.Reseeded)
+	}
+	cur, _ := f.deps.Store.LoadCursor(ctx, "mesh::A->C", "peer", ref)
+	if !cur.NeedsReseed {
+		t.Fatalf("peer's cursor under its own job (mesh::A->C) should be flagged needs-reseed")
+	}
+	if wrong, _ := f.deps.Store.LoadCursor(ctx, "mesh::A->B", "peer", ref); wrong.NeedsReseed {
+		t.Fatalf("peer was flagged under the purging edge's job (mesh::A->B), where its syncer never looks")
+	}
+	if own, _ := f.deps.Store.LoadCursor(ctx, "mesh::A->B", "dst", ref); own.NeedsReseed {
+		t.Fatalf("the caught-up consumer must not be sacrificed")
+	}
+}

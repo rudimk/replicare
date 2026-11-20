@@ -109,9 +109,12 @@ type StateStore interface {
 	SaveCopyProgress(ctx context.Context, sync string, p CopyProgress) error
 	LoadCopyProgress(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (CopyProgress, error)
 
-	// Streaming cursors (per sync, per target, per table).
+	// Streaming cursors (per sync, per target, per table). SaveCursor may set
+	// NeedsReseed but never clears it (several writers race on that flag, see the
+	// Postgres backend); ClearNeedsReseed is the only way to clear it.
 	SaveCursor(ctx context.Context, sync string, c Cursor) error
 	LoadCursor(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) (Cursor, error)
+	ClearNeedsReseed(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) error
 
 	// RecordEvent persists an operational event for the status API / audit trail.
 	RecordEvent(ctx context.Context, e Event) error

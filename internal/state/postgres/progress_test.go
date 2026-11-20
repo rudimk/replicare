@@ -193,6 +193,64 @@ func TestCursorResumeAfterRestart(t *testing.T) {
 	}
 }
 
+// TestCursorNeedsReseedSticky: once set, needs_reseed survives a later SaveCursor
+// that carries false (a liveness touch or cutover by the target's own syncer, which
+// loaded the cursor before a sibling consumer flagged it). Only ClearNeedsReseed
+// clears it. Without this, a fan-out sibling's reseed request could be wiped after
+// the source had already reset the target's track and purged its deltas.
+func TestCursorNeedsReseedSticky(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	s := openTestStore(t, ctx)
+	if err := s.PutSync(ctx, state.SyncDef{Name: "s1", Source: "src", Targets: []engine.TargetID{"dst"}}); err != nil {
+		t.Fatalf("PutSync: %v", err)
+	}
+	tbl := engine.TableRef{Schema: "public", Name: "orders"}
+
+	// The target's own syncer loads its cursor (flag clear)...
+	stale, err := s.LoadCursor(ctx, "s1", "dst", tbl)
+	if err != nil {
+		t.Fatalf("LoadCursor: %v", err)
+	}
+	stale.Phase = state.PhaseStreaming
+	if err := s.SaveCursor(ctx, "s1", stale); err != nil {
+		t.Fatalf("SaveCursor: %v", err)
+	}
+	// ...a sibling's retention pass flags it...
+	flagged := stale
+	flagged.NeedsReseed = true
+	flagged.Phase = state.PhaseInitialCopy
+	if err := s.SaveCursor(ctx, "s1", flagged); err != nil {
+		t.Fatalf("SaveCursor(flag): %v", err)
+	}
+	// ...and the owner then saves its stale copy (a liveness touch).
+	if err := s.SaveCursor(ctx, "s1", stale); err != nil {
+		t.Fatalf("SaveCursor(stale touch): %v", err)
+	}
+	got, err := s.LoadCursor(ctx, "s1", "dst", tbl)
+	if err != nil {
+		t.Fatalf("LoadCursor: %v", err)
+	}
+	if !got.NeedsReseed {
+		t.Fatalf("needs_reseed was cleared by a stale SaveCursor: %+v", got)
+	}
+
+	if err := s.ClearNeedsReseed(ctx, "s1", "dst", tbl); err != nil {
+		t.Fatalf("ClearNeedsReseed: %v", err)
+	}
+	got, err = s.LoadCursor(ctx, "s1", "dst", tbl)
+	if err != nil {
+		t.Fatalf("LoadCursor: %v", err)
+	}
+	if got.NeedsReseed {
+		t.Fatalf("ClearNeedsReseed did not clear the flag: %+v", got)
+	}
+	// Clearing a cursor that does not exist is a no-op, not an error.
+	if err := s.ClearNeedsReseed(ctx, "s1", "dst", engine.TableRef{Schema: "public", Name: "absent"}); err != nil {
+		t.Fatalf("ClearNeedsReseed(absent): %v", err)
+	}
+}
+
 func TestCursorFreshWhenAbsent(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

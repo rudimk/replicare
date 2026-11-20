@@ -7,6 +7,7 @@ import (
 
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/engine"
+	"github.com/rudimk/replicare/internal/reseed"
 	"github.com/rudimk/replicare/internal/state"
 )
 
@@ -47,16 +48,42 @@ func clusterEdges(clusters []*config.Cluster) []clusterEdge {
 	return edges
 }
 
+// consumers is every reader of this edge's source-node capture: one consumer per
+// peer of the source node (each outgoing edge src→peer shares src's delta tables),
+// keyed by that edge's job name, where its cursors live. Derived from config, not
+// from which edges this daemon owns, so the purge also waits on edges another daemon
+// runs. Tombstone GC relies on this too: it treats "the delete delta is gone" as
+// "every peer applied the delete".
+func (e clusterEdge) consumers() []reseed.Consumer {
+	var out []reseed.Consumer
+	for _, peer := range e.cluster.Members {
+		if peer == e.srcNode {
+			continue
+		}
+		peerEdge := clusterEdge{cluster: e.cluster, srcNode: e.srcNode, dstNode: peer}
+		out = append(out, reseed.Consumer{Sync: peerEdge.name(), Target: engine.TargetID(peer)})
+	}
+	return out
+}
+
 // runClusterEdge persists the edge's sync definition, then brings it up and streams
 // it, exactly like a one-way sync target but in cluster mode. A build/bringup failure
 // returns an error that cancels the daemon's errgroup (same contract as runSync).
 func (d *Daemon) runClusterEdge(ctx context.Context, e clusterEdge) error {
-	if err := d.store.PutSync(ctx, state.SyncDef{
-		Name:    e.name(),
-		Source:  e.srcNode,
-		Targets: []engine.TargetID{engine.TargetID(e.dstNode)},
-	}); err != nil {
-		return fmt.Errorf("daemon: persist cluster edge %q: %w", e.name(), err)
+	// Persist this edge's definition AND those of its sibling edges (every edge out of
+	// the same source node). A sibling's retention pass may flag this edge's target
+	// needs-reseed, and vice versa; cursor rows reference their sync definition, so the
+	// flag can only be written once that definition exists — even for an edge another
+	// daemon owns or that has not started yet. Each is an idempotent upsert from config.
+	consumers := e.consumers()
+	for _, c := range consumers {
+		if err := d.store.PutSync(ctx, state.SyncDef{
+			Name:    c.Sync,
+			Source:  e.srcNode,
+			Targets: []engine.TargetID{c.Target},
+		}); err != nil {
+			return fmt.Errorf("daemon: persist cluster edge %q: %w", c.Sync, err)
+		}
 	}
 
 	syncer, cleanup, err := d.buildClusterEdge(ctx, e)
@@ -64,6 +91,7 @@ func (d *Daemon) runClusterEdge(ctx context.Context, e clusterEdge) error {
 		return fmt.Errorf("daemon: build cluster edge %q: %w", e.name(), err)
 	}
 	defer cleanup()
+	syncer.Consumers = consumers
 	if err := syncer.Bringup(ctx); err != nil {
 		return fmt.Errorf("daemon: bringup cluster edge %q: %w", e.name(), err)
 	}

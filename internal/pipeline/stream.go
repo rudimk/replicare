@@ -97,8 +97,8 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// track, purge the unpinned deltas, flag it needs_reseed). This bounds source
 	// growth even during a target outage; the actual re-copy is deferred to a
 	// healthy pass below.
-	enf, enforceErr := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
-		[]engine.TargetID{s.Target}, s.Retention)
+	enf, enforceErr := reseed.EnforceConsumers(ctx, s.reseedDeps(), s.Replicable,
+		s.consumers(), s.Retention)
 	for tbl, n := range enf.Purged {
 		s.Tel.AddPurged(s.Name, tbl, n)
 	}
@@ -329,6 +329,19 @@ func (s *Syncer) reportDrainFailure(ctx context.Context, cause error) {
 	}
 	s.Tel.TargetUnreachable(ctx, nil, s.Name, s.Target, repr, s.componentOf(repr), bl,
 		telemetry.RetentionProximity(bl, s.Retention), cause)
+}
+
+// consumers returns the full consumer set the purge must gate on: s.Consumers,
+// with this syncer's own (Name, Target) added if absent so a partially wired caller
+// can never purge past its own target.
+func (s *Syncer) consumers() []reseed.Consumer {
+	self := reseed.Consumer{Sync: s.Name, Target: s.Target}
+	for _, c := range s.Consumers {
+		if c.Target == s.Target {
+			return s.Consumers
+		}
+	}
+	return append(append([]reseed.Consumer(nil), s.Consumers...), self)
 }
 
 // reseedDeps builds the reseed orchestration dependencies from the Syncer.

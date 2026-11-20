@@ -253,6 +253,18 @@ reseed-marking are entirely source-side, so they must run *even when the target 
 precisely when an unowned source needs protecting. The streaming loop therefore enforces retention
 on every pass whether or not the drain succeeded; the actual re-copy (which needs a live target) is
 deferred to a healthy pass, so a stalled target bounds the source without blocking on recovery.
+**Every syncer purges against the FULL consumer set (decision, from a CI flake that was a real
+fan-out bug).** Fan-out runs one `Syncer` per target over the *same* source delta tables, and a
+mesh node's outgoing edges share that node's delta tables. Each per-pass purge must therefore gate on
+**all** of them (`Syncer.Consumers` → `reseed.EnforceConsumers`: every target of the sync, or every
+peer of the source node, each with the job its cursors live under), never just its own target.
+Gating on its own target let the first target to stream purge deltas its sibling had not read, so
+the sibling silently never converged; a 3+ node mesh also GC'd tombstones early. Because one
+consumer may now flag *another* needs-reseed, **`needs_reseed` is sticky in `SaveCursor`** (a stale
+load→save by the target's own syncer can't wipe it); only `ClearNeedsReseed` clears it, which
+`reseed.Run` calls after a successful re-copy (a failed re-copy keeps the flag and retries). Known
+limit: a sibling re-sacrificing the target *during* a re-copy longer than the retention cap is
+cleared by that final clear.
 
 **Re-read load & the lag↔load tradeoff.** Consuming re-reads current values for dirty PKs; high
 churn → more re-read SELECTs. **Per-PK coalescing** (one re-read per PK per drain pass) bounds it;

@@ -54,15 +54,47 @@ type EnforceResult struct {
 	Purged   map[engine.TableRef]int64
 }
 
+// Consumer is one reader of a source's capture: a target, plus the name of the job
+// (sync, or cluster edge) whose StateStore cursors track that target. Purge must be
+// gated on EVERY consumer of the source's delta tables, and a consumer it sacrifices
+// is flagged needs-reseed under its own job's name, which for a cluster peer is not
+// the name of the edge that ran the purge.
+type Consumer struct {
+	Sync   string
+	Target engine.TargetID
+}
+
 // Enforce runs a purge/retention pass over the component's tables for the full
-// target set and returns the targets that now require a reseed (union across the
-// component's tables — the reseed re-copies the whole component) plus per-table
-// purge counts. For each reseeding target it marks every component-table cursor
-// needs-reseed + phase=initial_copy in the StateStore and records the
-// target.needs_reseed event (design doc §3, §6). Purge itself already reset the
-// sacrificed targets' source track.
+// target set of one job (every target's cursors live under syncName). See
+// EnforceConsumers.
 func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.TableRef,
 	targets []engine.TargetID, ret engine.RetentionPolicy) (EnforceResult, error) {
+	consumers := make([]Consumer, len(targets))
+	for i, tg := range targets {
+		consumers[i] = Consumer{Sync: syncName, Target: tg}
+	}
+	return EnforceConsumers(ctx, d, tablesTopo, consumers, ret)
+}
+
+// EnforceConsumers runs a purge/retention pass over the component's tables for the
+// FULL consumer set of the source's capture and returns the targets that now
+// require a reseed (union across the component's tables — the reseed re-copies the
+// whole component) plus per-table purge counts. A delta is purged only once every
+// consumer has it in its track; passing a subset would purge deltas a sibling has
+// not read yet (the fan-out bug this signature exists to prevent). For each
+// reseeding target it marks every component-table cursor needs-reseed +
+// phase=initial_copy in the StateStore, under that consumer's own job, and records
+// the target.needs_reseed event (design doc §3, §6). Purge itself already reset the
+// sacrificed targets' source track.
+func EnforceConsumers(ctx context.Context, d Deps, tablesTopo []engine.TableRef,
+	consumers []Consumer, ret engine.RetentionPolicy) (EnforceResult, error) {
+
+	targets := make([]engine.TargetID, len(consumers))
+	jobOf := make(map[engine.TargetID]string, len(consumers))
+	for i, c := range consumers {
+		targets[i] = c.Target
+		jobOf[c.Target] = c.Sync
+	}
 
 	res := EnforceResult{Purged: map[engine.TableRef]int64{}}
 	reseedSet := map[engine.TargetID]bool{}
@@ -89,6 +121,7 @@ func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.T
 	sort.Slice(reseeded, func(i, j int) bool { return reseeded[i] < reseeded[j] })
 
 	for _, tg := range reseeded {
+		syncName := jobOf[tg]
 		for _, t := range tablesTopo {
 			cur, err := d.Store.LoadCursor(ctx, syncName, tg, t)
 			if err != nil {
@@ -154,15 +187,20 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 	if err := copy.Component(ctx, d.Workers, d.Store, syncName, target, tablesTopo, opts); err != nil {
 		return fmt.Errorf("reseed %s: re-copy: %w", target, err)
 	}
-	// 4. Cut back to streaming: clear needs-reseed and set phase. The resumed
-	//    drain (delta MINUS track) reconciles everything captured since — the
-	//    purged deltas' keys are covered by the fresh copy (design doc §4.3).
+	// 4. Cut back to streaming: clear needs-reseed and set phase. Cleared only now,
+	//    after the re-copy succeeded, so a failed re-copy keeps the flag and is
+	//    retried next pass (the streaming loop carries on after a pass error). The
+	//    clear is explicit: SaveCursor keeps the flag sticky. The resumed drain
+	//    (delta MINUS track) reconciles everything captured since — the purged
+	//    deltas' keys are covered by the fresh copy (design doc §4.3).
 	for _, t := range tablesTopo {
+		if err := d.Store.ClearNeedsReseed(ctx, syncName, target, t); err != nil {
+			return fmt.Errorf("reseed %s: clear needs-reseed %s: %w", target, t, err)
+		}
 		cur, err := d.Store.LoadCursor(ctx, syncName, target, t)
 		if err != nil {
 			return fmt.Errorf("reseed %s: load cursor %s: %w", target, t, err)
 		}
-		cur.NeedsReseed = false
 		cur.Phase = state.PhaseStreaming
 		if err := d.Store.SaveCursor(ctx, syncName, cur); err != nil {
 			return fmt.Errorf("reseed %s: cutover cursor %s: %w", target, t, err)

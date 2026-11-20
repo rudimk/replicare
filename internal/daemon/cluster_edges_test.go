@@ -97,3 +97,34 @@ func TestClusterEdgesMultipleClusters(t *testing.T) {
 		names[e.name()] = true
 	}
 }
+
+// TestClusterEdgeConsumers: every outgoing edge of a node reads that node's delta
+// tables, so an edge's purge must wait for ALL of the source node's peers, each keyed
+// by the job (edge name) whose cursors track it. Gating on the edge's own target only
+// would purge deltas the node's other peers have not read (and GC their tombstones
+// early) in any mesh of three or more nodes.
+func TestClusterEdgeConsumers(t *testing.T) {
+	cl := &config.Cluster{Name: "mesh", Members: []string{"a", "b", "c"}}
+	for _, e := range clusterEdges([]*config.Cluster{cl}) {
+		got := e.consumers()
+		if len(got) != 2 {
+			t.Fatalf("%s: consumers = %v, want the 2 peers of %s", e.name(), got, e.srcNode)
+		}
+		seenSelf := false
+		for _, c := range got {
+			if string(c.Target) == e.srcNode {
+				t.Errorf("%s: source node %s listed as its own consumer", e.name(), e.srcNode)
+			}
+			want := clusterEdge{cluster: cl, srcNode: e.srcNode, dstNode: string(c.Target)}.name()
+			if c.Sync != want {
+				t.Errorf("%s: consumer %s keyed by job %q, want %q", e.name(), c.Target, c.Sync, want)
+			}
+			if string(c.Target) == e.dstNode && c.Sync == e.name() {
+				seenSelf = true
+			}
+		}
+		if !seenSelf {
+			t.Errorf("%s: its own (job, target) is missing from %v", e.name(), got)
+		}
+	}
+}

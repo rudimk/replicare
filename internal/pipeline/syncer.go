@@ -10,6 +10,7 @@ import (
 	"github.com/rudimk/replicare/internal/engine"
 	"github.com/rudimk/replicare/internal/observability"
 	"github.com/rudimk/replicare/internal/observability/telemetry"
+	"github.com/rudimk/replicare/internal/reseed"
 	"github.com/rudimk/replicare/internal/state"
 )
 
@@ -36,6 +37,16 @@ type Syncer struct {
 	DrainBatch    int
 	DrainInterval time.Duration
 	Retention     engine.RetentionPolicy
+
+	// Consumers is EVERY reader of this source's capture for these tables — each
+	// target of the sync (fan-out), or each peer of the source node (a cluster edge),
+	// with the job its cursors live under — this syncer's own Target included. The
+	// per-pass purge gates on all of them: a delta is purged only once every consumer
+	// has it in its track. Fan-out runs one Syncer per target over SHARED delta
+	// tables, so gating on this syncer's Target alone purges deltas its siblings have
+	// not read yet, and they never converge. Empty means this syncer is the only
+	// consumer (single-target).
+	Consumers []reseed.Consumer
 
 	// ClusterMode marks this syncer as one edge of an active-active cluster
 	// (multi-master): its source installs loop-suppressing origin-aware capture and

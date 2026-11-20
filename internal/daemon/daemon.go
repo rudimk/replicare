@@ -22,6 +22,7 @@ import (
 	"github.com/rudimk/replicare/internal/observability/prom"
 	"github.com/rudimk/replicare/internal/observability/telemetry"
 	"github.com/rudimk/replicare/internal/observability/tracing"
+	"github.com/rudimk/replicare/internal/reseed"
 	"github.com/rudimk/replicare/internal/state"
 	statepg "github.com/rudimk/replicare/internal/state/postgres"
 )
@@ -178,6 +179,13 @@ func (d *Daemon) runSync(ctx context.Context, sync *config.Sync) error {
 		return fmt.Errorf("daemon: persist sync %q: %w", sync.Name, err)
 	}
 
+	// Every target reads the same source delta tables, so each target's purge must
+	// wait for all of them (a delta goes only once every target's track has it).
+	consumers := make([]reseed.Consumer, len(targets))
+	for i, tg := range targets {
+		consumers[i] = reseed.Consumer{Sync: sync.Name, Target: tg}
+	}
+
 	g, gctx := errgroup.WithContext(ctx)
 	for _, target := range sync.Targets {
 		target := target
@@ -187,6 +195,7 @@ func (d *Daemon) runSync(ctx context.Context, sync *config.Sync) error {
 				return fmt.Errorf("daemon: build sync %q target %q: %w", sync.Name, target, err)
 			}
 			defer cleanup()
+			syncer.Consumers = consumers
 			if err := syncer.Bringup(gctx); err != nil {
 				return fmt.Errorf("daemon: bringup %q/%q: %w", sync.Name, target, err)
 			}

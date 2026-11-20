@@ -87,6 +87,13 @@ func (s *Store) LoadCopyProgress(ctx context.Context, sync string, target engine
 }
 
 // SaveCursor upserts a per-(target, table) streaming cursor within a sync.
+//
+// needs_reseed is sticky: SaveCursor can set it but never clears it (only
+// ClearNeedsReseed does). Cursor writes are load-modify-save, and the flag has
+// writers other than the target's own syncer — a sibling consumer's retention pass
+// under fan-out, or the `replicare reseed` CLI. Without this, the target's per-pass
+// liveness touch (load false → sibling sets true → save false) could silently wipe
+// a reseed request whose track reset and purge had already happened on the source.
 func (s *Store) SaveCursor(ctx context.Context, sync string, c state.Cursor) error {
 	if err := s.requirePool(); err != nil {
 		return err
@@ -102,11 +109,29 @@ func (s *Store) SaveCursor(ctx context.Context, sync string, c state.Cursor) err
 		ON CONFLICT (sync, target, schema_name, table_name) DO UPDATE SET
 			phase        = EXCLUDED.phase,
 			last_delta   = EXCLUDED.last_delta,
-			needs_reseed = EXCLUDED.needs_reseed,
+			needs_reseed = cursors.needs_reseed OR EXCLUDED.needs_reseed,
 			updated_at   = now()`,
 		sync, string(c.Target), c.Table.Schema, c.Table.Name, string(phase), int64(c.LastDelta), c.NeedsReseed)
 	if err != nil {
 		return fmt.Errorf("statepg: save cursor for %s/%s/%s: %w", sync, c.Target, c.Table, err)
+	}
+	return nil
+}
+
+// ClearNeedsReseed clears a (target, table) cursor's needs_reseed flag — the only
+// way to clear it, since SaveCursor keeps it sticky. A targeted update of that one
+// column; a no-op if the cursor row does not exist.
+func (s *Store) ClearNeedsReseed(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef) error {
+	if err := s.requirePool(); err != nil {
+		return err
+	}
+	_, err := s.pool.Exec(ctx, `
+		UPDATE replicare_state.cursors
+		SET needs_reseed = false, updated_at = now()
+		WHERE sync = $1 AND target = $2 AND schema_name = $3 AND table_name = $4`,
+		sync, string(target), t.Schema, t.Name)
+	if err != nil {
+		return fmt.Errorf("statepg: clear needs-reseed for %s/%s/%s: %w", sync, target, t, err)
 	}
 	return nil
 }

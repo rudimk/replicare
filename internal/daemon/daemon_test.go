@@ -323,6 +323,7 @@ syncs:
 			count(t, ctx, tgt1, "rc_it.orders WHERE id = 31") == 1 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 31") == 1 &&
 			count(t, ctx, tgt1, "rc_it.orders WHERE id = 2") == 0 && count(t, ctx, tgt2, "rc_it.orders WHERE id = 2") == 0
 	}) {
+		dumpFanOutState(t, ctx, src, map[string]*pgx.Conn{"dst1": tgt1, "dst2": tgt2})
 		t.Fatalf("streaming did not converge on both targets")
 	}
 
@@ -335,6 +336,48 @@ syncs:
 	case <-time.After(15 * time.Second):
 		t.Fatal("daemon did not stop within 15s of cancellation")
 	}
+}
+
+// dumpFanOutState logs, on a fan-out convergence failure, which target is missing
+// which change (id 31 present, id 2 gone) and the source-side delta and track rows
+// for rc_it.orders at that moment, so a CI failure is diagnosable from the log
+// alone (the cleanup drops the schemas right after).
+func dumpFanOutState(t *testing.T, ctx context.Context, src *pgx.Conn, tgts map[string]*pgx.Conn) {
+	t.Helper()
+	for _, name := range []string{"dst1", "dst2"} {
+		c := tgts[name]
+		t.Logf("%s: rows=%d id31=%d id2=%d", name,
+			count(t, ctx, c, "rc_it.orders"),
+			count(t, ctx, c, "rc_it.orders WHERE id = 31"),
+			count(t, ctx, c, "rc_it.orders WHERE id = 2"))
+	}
+	var relID int
+	if err := src.QueryRow(ctx,
+		"SELECT rel_id FROM replicare.captured WHERE schema_name = 'rc_it' AND table_name = 'orders'").Scan(&relID); err != nil {
+		t.Logf("source: no capture row for rc_it.orders: %v", err)
+		return
+	}
+	dump := func(label, q string) {
+		rows, err := src.Query(ctx, q)
+		if err != nil {
+			t.Logf("source %s: %v", label, err)
+			return
+		}
+		defer rows.Close()
+		n := 0
+		for rows.Next() {
+			vals, err := rows.Values()
+			if err != nil {
+				t.Logf("source %s: %v", label, err)
+				return
+			}
+			t.Logf("source %s: %v", label, vals)
+			n++
+		}
+		t.Logf("source %s: %d rows", label, n)
+	}
+	dump("delta", fmt.Sprintf("SELECT delta_id, rc_op, k1::text FROM replicare.delta_%d ORDER BY delta_id", relID))
+	dump("track", fmt.Sprintf("SELECT target, delta_id FROM replicare.track_%d ORDER BY target, delta_id", relID))
 }
 
 // TestDaemonTwoConcurrentSyncs is the M7 concurrency acceptance: one daemon runs
