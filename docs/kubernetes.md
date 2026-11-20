@@ -133,7 +133,7 @@ direct-exec form above doesn't need a shell, though.
 
 ## Single-active, rollouts & state
 
-There are four things to know about how the chart runs the daemon over time:
+There are five things to know about how the chart runs the daemon over time:
 
 - Keep `replicaCount: 1`. `replicare` is single-active per sync; a second daemon just stands by
   on the state store's ownership lock, so extra replicas are wasted, and two writers never run at
@@ -171,6 +171,24 @@ There are four things to know about how the chart runs the daemon over time:
   stays installed, so re-enabling it drains the queued backlog with no data loss. The full
   semantics, and the caveat about long pauses(source-side delta growth), are in
   [Pausing a sync](configuration.md#pausing-a-sync-enabled) in the configuration reference.
+- On a Postgres sync, `replicare` takes the target's plain indexes down for the initial copy and
+  builds them again once every table is streaming, which makes a large first copy much faster.
+  It's on by default, and set per sync in the same `config.syncs` entries:
+  ```yaml
+  config:
+    syncs:
+      - name: pg-pipeline
+        # ...
+        defer_indexes:
+          enabled: false            # copy with the target's indexes in place
+          # maintenance_work_mem: 2GB # or, left on: memory per index build
+          # parallel_workers: 4       #              extra workers per build
+  ```
+  With `--set`, that's `--set 'config.syncs[0].defer_indexes.enabled=false'`, with the same
+  array-index caveat as above. Like any config change, it applies at the next pod start. Turning
+  it off partway through a copy only stops more indexes being taken down; any already taken down
+  are still built again. The full behaviour is in
+  [Target indexes during the first copy](operations.md#target-indexes-during-the-first-copy).
 - The state store *always* lives outside the chart. Every sync needs a Postgres state
   store(v1's only backend), including Redis to Redis and MySQL to MySQL. Point `state_store` at
   a managed Postgres(RDS, for example). The chart never bundles it, since it's control-plane
