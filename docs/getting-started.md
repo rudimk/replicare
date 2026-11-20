@@ -320,11 +320,13 @@ much faster without the indexes, so it's worth waiting for streaming rather than
 ### 4. Rebuild the indexes
 
 `replicare` can keep running: `CREATE INDEX CONCURRENTLY` lets writes carry on while it builds.
-Large tables can take a while, so run this somewhere that won't drop, such as `tmux`:
+Large tables can take a while, so run this somewhere that won't drop, such as a `tmux` session on
+a machine or pod that stays up(not the `replicare` pod itself, which a deploy would restart):
 
 ```sql
 SET statement_timeout = 0;
-SET maintenance_work_mem = '1GB';  -- '256MB' on an instance with under 8 GB of RAM
+SET maintenance_work_mem = '2GB';
+SET max_parallel_maintenance_workers = 4;
 
 SELECT recreate_sql
 FROM index_backup.dropped
@@ -332,10 +334,71 @@ ORDER BY (index_name ILIKE '%id_idx') DESC, table_name, index_name
 \gexec
 ```
 
+The two settings only last for this `psql` session, and change nothing else on the database:
+
+- `maintenance_work_mem` is the memory each index build may use for sorting. The indexes build
+  one at a time, so this is the most the rebuild uses at once. About an eighth of the instance's
+  RAM is a safe size: `2GB` from 16 GB of RAM up, `1GB` on 8 GB, `512MB` on 4 GB. Above `2GB` it
+  makes little difference.
+- `max_parallel_maintenance_workers` lets each build use several CPU cores, which speeds up the
+  big tables most. `4` suits an instance with 4 or more cores; `2` on a smaller one. The memory
+  above is shared between the workers, not multiplied.
+
 The order puts the indexes on linking columns(names ending in `id_idx`) first. Deleting a parent
 row is slow while the child table has no index on the column that points at it, so those matter
 most to streaming. Streaming carries on during the rebuild, a little slower since it shares the
 disk.
+
+#### Watching the rebuild
+
+`psql` only prints `CREATE INDEX` once each index is done, so a big table can look stuck. To see
+how far the current build has got, open a second `psql` session(in `tmux`, a new window with
+Ctrl-b then c, leaving the rebuild's window alone) and run:
+
+```sql
+SELECT p.pid,
+       c.relname AS table_name,
+       i.relname AS index_name,
+       p.phase,
+       round(100.0 * p.blocks_done / nullif(p.blocks_total, 0), 1) AS blocks_pct,
+       round(100.0 * p.tuples_done / nullif(p.tuples_total, 0), 1) AS rows_pct,
+       p.current_locker_pid AS waiting_on_pid
+FROM pg_stat_progress_create_index p
+JOIN pg_class c ON c.oid = p.relid
+LEFT JOIN pg_class i ON i.oid = p.index_relid;
+```
+
+Each index goes through these phases, in order:
+
+| Phase | What it's doing |
+|---|---|
+| `building index: scanning table` | Reading the whole table. `blocks_pct` shows how far |
+| `building index: sorting live tuples` | Sorting what it read. No percentage here |
+| `building index: loading tuples in tree` | Writing the index. `rows_pct` shows how far |
+| `index validation: scanning index`, `sorting tuples`, `scanning table` | Reading the table a second time, to pick up rows written while the index was building. About as long as the first read |
+| `waiting for old snapshots` | Waiting for transactions that started before the build to finish. Usually short |
+
+The first table read is about a quarter to a third of each index's time, so its pace gives a fair
+guess at the rest. A big table with several indexes takes about that long for each one.
+
+A phase starting with `waiting for` that doesn't move on means another session is in the way.
+`waiting_on_pid` names it, and this shows what it is:
+
+```sql
+SELECT pid,
+       state,
+       wait_event_type,
+       wait_event,
+       now() - xact_start AS open_for,
+       left(query, 100) AS query
+FROM pg_stat_activity
+WHERE pid IN (SELECT current_locker_pid FROM pg_stat_progress_create_index);
+```
+
+No rows means nothing is in the way: `waiting_on_pid` is `0` whenever the build isn't waiting.
+Autovacuum steps aside by itself when a build needs its table(except a run to prevent
+transaction ID wraparound, which is rare), and `replicare`'s own transactions are short, so a long
+wait is usually an application session left open in a transaction.
 
 ### 5. Check every index is back and usable
 

@@ -120,7 +120,8 @@ reference.
 | `secret.env` | `{}` | a chart-managed Secret(for dev) |
 | `service.ports.status` / `.metrics` | `8080` / `9090` | has to match `observability.status_addr`/`metrics_addr` in `config` |
 | `serviceMonitor.enabled` | `false` | scrapes `/metrics` through the Prometheus Operator |
-| `resources`, `nodeSelector`, `tolerations`, `affinity` | none | the standard scheduling knobs |
+| `resources` | requests `cpu: 100m`, `memory: 128Mi`; limit `memory: 512Mi` | the daemon's CPU and memory |
+| `nodeSelector`, `tolerations`, `affinity` | none | the standard scheduling knobs |
 | `extraVolumes` / `extraVolumeMounts` | `[]` | for example, a CA bundle for `tls: verify-full` |
 
 ## Notes & gotchas
