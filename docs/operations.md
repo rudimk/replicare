@@ -23,6 +23,8 @@ Every sync goes through the same five stages, in order:
    first(see [Watching a big first copy](#watching-a-big-first-copy)).
 4. Cutover to streaming. Once a component is copied, it flips to continuous streaming; each pass
    re-reads the current source values of dirty keys and applies them idempotently, in FK order.
+   On Postgres, the target's plain indexes, taken down for the copy, are built again once every
+   table is streaming(see [Target indexes during the first copy](#target-indexes-during-the-first-copy)).
 5. Purge, retention & reseed. Consumed deltas are purged, and a target that falls too far behind
    is reseeded(see below).
 
@@ -357,13 +359,87 @@ being copied.
 
 ### After the copy
 
-1. If the target's indexes were dropped to speed the copy up, rebuild them now(see
+1. On Postgres, wait for the target's indexes to be built again. `replicare` does it by itself
+   once every table is streaming(see
+   [Target indexes during the first copy](#target-indexes-during-the-first-copy)); the "Index
+   rebuild" panels and `replicare status` show how far it's got. If they were dropped by hand
+   instead, rebuild them now(see
    [Speeding up a big first copy](getting-started.md#speeding-up-a-big-first-copy)). Streaming
-   carries on during the rebuild.
+   carries on during the rebuild either way.
 2. Wait for the target to catch up: "Caught up" on the Catch-up ETA panel, or a `BACKLOG` of `0`
    in `replicare status`.
 3. Run `replicare verify <config>` to check the source and target hold the same data(see
    [Checking progress from the CLI](#checking-progress-from-the-cli-no-grafana-required)).
+
+## Target indexes during the first copy
+
+On a large target, the indexes are what slow a first copy down most: every copied row has to go
+into every index on its table, and once the indexes outgrow the target's memory, most of the
+copy's time goes on waiting for disk reads. So on a Postgres sync, `replicare` takes the target's
+plain indexes down for the copy and builds them again afterwards. It's on by default, and
+`defer_indexes: { enabled: false }` on the sync turns it off(see
+[the configuration reference](configuration.md#faster-first-copies-defer_indexes)).
+
+### What it touches
+
+Only plain indexes. Primary keys, unique indexes and indexes behind a constraint always stay,
+since `replicare` needs them to apply changes. It also leaves alone:
+
+- the indexes of a table the target role doesn't own(only the owner may drop and create them),
+  with an `index.kept` warning naming the table. When `replicare` connects as the same user that
+  created the target's tables, it owns them;
+- the indexes of partitioned tables;
+- every index on a target that is also an active-active cluster member.
+
+### How it runs
+
+1. **Before each table's copy**, `replicare` saves the definition of each of its plain indexes in
+   the state store, then drops the index. Each drop waits at most 2 seconds for its lock, backs off
+   and retries, so it never holds the application up. Every drop is logged as `index.dropped`,
+   with the index's full `CREATE INDEX` statement in the message, so the definition is in the logs
+   as well as in the state store. Only tables this run is about to copy are touched: a restart
+   leaves tables that are already copied alone.
+2. **During the copy**, nothing else changes; the copy just runs faster.
+3. **Once every table is streaming**, `replicare` builds the saved indexes again with
+   `CREATE INDEX CONCURRENTLY`, so reads and writes carry on throughout. It builds one at a time,
+   on two connections of its own(one builds, one reads progress), indexes on linking columns
+   first, since deleting a parent row is slow while the child has no index on the column that
+   points at it. Once all of a table's indexes are back, it runs `ANALYZE` on that table. Each
+   rebuilt index is identical to the original, including its comment, its tablespace and the
+   table's `CLUSTER` marker.
+
+It's restart-safe at every step. A definition is saved before its index is dropped, so a crash in
+between loses nothing. A build cut short leaves an unusable index behind, which the next attempt
+drops and builds again. An index someone has already rebuilt by hand is left as it is. A build
+that fails is logged as `index.build_failed` and tried again a minute later. Indexes saved by an
+earlier run are built again even if `defer_indexes` has since been turned off. A
+[reseed](#forcing-a-reseed) takes the indexes down for its re-copy and builds them again after it,
+the same way.
+
+### Watching it
+
+- **Grafana:** the "Index rebuild" row shows how many indexes are built again and how many are
+  left, which one is building, its stage, and how far through that stage it is.
+- **`replicare status`:** a line per target, `[WARN] indexes on <target>: 12 of 30 built again,
+  18 still missing`, and the next one to build, until they're all back.
+- **Logs:** `index.rebuild_started`, then `index.built` for each one(with how long it took and how
+  many are back), and `index.rebuild_done` at the end.
+- **The target itself:** the
+  [progress query in Getting Started](getting-started.md#watching-the-rebuild) works here too.
+
+On a big table, each index takes a while: the build reads the whole table, sorts, writes the
+index, then reads the table a second time to pick up rows written meanwhile. The memory and
+parallel workers each build may use are set with `maintenance_work_mem` and `parallel_workers`
+under `defer_indexes`.
+
+### Building them by hand
+
+When a sync won't run again with its indexes still missing(abandoned partway through its copy, or
+about to have its state store dropped), `replicare indexes restore <config>` builds them straight
+away(see [the CLI reference](cli.md#indexes-restore-config---sync-name---target-name)). It refuses
+while a daemon owns the sync, since the daemon builds them itself. Without the state store, the
+`index.dropped` log lines carry each index's `CREATE INDEX` statement; running each with
+`CREATE INDEX CONCURRENTLY` in place of `CREATE INDEX` rebuilds it without blocking writes.
 
 ## Tuning knobs, per sync under `tuning:`
 
@@ -562,6 +638,9 @@ table exactly.
 | `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy(the progress denominator), from the source's own statistics(Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy, and left unset for a table that's never been analysed. |
 | `replicare_initial_copy_progress_ratio` | gauge | `sync` | How much of the initial copy is done, from 0 to 1, by the same measure as the ETA: weighted by table size, and counting the link-filling pass of tables linked in a loop. It stays under 1 until every table has switched to streaming, so it never reads complete early. |
 | `replicare_link_fill_rows_total` / `replicare_link_fill_rows_target` | counter / gauge | `sync`, `table` | For a table linked in a loop: the rows whose links the link-filling pass has set, and the rows it will touch(the table's row estimate). |
+| `replicare_deferred_indexes` / `replicare_deferred_indexes_built` | gauge | `sync`, `target` | Postgres. Plain target indexes taken down for the initial copy, and how many of them are built again. Unset when none were taken down. |
+| `replicare_index_build_info` | gauge | `sync`, `target`, `table`, `index`, `phase` | `1` for the index being built right now, with its table, name and build stage(`phase`, as Postgres reports it). No series when nothing is building. |
+| `replicare_index_build_phase_progress_ratio` | gauge | `sync`, `target` | How far the build in flight is through its current stage, from 0 to 1. Stages that report no progress(sorting, waiting) read `0`. |
 | `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the work still to do divided by how fast it got done over the last 10 minutes. Work is measured by size where the source reports table sizes(Postgres, MySQL): each table counts for its data size on the source, times the share of its estimated rows still to copy, so a table of large rows weighs what it holds, not its row count. Otherwise it's measured in rows. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate. |
 | `replicare_catchup_eta_seconds` | gauge | `sync`, `target` | Estimated seconds until the target's delta backlog is cleared, at the rate it shrank over the last 10 minutes. `0` when caught up(no backlog, or nothing waiting longer than a minute), `-1` when the backlog is flat or growing or the target is unreachable. No series until there's a minute of history. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply / copy throughput. `0` on an idle, caught-up pass. |
@@ -627,6 +706,11 @@ field to grep / alert on:
 | `copy.transient_retry` | WARN | a group's copy hit a row whose parent the target didn't have yet, and is being retried |
 | `table.cutover_to_streaming` | INFO | a group of tables finished its initial copy and switched to streaming |
 | `stream.pass_error` | WARN | a streaming pass failed and will be retried |
+| `index.dropped` | INFO | a plain target index was taken down for the initial copy; the message carries its full `CREATE INDEX` statement |
+| `index.kept` | WARN | a table keeps its indexes during the copy, and why(for example, the target role doesn't own it) |
+| `index.rebuild_started` / `index.rebuild_done` | INFO | the indexes taken down are being built again / are all back |
+| `index.built` | INFO | one index is built again, with how long it took and how many are back |
+| `index.build_failed` | WARN | an index build failed; it's tried again a minute later |
 | `retention.cap_approaching` | INFO, then WARN, then ERROR | delta backlog nearing the retention cap(escalates as it gets closer) |
 | `target.unreachable` / `target.recovered` | ERROR / INFO | target connectivity, cross-channel with the `target_up` gauge and the errored span |
 | `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
@@ -822,7 +906,16 @@ nothing, in this order:
 
    If a trigger were still there, `CASCADE` would drop it too, and that needs a heavy lock on the
    application's table; hence step 3 first.
-5. Clear the daemon's own progress records, on the database the `state_store` points at:
+5. If the target's indexes were taken down for a copy that didn't finish, put them back first,
+   since their saved definitions are in the state store that the next step drops:
+
+   ```sh
+   replicare indexes restore <config>
+   ```
+
+   `replicare status` shows whether any are still missing. Skip this when the target itself is
+   going to be rebuilt from scratch.
+6. Clear the daemon's own progress records, on the database the `state_store` points at:
 
    ```sql
    DROP SCHEMA replicare_state CASCADE;
@@ -981,6 +1074,11 @@ the target role needs `+ping +info +restore +del +scan +exists +module|list`. Bo
 
 > ⚠️ Watch out for `RESTORE`. It's `@dangerous`, and has to be granted explicitly with `+restore`,
 > or every apply fails loudly.
+
+Taking the target's plain indexes down for the initial copy, and building them again, needs
+ownership of each target table(or membership of the role that owns it). Without it the copy still
+runs, with those tables' indexes in place; see
+[Target indexes during the first copy](#target-indexes-during-the-first-copy).
 
 `reseed-sequences` needs one extra target grant beyond the DML set, and only on the node it's run
 against(a DR promotion step): Postgres `UPDATE` on each replicated table's owned sequence(or

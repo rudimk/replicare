@@ -4,6 +4,27 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.0]
+
+### Faster first copies on Postgres: target indexes taken down and built again
+
+- **On by default for Postgres syncs.** Just before each table's initial copy, `replicare` saves
+  the definitions of the target's plain indexes in the state store and drops them, so the copy
+  doesn't maintain every index row by row. Once every table is streaming, it builds them again
+  with `CREATE INDEX CONCURRENTLY`, one at a time and without blocking writes, indexes on linking
+  columns first, then refreshes each table's statistics. Primary keys, unique indexes and
+  indexes behind constraints are never touched.
+- **Safe by design:** a table the target role doesn't own keeps its indexes(with a warning);
+  never used on an active-active node; restart-safe at every step; each dropped index's full
+  `CREATE INDEX` statement is also logged. A reseed takes them down and builds them again too.
+- **Configurable** per sync with `defer_indexes: { enabled, maintenance_work_mem,
+  parallel_workers }`; `enabled: false` copies with the indexes in place, as before.
+- **Visible:** new metrics(`replicare_deferred_indexes`, `replicare_deferred_indexes_built`,
+  `replicare_index_build_info`, `replicare_index_build_phase_progress_ratio`), an "Index
+  rebuild" row on the Grafana dashboard, a line in `replicare status`, and `index.*` log events.
+- **New command:** `replicare indexes restore <config>` builds any still-missing indexes straight
+  away, for a sync that won't run again.
+
 ## [0.1.0] — first release
 
 The initial release: a complete, single-engine **Postgres → Postgres** data

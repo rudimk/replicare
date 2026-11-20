@@ -66,6 +66,19 @@ type Syncer struct {
 	// during streaming), bounded by how many pairs are available.
 	ApplyConcurrency int
 
+	// DeferIndexes takes the target's plain indexes down before each table's initial
+	// copy (and before a reseed's re-copy) and builds them again once the sync streams
+	// (CLAUDE.md §4.1 "deferred target indexes"). Never set on a cluster edge. Needs a
+	// Sink implementing engine.IndexDeferrer and a store implementing state.IndexStore;
+	// otherwise a no-op.
+	DeferIndexes bool
+	// IndexBuild tunes each index build's session (memory, parallel workers).
+	IndexBuild engine.IndexBuildOptions
+	// OpenSink opens a new connection to this target. The index rebuilder runs on two of
+	// its own (one builds, one reads progress), since a build can take hours and streaming
+	// keeps the existing ones busy. Nil disables the rebuilder.
+	OpenSink func(ctx context.Context) (engine.Sink, error)
+
 	// Heartbeat, if set, is called once per streaming iteration (after each pass,
 	// success or handled error) so an external liveness probe can tell a cycling
 	// loop from a wedged one (a hung query on a dropped socket). Optional; nil is a
@@ -90,6 +103,12 @@ type Syncer struct {
 	// lastSeqSync throttles continuous sequence syncing (SyncSequences): the per-table
 	// counter advance runs on a lazy interval, not every drain pass. Zero → due now.
 	lastSeqSync time.Time
+
+	// indexMu is held while index definitions are saved and dropped, and while one
+	// index builds, so a reseed never drops an index the rebuilder is building.
+	indexMu sync.Mutex
+	// indexKick wakes the rebuilder after a reseed has dropped indexes again.
+	indexKick chan struct{}
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
@@ -215,6 +234,10 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 	// fail; delegate the whole component to the engine's cycle-safe copier when it
 	// offers one (Postgres/MySQL). Acyclic components (and engines without a cyclic
 	// copier) take the normal chunked path.
+	//
+	// First, take the target's plain indexes down for the tables this run copies, before
+	// the size measurer starts (it shares the primary connection this uses).
+	s.deferIndexesForComponent(ctx, comp)
 	stopSizes := s.measureSizesWhileCopying(ctx)
 	s.recordEvent(ctx, state.Event{Sync: s.Name, Target: string(s.Target), Level: "INFO",
 		Event:   observability.EventCopyComponentStarted,

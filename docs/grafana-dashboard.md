@@ -72,6 +72,24 @@ column can't be emptied) jumps from 0 to done in one step. `replicare_rows_copie
 from 0 when the daemon restarts, and a restart re-copies whatever wasn't finished, so the
 percentage restarts with it.
 
+### Index rebuild
+
+On a Postgres sync, `replicare` takes the target's plain indexes down for the initial copy and
+builds them again once every table is streaming(see
+[Target indexes during the first copy](operations.md#target-indexes-during-the-first-copy)).
+This row follows that rebuild:
+
+| Panel | Query | Reading |
+|---|---|---|
+| Indexes built again | `replicare_deferred_indexes_built` / `replicare_deferred_indexes` | The share of the indexes taken down that are back. Empty when none were taken down |
+| Indexes still to build | `replicare_deferred_indexes - replicare_deferred_indexes_built` | How many are still missing; it should reach 0 not long after the copy |
+| Building now | `replicare_index_build_info` | The index being built, its table, and the stage its build is at. Blank when nothing is building |
+| Current stage progress | `replicare_index_build_phase_progress_ratio` | How far through that stage the build is. Sorting and waiting stages read 0% |
+
+Each build reads the table, sorts, writes the index, then reads the table a second time to pick
+up rows written meanwhile, so on a big table each index takes a while, and "Current stage
+progress" goes round once per stage.
+
 ### Source & target
 
 The controller checks both endpoints, and emits their reachability along with two size

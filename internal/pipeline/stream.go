@@ -26,6 +26,9 @@ import (
 // keeps re-firing until the operator fixes the cause — it never silently aborts
 // the sync. Only ctx cancellation ends the loop.
 func (s *Syncer) Stream(ctx context.Context) error {
+	// Build again any target indexes taken down for the initial copy, in the background
+	// on connections of its own, while changes stream.
+	defer s.startIndexRebuilder(ctx)()
 	interval := s.DrainInterval
 	if interval <= 0 {
 		interval = time.Second
@@ -179,11 +182,14 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	}
 	if needReseed {
 		s.Tel.IncReseed(s.Name, s.Target)
+		// A reseed is a full re-copy: its BeforeCopy hook takes the plain indexes down once
+		// the tables are emptied, and they are built again once it is done.
 		for _, comp := range s.Components {
 			if err := reseed.Run(ctx, s.reseedDeps(), s.Name, s.Target, comp.Order, s.ChunkOpts); err != nil {
-				return err
+				return err // the next pass retries the reseed; the rebuild waits for it
 			}
 		}
+		s.kickIndexRebuild()
 	}
 	return nil
 }
@@ -333,7 +339,7 @@ func (s *Syncer) reportDrainFailure(ctx context.Context, cause error) {
 
 // reseedDeps builds the reseed orchestration dependencies from the Syncer.
 func (s *Syncer) reseedDeps() reseed.Deps {
-	return reseed.Deps{Src: s.Source, Sink: s.Sink, Workers: s.Workers, Store: s.Store}
+	return reseed.Deps{Src: s.Source, Sink: s.Sink, Workers: s.Workers, Store: s.Store, BeforeCopy: s.deferIndexes}
 }
 
 // log records a streaming-loop event durably (best-effort) so operators see

@@ -32,6 +32,18 @@ type Report struct {
 	Events      []EventView   `json:"recent_events"`
 	GeneratedAt time.Time     `json:"generated_at"`
 	LiveError   string        `json:"live_error,omitempty"`
+	// Indexes is, per target, the plain indexes taken down for the initial copy and
+	// how many are built again (empty when none were taken down).
+	Indexes []IndexStatus `json:"deferred_indexes,omitempty"`
+}
+
+// IndexStatus counts one target's deferred indexes. Pending lists the ones not yet
+// built again, in the order they will be built.
+type IndexStatus struct {
+	Target  string   `json:"target"`
+	Total   int      `json:"total"`
+	Built   int      `json:"built"`
+	Pending []string `json:"pending,omitempty"`
 }
 
 // TableStatus is one table's initial-copy state plus its per-target streaming
@@ -175,7 +187,37 @@ func (r *Reporter) Report(ctx context.Context, sync string) (Report, error) {
 		})
 	}
 
-	return Report{Sync: sync, Tables: tables, Events: views, GeneratedAt: now}, nil
+	rep := Report{Sync: sync, Tables: tables, Events: views, GeneratedAt: now}
+	if is, ok := r.reader.(state.IndexStore); ok {
+		saved, err := is.ListIndexes(ctx, sync)
+		if err != nil {
+			return Report{}, err
+		}
+		rep.Indexes = indexStatuses(saved)
+	}
+	return rep, nil
+}
+
+// indexStatuses counts saved indexes per target, in the store's order.
+func indexStatuses(saved []state.SavedIndex) []IndexStatus {
+	var out []IndexStatus
+	at := map[string]int{}
+	for _, si := range saved {
+		tgt := string(si.Target)
+		i, ok := at[tgt]
+		if !ok {
+			i = len(out)
+			at[tgt] = i
+			out = append(out, IndexStatus{Target: tgt})
+		}
+		out[i].Total++
+		if si.Built {
+			out[i].Built++
+		} else {
+			out[i].Pending = append(out[i].Pending, si.Index.Table.String()+"."+si.Index.Name)
+		}
+	}
+	return out
 }
 
 // tableName renders a TableRef for display, empty when unset (sync-level events).

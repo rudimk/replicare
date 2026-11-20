@@ -184,6 +184,29 @@ If the target has no cursors yet(because `reseed` was run before the sync's firs
 there's nothing to flag. `replicare` reports that the target will do a full copy on its first
 run anyway, and exits `0`. That's expected, and isn't a failure.
 
+## `indexes restore <config> [--sync <name>] [--target <name>]`
+
+```sh
+replicare indexes restore config.yml                          # every sync in the config
+replicare indexes restore config.yml --sync app-to-warehouse --target warehouse
+```
+
+This builds again, straight away, every target index `replicare` took down for an initial copy
+and hasn't built yet(see
+[target indexes during the first copy](operations.md#target-indexes-during-the-first-copy)). The
+daemon does this by itself once a sync is streaming, so the command is for a sync that won't run
+again: one abandoned partway through its copy, or one whose state store is about to be dropped,
+which is where the saved definitions live. It builds one index at a time without blocking writes,
+prints a line as each one finishes, and uses the sync's `defer_indexes` build settings.
+
+It refuses a sync that a running daemon owns, since the daemon builds these itself and two builds
+of the same index would collide; stop the daemon first(on Kubernetes, scale it to 0 replicas).
+Ctrl-C stops it partway, safely: the index being built is left unusable, and the next run drops it
+and builds it again.
+
+The exit codes are `0` when every index is built(or there was nothing to build), `1` when some
+couldn't be built or a daemon owns the sync, and `2` for a usage or config error.
+
 ## `reseed-sequences <config> --sync <name> [--target <name>] [--dry-run]`
 
 ```sh

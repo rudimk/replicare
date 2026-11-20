@@ -108,6 +108,45 @@ type Sync struct {
 	// it adds a steady-state target privilege: Postgres UPDATE on each owned sequence,
 	// MySQL ALTER on each table (the same DR-only grant the command needs).
 	SyncSequences *bool `yaml:"sync_sequences"`
+	// DeferIndexes takes the target's plain indexes down before a table's initial copy
+	// and builds them again once the whole sync is streaming (CLAUDE.md §4.1 "deferred
+	// target indexes"). On by default for Postgres syncs; see DeferIndexes.
+	DeferIndexes DeferIndexes `yaml:"defer_indexes"`
+}
+
+// DeferIndexes configures dropping a Postgres target's plain indexes for the initial
+// copy and rebuilding them afterwards. Primary keys, unique indexes and indexes
+// behind constraints are never touched, nor the indexes of a table the target role
+// does not own.
+type DeferIndexes struct {
+	// Enabled: unset or true → on for a Postgres sync (the default); false → the copy
+	// runs with the target's indexes in place, as before. It is off, whatever is set,
+	// for a target that is also an active-active cluster member (a live node), and
+	// setting it true there, or on a non-Postgres sync, is refused at load.
+	Enabled *bool `yaml:"enabled"`
+	// MaintenanceWorkMem is the memory each index build may sort in (Postgres
+	// maintenance_work_mem, e.g. "1GB"). Empty → the target server's own setting.
+	MaintenanceWorkMem string `yaml:"maintenance_work_mem"`
+	// ParallelWorkers is how many extra workers each build may use (Postgres
+	// max_parallel_maintenance_workers). 0 → the target server's own setting.
+	ParallelWorkers int `yaml:"parallel_workers"`
+}
+
+// DefersIndexes reports whether this sync drops and rebuilds the plain indexes of
+// the named target around the initial copy: on by default for Postgres, never for a
+// target that is also an active-active cluster member.
+func (c *Config) DefersIndexes(s *Sync, target string) bool {
+	if s.DeferIndexes.Enabled != nil && !*s.DeferIndexes.Enabled {
+		return false
+	}
+	tgt := c.Targets[target]
+	if tgt == nil || tgt.Engine != "postgres" {
+		return false
+	}
+	if id := connIdentity(tgt); id != "" && c.clusterMemberIdentities()[id] {
+		return false
+	}
+	return true
 }
 
 // IsEnabled reports whether the sync should run. The zero/unset value is enabled, so
@@ -392,6 +431,24 @@ func (c *Config) Validate() error {
 			for _, ref := range s.Targets {
 				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
 					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/active-active.html)", s.Name, ref, id)
+				}
+			}
+		}
+
+		// Deferred target indexes: Postgres only, never on a live mesh node. Unset is
+		// resolved per target by DefersIndexes; only an explicit true is refused here.
+		di := s.DeferIndexes
+		if di.ParallelWorkers < 0 {
+			return fmt.Errorf("sync %q: defer_indexes.parallel_workers must be >= 0", s.Name)
+		}
+		if di.Enabled != nil && *di.Enabled {
+			if src.Engine != "postgres" {
+				return fmt.Errorf("sync %q: defer_indexes is only supported for postgres syncs (this one is %q)", s.Name, src.Engine)
+			}
+			members := c.clusterMemberIdentities()
+			for _, ref := range s.Targets {
+				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
+					return fmt.Errorf("sync %q: defer_indexes cannot be enabled when target %q (%s) is also an active-active cluster member — that node serves live traffic and needs its indexes; leave it unset or set it to false", s.Name, ref, id)
 				}
 			}
 		}

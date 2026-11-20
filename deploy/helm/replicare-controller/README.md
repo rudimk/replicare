@@ -93,6 +93,27 @@ behaviour is described under
 [Pausing a sync](https://replicare.rudimk.com/configuration.html#pausing-a-sync-enabled) in the
 configuration reference.
 
+### Target indexes during the first copy
+
+On a Postgres sync, `replicare` takes the target's plain indexes down for the initial copy and
+builds them again once every table is streaming, which makes a large first copy much faster. It's
+on by default. To turn it off for a sync, or to give the rebuild more memory, set `defer_indexes`
+on that sync's entry:
+
+```yaml
+config:
+  syncs:
+    - name: pg-pipeline
+      defer_indexes:
+        enabled: false             # copy with the target's indexes in place
+        # maintenance_work_mem: 2GB  # or, with it on: memory per index build
+        # parallel_workers: 4        #               extra workers per build
+```
+
+With `--set`, that's `--set 'config.syncs[0].defer_indexes.enabled=false'`, with the same caveat
+about array indexes as above. The full behaviour is described under
+[Target indexes during the first copy](https://replicare.rudimk.com/operations.html#target-indexes-during-the-first-copy).
+
 ### Keeping secrets out of the config
 
 Secrets stay out of `config` through `${VAR}` placeholders(`replicare` expands env vars in

@@ -213,6 +213,12 @@ On the target, the role needs just `SELECT, INSERT, UPDATE, DELETE` on the pre-e
 tables. If the StateStore lives on the target database, also grant it `CREATE` on that
 database(or pre-create the `replicare_state` schema owned by the role).
 
+Taking the target's plain indexes down for the initial copy, and building them again
+afterwards, needs ownership of each target table, or membership of the role that owns it. That
+holds when `replicare` connects as the same user that created the target's tables. A table it
+doesn't own keeps its indexes and is copied more slowly, with a warning; nothing fails. See
+[Target indexes during the first copy](operations.md#target-indexes-during-the-first-copy).
+
 ## Configuration
 
 A Postgres sync is the engine-neutral envelope, with a typed `postgres:` block for each endpoint.

@@ -270,9 +270,18 @@ of rows a second can drop to a few hundred.
 
 The way round it is to drop the target's plain(non-unique) indexes before the copy and rebuild
 them once it's finished. Primary keys and unique indexes stay, since `replicare` needs them to
-apply changes. Nothing here touches the source, and it's all plain SQL, run with `psql` as an
-admin on the target. `\gexec` is a `psql` feature that runs each row of a query's result as a
-statement.
+apply changes.
+
+On Postgres, `replicare` does this by itself: it takes each table's plain indexes down just
+before copying it, and builds them all again once every table is streaming, with progress on the
+dashboard and in `replicare status`. It's on by default; see
+[Target indexes during the first copy](operations.md#target-indexes-during-the-first-copy). The
+steps below do the same by hand, for when that's turned off(`defer_indexes: { enabled: false }`),
+or for tables the target role doesn't own, which `replicare` leaves alone. The monitoring queries
+in [Watching the rebuild](#watching-the-rebuild) work for either.
+
+Nothing here touches the source, and it's all plain SQL, run with `psql` as an admin on the
+target. `\gexec` is a `psql` feature that runs each row of a query's result as a statement.
 
 ### 1. Save the index definitions
 

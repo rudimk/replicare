@@ -318,8 +318,9 @@ the default** for portability across very different PG versions and custom types
 brittle across major-version gaps).
 
 **Target load (decision: empty-target direct COPY, delete-range resume).**
-- We **never touch the user's target indexes/constraints** (not our schema; index-maintenance
-  cost during load is accepted and documented).
+- We **never touch the user's target constraints**, primary keys or unique indexes. **Plain
+  (non-unique, constraint-free) target indexes are the one exception — see "Deferred target
+  indexes" below** (decision reversed for plain indexes in 0.6.0, from a production migration).
 - **Fast path:** direct `COPY FROM STDIN` per chunk; mark the chunk complete in the StateStore.
   **Resume without staging:** for any chunk not marked complete, `DELETE FROM target WHERE <pk
   range>` then re-`COPY`. Safe because during a table's initial-copy phase the target table is
@@ -375,6 +376,39 @@ brittle across major-version gaps).
   another new row of the same table; the self-FK is checked at statement end). Only keyless parents
   still use the whole re-copy. And a 40P01 anywhere in a chunk's load-or-fix loop
   (`copyRangeWithParentRetry`, `retryOnFK`) backs off and retries instead of failing the copy.
+
+**Deferred target indexes (decision, from a production migration; Postgres, on by default).** A
+large first copy into an indexed target spends most of its time maintaining every index row by row
+(disk-bound once the indexes outgrow memory). So a Postgres sync takes each table's **plain**
+indexes down **just before that table's copy** and builds them again **once the whole sync (per
+target) is streaming**:
+- **Scope:** plain indexes only (not PK, not unique, not exclusion, not behind any constraint, valid).
+  **Never** on a target that is also an active-active member (unset → off there; explicit `true` →
+  refused at load), never for a table the role doesn't own (`pg_has_role(owner,'USAGE')`; kept +
+  `index.kept` WARN, copy just slower), never partitioned tables/partition indexes. A table is
+  deferred whole or not at all.
+- **Durability:** the definition (`pg_get_indexdef`, tablespace, comment / CLUSTER / per-column
+  statistics as follow-up statements, link flag) is written to the **state store**
+  (`replicare_state.deferred_indexes`, v4) **before** the drop, and also logged in full
+  (`index.dropped` carries the `CREATE INDEX` text) so a lost state store loses nothing.
+- **Drop** = plain `DROP INDEX` with the same 2s `lock_timeout` + backoff + retry as capture install
+  (never queue the app); a failed drop just leaves the index (copy slower).
+- **Rebuild** = background goroutine started in `Syncer.Stream`, on **two dedicated target
+  connections** (`Syncer.OpenSink`; one builds, one polls `pg_stat_progress_create_index`), one
+  index at a time, **link-column indexes first** (FK child deletes), `CREATE INDEX CONCURRENTLY`
+  with `statement_timeout=0`/`lock_timeout=0` and optional `maintenance_work_mem` /
+  `max_parallel_maintenance_workers`; invalid leftovers dropped first; a valid same-name index =
+  done; `ANALYZE` per table when its last index is back; failures retried after a minute. It runs
+  whenever unbuilt rows exist, **even if the setting was since turned off**. A reseed defers again
+  and kicks the rebuilder after; `Syncer.indexMu` keeps a drop from racing a build.
+- **Way out:** `replicare indexes restore <config>` (refuses while a daemon holds the sync's lock);
+  `status` warns while any are missing; the blank-slate runbook restores before dropping the store.
+- **Observable:** `replicare_deferred_indexes{,_built}`, `replicare_index_build_info`,
+  `replicare_index_build_phase_progress_ratio`, `index.*` events, dashboard "Index rebuild" row.
+- **Privilege:** needs table **ownership** on the target (or membership of the owner role);
+  documented as optional (§12). Config: neutral `defer_indexes: {enabled, maintenance_work_mem,
+  parallel_workers}` per sync; Postgres-only (explicit `true` on another engine is refused). MySQL
+  can implement the same `engine.IndexDeferrer` later.
 
 **FK components (decision: parents-before-children, direct).** Within a component, copy tables in
 **topo order (parents first)** so live target constraints hold during load; **chunks within a
@@ -838,6 +872,9 @@ without changing the single-static-binary distribution.
 
 **Target (Postgres):**
 - `SELECT, INSERT, UPDATE, DELETE` on the (pre-existing) target tables.
+- **Optional, for deferred target indexes (on by default, §4.1):** ownership of each target table
+  (or membership of the owning role) — true when replicare connects as the user that created the
+  target schema. Without it those tables simply keep their indexes during the copy (warned).
 - **DR extra (for `reseed-sequences`, and continuously if `sync_sequences: true`):** `UPDATE` on
   each replicated table's owned sequence (or ownership). The counter (sequence `last_value` / MySQL
   `AUTO_INCREMENT`) is schema-object state the data-only path does not replicate (§7), so a promoted
@@ -904,7 +941,8 @@ invasive.
 | Per-component apply | **Per-table committed txns** are the default so a parent advances through its own delta queue even when a cross-batch child transiently can't apply — required for non-DEFERRABLE target FKs, where a single component txn would roll the parent back with the child and livelock under PK-change cascades (§8.1). **Acyclic** component: per table, two FK-ordered phases (all upserts parent→child, then all deletes child→parent). **Cyclic w/ nullable cycle FKs** (Postgres, the common case): per table, **NULL-then-fill** three phases (upsert cyclic cols NULL parent→child, delete child→parent, then fill cyclic cols) — converges under churn with **no `DEFERRABLE`** requirement (`NullFillCyclicSink`/`CyclicFiller`). **Single-component txn** kept only for **all-DEFERRABLE** cyclic (Postgres `SET CONSTRAINTS ALL DEFERRED`) and **MySQL** cyclic (`FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify). Confirm per table only after all its phases; transient FK → stays dirty, retried. End-of-pass consistent, bounded by churn/pass. Initial copy is chunked (not atomic). |
 | Copy chunking | **Keyset PK-range default** (balanced ranges via index-only boundary scan; composite/UUID/text keys OK), **ctid/block-range fallback**; native partitions copied per-partition. See §4.1. |
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
-| Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target indexes/constraints. |
+| Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target constraints / PK / unique indexes. |
+| Deferred target indexes | **Postgres, on by default** (`defer_indexes`, per sync): plain target indexes are saved to the state store (+ logged in full) and dropped just before each table's copy, then rebuilt `CONCURRENTLY` one at a time (link columns first, then `ANALYZE`) on dedicated connections once the whole sync streams. Owned tables only; never on a mesh member; restart-safe; reseeds too; `replicare indexes restore` as the way out. See §4.1. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
 | Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass** (except a link column in a unique index where empty values collide — `NULLS NOT DISTINCT`, expression or filtered unique, detected from source+target indexes: a **self-reference** keeps it real and loads the table in **one statement**, existing rows first, and streaming keeps it real too; a **cross-table loop** is **blocked at pre-flight** → make it `DEFERRABLE`; never a schema change); **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |

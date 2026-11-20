@@ -24,7 +24,33 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		return nil, nil, fmt.Errorf("unknown source %q or target %q", sync.Source, targetName)
 	}
 	sel := engine.Selection{Include: sync.Include, Exclude: sync.Exclude}
-	return d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false, "", "", sync.SyncsSequences())
+	syncer, cleanup, err := d.buildSyncerCore(ctx, sync.Name, srcEp, tgtEp, sel, sync.Tuning, targetName, false, "", "", sync.SyncsSequences())
+	if err != nil {
+		return nil, nil, err
+	}
+	// Deferred target indexes (one-way syncs only; never a cluster edge). The rebuilder
+	// is wired either way, so indexes dropped by an earlier run are still put back after
+	// the setting is turned off.
+	syncer.DeferIndexes = d.cfg.DefersIndexes(sync, targetName)
+	syncer.IndexBuild = engine.IndexBuildOptions{
+		MaintenanceWorkMem: sync.DeferIndexes.MaintenanceWorkMem,
+		ParallelWorkers:    sync.DeferIndexes.ParallelWorkers,
+	}
+	syncer.OpenSink = func(ctx context.Context) (engine.Sink, error) {
+		eng, err := engine.Get(tgtEp.Engine)
+		if err != nil {
+			return nil, err
+		}
+		s, err := eng.NewSink(tgtEp.Conn.ConnConfig())
+		if err != nil {
+			return nil, err
+		}
+		if err := s.Connect(ctx); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	return syncer, cleanup, nil
 }
 
 // buildClusterEdge constructs a connected Syncer for one directed edge of an
