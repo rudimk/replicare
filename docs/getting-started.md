@@ -400,6 +400,41 @@ Autovacuum steps aside by itself when a build needs its table(except a run to pr
 transaction ID wraparound, which is rare), and `replicare`'s own transactions are short, so a long
 wait is usually an application session left open in a transaction.
 
+#### How many are done, and how many are left
+
+The query above shows only the index being built right now. This counts the whole rebuild:
+
+```sql
+SELECT count(*) FILTER (WHERE x.indisvalid)                                                 AS done,
+       count(*) FILTER (WHERE i.oid IS NOT NULL AND NOT x.indisvalid AND p.pid IS NOT NULL) AS building_now,
+       count(*) FILTER (WHERE i.oid IS NOT NULL AND NOT x.indisvalid AND p.pid IS NULL)     AS broken,
+       count(*) FILTER (WHERE i.oid IS NULL)                                                AS not_started,
+       count(*)                                                                             AS total
+FROM index_backup.dropped d
+LEFT JOIN pg_class i ON i.relname = d.index_name AND i.relnamespace = 'public'::regnamespace
+LEFT JOIN pg_index x ON x.indexrelid = i.oid
+LEFT JOIN pg_stat_progress_create_index p ON p.index_relid = i.oid;
+```
+
+| Column | Meaning |
+|---|---|
+| `done` | Built and in use |
+| `building_now` | Being built right now: `1` while the rebuild runs |
+| `broken` | A build that was interrupted. It should be `0`; any left over are fixed in step 5, once the rebuild has finished |
+| `not_started` | Still waiting their turn |
+
+And this lists the ones still waiting, in the order the rebuild will get to them:
+
+```sql
+SELECT d.table_name, d.index_name
+FROM index_backup.dropped d
+LEFT JOIN pg_class i ON i.relname = d.index_name AND i.relnamespace = 'public'::regnamespace
+WHERE i.oid IS NULL
+ORDER BY (d.index_name ILIKE '%id_idx') DESC, d.table_name, d.index_name;
+```
+
+The indexes on the biggest tables are the slow ones; the rest usually go much faster.
+
 ### 5. Check every index is back and usable
 
 An index build that's interrupted leaves the index behind marked invalid: unused by queries but
