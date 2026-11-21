@@ -50,3 +50,16 @@ func TestBeatDisabled(t *testing.T) {
 		t.Fatalf("threshold<=0 must disable staleness, got %q", k)
 	}
 }
+
+// TestBeatIgnoresUnregisteredMarks: a mark before Register (progress reported during
+// bring-up) must not start tracking the key, or a long initial copy would read as stuck.
+func TestBeatIgnoresUnregisteredMarks(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	b := New(30 * time.Second)
+	b.now = func() time.Time { return now }
+	b.Mark("s1/dst")
+	now = now.Add(time.Hour)
+	if k, stale := b.Stale(); stale {
+		t.Fatalf("a key marked but never registered was tracked: %q", k)
+	}
+}

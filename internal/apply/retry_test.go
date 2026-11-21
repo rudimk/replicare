@@ -3,6 +3,7 @@ package apply
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,5 +248,47 @@ func TestComponentDeferrableCycle(t *testing.T) {
 	}
 	if na != 0 || nb != 0 {
 		t.Errorf("target rows after delete a=%d b=%d; want 0, 0", na, nb)
+	}
+}
+
+// TestRetryingDrainReportsProgress: a drain that keeps retrying a transient FK
+// violation still reports progress on every attempt (both databases answered), so the
+// streaming liveness check sees a slow but moving pass rather than a stuck one; and a
+// drain that confirms tables reports progress as they commit.
+func TestRetryingDrainReportsProgress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f := newRetryFixture(t, ctx)
+
+	held, err := pgx.Connect(ctx, srcURL())
+	if err != nil {
+		t.Fatalf("connect held session: %v", err)
+	}
+	defer held.Close(context.Background())
+	exec(t, ctx, held, "BEGIN")
+	exec(t, ctx, held, "INSERT INTO rc_it.parent VALUES (1,'p1')")
+	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.child VALUES (1,1,'c1')")
+
+	var beats atomic.Int64
+	pctx := WithProgress(ctx, func() { beats.Add(1) })
+	if _, err := DrainComponentRetrying(pctx, f.src, f.sink, f.topo, f.target, 100, false, fastRetry); err == nil {
+		t.Fatal("expected a halt while the parent is uncommitted")
+	}
+	if got := beats.Load(); got < int64(fastRetry.MaxAttempts) {
+		t.Fatalf("progress reported %d times over %d failed attempts, want at least one per attempt", got, fastRetry.MaxAttempts)
+	}
+
+	exec(t, ctx, held, "COMMIT")
+	before := beats.Load()
+	if _, err := DrainComponentRetrying(pctx, f.src, f.sink, f.topo, f.target, 100, false, fastRetry); err != nil {
+		t.Fatalf("drain after the parent landed: %v", err)
+	}
+	if got := beats.Load() - before; got < 2 {
+		t.Errorf("a successful drain of two tables reported progress %d times, want at least 2", got)
+	}
+
+	// No signal installed: the drain runs exactly as before.
+	if _, err := DrainComponentRetrying(ctx, f.src, f.sink, f.topo, f.target, 100, false, fastRetry); err != nil {
+		t.Fatalf("drain without a progress signal: %v", err)
 	}
 }

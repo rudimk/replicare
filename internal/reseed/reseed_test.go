@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -223,9 +224,16 @@ func TestReseedConvergenceUnderWrites(t *testing.T) {
 	// Source keeps changing during the reseed window.
 	exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.orders SELECT g, 'v'||g FROM generate_series(6,7) g")
 
-	// Recover the target: re-copy current source, cut back to streaming.
-	if err := Run(ctx, f.deps, f.syncName, "dst", comp, engine.ChunkOptions{TargetRows: 2}); err != nil {
+	// Recover the target: re-copy current source, cut back to streaming. A reseed runs
+	// inside a streaming pass, so it reports progress for the liveness check as it goes.
+	var beats atomic.Int64 // chunks may copy on several workers at once
+	deps := f.deps
+	deps.Progress = func() { beats.Add(1) }
+	if err := Run(ctx, deps, f.syncName, "dst", comp, engine.ChunkOptions{TargetRows: 2}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+	if n := beats.Load(); n < 2 {
+		t.Errorf("reseed reported progress %d times, want at least one per table cleared and per chunk copied", n)
 	}
 	cur, _ = f.deps.Store.LoadCursor(ctx, f.syncName, "dst", ref)
 	if cur.NeedsReseed || cur.Phase != state.PhaseStreaming {

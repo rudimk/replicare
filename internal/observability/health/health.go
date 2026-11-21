@@ -40,11 +40,16 @@ func (b *Beat) Register(key string) {
 	b.last[key] = b.now()
 }
 
-// Mark records that a key just completed a streaming iteration.
+// Mark records that a key's streaming loop just made progress: a pass finished, or
+// work inside one completed. A key that is not registered yet is ignored, so progress
+// reported before streaming begins (during bring-up) can never start the clock on a
+// long initial copy.
 func (b *Beat) Mark(key string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.last[key] = b.now()
+	if _, ok := b.last[key]; ok {
+		b.last[key] = b.now()
+	}
 }
 
 // Stale returns the first key (deterministically ordered) that has not iterated

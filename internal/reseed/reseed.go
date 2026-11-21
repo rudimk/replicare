@@ -42,6 +42,16 @@ type Deps struct {
 	// earlier, since emptying a parent table checks every child for references, which
 	// is far slower without the child's index on the linking column.
 	BeforeCopy func(ctx context.Context, tables []engine.TableRef)
+	// Progress, if set, is called as the reseed's work completes (each table emptied,
+	// each chunk re-copied). A reseed runs inside a streaming pass and can take as long
+	// as an initial copy, so the streaming liveness check needs to see it moving.
+	Progress func()
+}
+
+func (d Deps) progress() {
+	if d.Progress != nil {
+		d.Progress()
+	}
 }
 
 func (d Deps) logger() *slog.Logger {
@@ -146,6 +156,7 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 		if err := d.Sink.DeleteRange(ctx, tablesTopo[i], nil, nil); err != nil {
 			return fmt.Errorf("reseed %s: clear target %s: %w", target, tablesTopo[i], err)
 		}
+		d.progress()
 	}
 	// 2. Reset copy progress so the re-copy runs from scratch into the now-empty
 	//    target (a fresh watermark makes the driver plan every chunk and direct
@@ -159,7 +170,8 @@ func Run(ctx context.Context, d Deps, syncName string, target engine.TargetID,
 		d.BeforeCopy(ctx, tablesTopo)
 	}
 	// 3. Re-copy parents-first (chunks parallel across the workers).
-	if err := copy.Component(ctx, d.Workers, d.Store, syncName, target, tablesTopo, opts); err != nil {
+	if err := copy.Component(ctx, d.Workers, d.Store, syncName, target, tablesTopo, opts,
+		copy.WithProgress(func(engine.TableRef, int64) { d.progress() })); err != nil {
 		return fmt.Errorf("reseed %s: re-copy: %w", target, err)
 	}
 	// 4. Cut back to streaming: clear needs-reseed and set phase. The resumed

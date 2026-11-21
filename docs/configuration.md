@@ -51,15 +51,20 @@ and [Active-active replication](active-active.md).
 | `metrics_addr` | listen addr, e.g. `:9090` | off | serves Prometheus `/metrics` |
 | `status_addr` | listen addr, e.g. `:8080` | off | serves `/status`, `/healthz`, and `/metrics` |
 | `otlp_endpoint` | host:port, e.g. `otel:4317` | off | exports OTel traces to an OTLP/gRPC collector |
-| `stall_timeout` | duration(`2m`, `0`, negative) | `2m` | how long a streaming loop may go without completing a pass before `/healthz` reports unhealthy(so Kubernetes restarts a wedged pod). It has to be longer than the slowest drain pass. Unset / `0` means `2m`; a negative value disables the check |
+| `stall_timeout` | duration(`2m`, `0`, negative) | `2m` | how long a streaming loop may go without making progress before `/healthz` reports unhealthy(so Kubernetes restarts a wedged pod). Progress is any step of work finishing, not only a whole pass, so it has to be longer than the slowest single step(see below). Unset / `0` means `2m`; a negative value disables the check |
 
 Leaving an address empty disables that endpoint. When `metrics_addr` and `status_addr` differ,
 `/metrics` is served on both.
 
 `/healthz` reflects streaming liveness, and not target reachability. A loop that's still
 cycling - even one that's retrying against a down target - stays healthy; only a loop that
-stops completing passes(say, a query hung on a dropped socket) trips `stall_timeout` and fails
-the probe. The daemon also reconnects a dropped source / target connection on its own between
+stops making progress(say, a query hung on a dropped socket) trips `stall_timeout` and fails
+the probe. Progress is counted as work finishes inside a pass, not only at its end: each table's
+changes committing on the target, each attempt at a group of linked tables(even one that hit a
+row whose parent hasn't arrived yet and will be retried), and, during a reseed, each table
+emptied and each chunk copied. So a long pass on a busy source stays healthy as long as it keeps
+moving, and `stall_timeout` only has to be longer than the slowest single step: applying one
+batch to one table, or emptying the largest table during a reseed. The daemon also reconnects a dropped source / target connection on its own between
 passes, so a transient blip recovers without a restart, and the probe is only there as the
 backstop for a true wedge.
 

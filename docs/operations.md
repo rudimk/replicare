@@ -1039,9 +1039,12 @@ returns. Recovery shows up as a `stream.reconnected` event in `/status` and the 
 timeout caught). It's deliberately *not* target reachability; a loop that keeps cycling, including
 one correctly retrying against a down target, stays healthy, since that state shows up in
 `replicare_target_up` and the backlog metrics instead. The probe only fails when a streaming loop
-completes no pass within `observability.stall_timeout`(default `2m`), so Kubernetes restarts a pod
-whose loop has stopped iterating. Set `stall_timeout` above the slowest expected drain pass(a large
-`drain_batch` on a slow target lengthens a pass); a negative value disables the check. Liveness
+makes no progress within `observability.stall_timeout`(default `2m`), so Kubernetes restarts a pod
+whose loop has stopped moving. Progress counts as work finishes inside a pass(each table's changes
+committing, each retry of a group of linked tables, each table emptied and chunk copied during a
+reseed), so a long pass on a busy source isn't mistaken for a stuck one. Set `stall_timeout` above
+the slowest single step: applying one `drain_batch` to one table on a slow target, or emptying the
+largest table during a reseed; a negative value disables the check. Liveness
 tracking only starts once a sync reaches streaming, so a long initial copy is never mistaken for a
 wedge.
 

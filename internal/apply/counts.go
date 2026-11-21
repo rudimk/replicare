@@ -45,6 +45,8 @@ func WithAppliedCounts(ctx context.Context) (context.Context, func() map[engine.
 // ctx, if one is installed (a no-op otherwise, and a no-op for n==0). It is called at
 // each drain confirm point, right where the pass's running total is incremented.
 func recordApplied(ctx context.Context, t engine.TableRef, n int) {
+	// Every confirm point is also a sign the drain is moving (liveness; see progress.go).
+	reportProgress(ctx)
 	if n == 0 {
 		return
 	}
