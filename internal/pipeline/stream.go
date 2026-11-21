@@ -72,6 +72,9 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// Install a pass-scoped accumulator so the drain records per-table confirmed-consumed
 	// counts (the "rows last synced" status signal) with no change to the drain itself.
 	ctx, readApplied := apply.WithAppliedCounts(ctx)
+	// Liveness: mark the heartbeat as work completes inside the pass, not only at its end,
+	// so a long but moving pass never reads as stuck (apply/progress.go).
+	ctx = apply.WithProgress(ctx, s.Heartbeat)
 
 	var drainErr error
 	var consumed int
@@ -339,7 +342,11 @@ func (s *Syncer) reportDrainFailure(ctx context.Context, cause error) {
 
 // reseedDeps builds the reseed orchestration dependencies from the Syncer.
 func (s *Syncer) reseedDeps() reseed.Deps {
-	return reseed.Deps{Src: s.Source, Sink: s.Sink, Workers: s.Workers, Store: s.Store, BeforeCopy: s.deferIndexes}
+	return reseed.Deps{Src: s.Source, Sink: s.Sink, Workers: s.Workers, Store: s.Store,
+		BeforeCopy: func(ctx context.Context, tables []engine.TableRef) {
+			s.deferIndexesWith(ctx, tables, s.Heartbeat)
+		},
+		Progress: s.Heartbeat}
 }
 
 // log records a streaming-loop event durably (best-effort) so operators see

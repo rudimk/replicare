@@ -51,10 +51,11 @@ type Observability struct {
 	MetricsAddr  string `yaml:"metrics_addr"`  // Prometheus /metrics listen addr, e.g. ":9090"
 	StatusAddr   string `yaml:"status_addr"`   // health/status HTTP API listen addr
 	OTLPEndpoint string `yaml:"otlp_endpoint"` // OTLP traces/metrics endpoint
-	// StallTimeout is how long a sync's streaming loop may go without completing an
-	// iteration before /healthz reports unhealthy (so Kubernetes restarts a wedged
-	// pod). It must exceed the slowest expected drain pass. Unset/0 = default 2m; a
-	// negative value disables the staleness check.
+	// StallTimeout is how long a sync's streaming loop may go without making progress
+	// (a pass, or a step of work inside one: a table applied, a component attempt, a
+	// reseed chunk) before /healthz reports unhealthy (so Kubernetes restarts a wedged
+	// pod). It must exceed the slowest single step. Unset/0 = default 2m; a negative
+	// value disables the staleness check.
 	StallTimeout Duration `yaml:"stall_timeout"`
 }
 

@@ -61,6 +61,9 @@ func DrainComponentRetryingPool(ctx context.Context, pool []Conn, concurrency in
 	for attempt := 1; attempt <= policy.MaxAttempts; attempt++ {
 		n, err := DrainComponentPool(ctx, pool, concurrency, tablesTopoOrder, target, batch, cyclic)
 		total += n
+		// The attempt returned, so both databases answered: the drain is moving, even when
+		// it is about to back off and retry a transient FK violation (see progress.go).
+		reportProgress(ctx)
 		if err == nil {
 			return total, nil
 		}

@@ -79,10 +79,12 @@ type Syncer struct {
 	// keeps the existing ones busy. Nil disables the rebuilder.
 	OpenSink func(ctx context.Context) (engine.Sink, error)
 
-	// Heartbeat, if set, is called once per streaming iteration (after each pass,
-	// success or handled error) so an external liveness probe can tell a cycling
-	// loop from a wedged one (a hung query on a dropped socket). Optional; nil is a
-	// no-op.
+	// Heartbeat, if set, is called whenever streaming makes progress — after each pass
+	// (success or handled error), and inside a pass as work completes (a table's apply
+	// committing, a component attempt returning, a reseed's table emptied or chunk
+	// copied) — so an external liveness probe can tell a slow but moving loop from a
+	// wedged one (a hung query on a dropped socket). Must be safe for concurrent use
+	// (pooled applies and copy workers call it). Optional; nil is a no-op.
 	Heartbeat func()
 
 	// sweepCursors holds the per-unit target-scan cursor for the delete

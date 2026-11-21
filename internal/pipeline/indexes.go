@@ -30,6 +30,13 @@ var indexPollInterval = 10 * time.Second
 // never stops the copy: if anything goes wrong before an index is dropped, that
 // index simply stays, and the copy runs with it as it always did.
 func (s *Syncer) deferIndexes(ctx context.Context, tables []engine.TableRef) {
+	s.deferIndexesWith(ctx, tables, nil)
+}
+
+// deferIndexesWith is deferIndexes with a progress signal, called after each index
+// is dealt with: a drop can wait and retry on a busy table, and during a reseed (inside
+// a streaming pass) the liveness check needs to see that it is moving.
+func (s *Syncer) deferIndexesWith(ctx context.Context, tables []engine.TableRef, progress func()) {
 	if !s.DeferIndexes || len(tables) == 0 {
 		return
 	}
@@ -64,7 +71,11 @@ func (s *Syncer) deferIndexes(ctx context.Context, tables []engine.TableRef) {
 		return
 	}
 	for _, ix := range idx {
-		if err := d.DropDeferredIndex(ctx, ix); err != nil {
+		err := d.DropDeferredIndex(ctx, ix)
+		if progress != nil {
+			progress()
+		}
+		if err != nil {
 			if ctx.Err() != nil {
 				return
 			}
