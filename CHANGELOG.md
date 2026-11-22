@@ -4,6 +4,15 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **`replicare verify` checks MySQL tables a key range at a time,** like Postgres: no single
+  long read of a whole table, a short pause between ranges, and rows that differ reported by key
+  as missing, extra or different after a second look. `--sample` works on MySQL too: for tables
+  keyed by a number, text or binary value each sampled range starts with one index lookup; other
+  keys(dates, decimals) use a slower random position in key order. Each query also gets a
+  server-side time limit.
+
 ## [0.7.2]
 
 - **Clearing old track rows no longer slows down replication.** In 0.7.0 and 0.7.1, the clean-up
