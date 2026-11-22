@@ -4,7 +4,7 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.1]
 
 - **Restarts never take down the indexes of a table that's already copied.** If `replicare`
   couldn't read a table's copy progress from the state store at startup, it treated the table as
