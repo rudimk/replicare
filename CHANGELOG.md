@@ -11,7 +11,8 @@ All notable changes to replicare are documented here. The format follows
   with millions of them, every pass waited on large deletes, and lag climbed until they were gone.
   It now runs in the background on a connection of its own, 10,000 rows at a time with a pause in
   between, so streaming never waits for it. New log events: `track.leftovers_removed` and
-  `track.sweep_failed`.
+  `track.sweep_failed`; a new counter, `replicare_track_leftovers_removed_total`, and a "Leftover
+  track rows cleared (per table)" panel on the Grafana dashboard, next to the purge time.
 - **Fewer failed passes on a busy source.** Each pass used to read the parent tables' queued
   changes before the child tables'. A parent and child written by the application between those
   two reads left the child in the pass without its parent, so the target rejected it, the pass was

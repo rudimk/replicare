@@ -2614,7 +2614,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 24,
+        "w": 12,
         "x": 0,
         "y": 112
       },
@@ -2658,6 +2658,67 @@
           },
           "editorMode": "code",
           "expr": "max by (table) (replicare_delta_purge_seconds{sync=~\"$sync\", table=~\"$table\"})",
+          "legendFormat": "{{table}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Leftover track rows cleared (per table)",
+      "description": "rate(replicare_track_leftovers_removed_total) \u2014 track rows left behind by versions before 0.7.0, removed in the background on a connection of their own. A line only while a table still has leftovers; it drops to nothing once they are gone, and stays empty on a source that never ran an older version.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 112
+      },
+      "id": 46,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rps",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineInterpolation": "linear",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (table) (rate(replicare_track_leftovers_removed_total{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"}[5m]))",
           "legendFormat": "{{table}}",
           "range": true,
           "instant": false,

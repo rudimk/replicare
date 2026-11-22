@@ -76,6 +76,9 @@ func (s *Syncer) sweepTrackRound(ctx context.Context) (int64, error) {
 		for {
 			n, err := sw.SweepLeftoverTrack(ctx, t, targets)
 			total += n
+			if s.Tel != nil {
+				s.Tel.AddTrackLeftoversRemoved(s.Name, s.Target, t, n)
+			}
 			if err != nil {
 				return total, err
 			}

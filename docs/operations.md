@@ -531,7 +531,9 @@ one row per change per target, forever. The purge reads the track table, so it g
 day, until it was taking minutes and slowing the application's own queries. `replicare` clears
 out those leftover rows by itself, in the background on a connection of its own: 10,000 rows at a
 time with a short pause in between, table by table, so streaming never waits for it. It logs
-`track.leftovers_removed` with how many it removed, and checks again every 10 minutes. (In 0.7.0
+`track.leftovers_removed` with how many it removed, counts them in
+`replicare_track_leftovers_removed_total`(the dashboard's "Leftover track rows cleared" panel), and
+checks again every 10 minutes. (In 0.7.0
 and 0.7.1 the clean-up ran inside each streaming pass instead, and on a busy source with millions
 of leftovers it made every pass slow until they were gone.) The leftovers are
 harmless to remove: they only record changes that have already been applied and purged. To clear
@@ -694,6 +696,7 @@ table exactly.
 | `replicare_delta_oldest_unconsumed_age_seconds` | gauge | `sync`, `target`, `table`, `component` | Age of the oldest unconsumed delta(how stale the queue is). |
 | `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
 | `replicare_delta_purge_seconds` | gauge | `sync`, `table` | How long the table's last purge on the source took, in seconds. It should stay well under a second; each purge statement gives up after 30 seconds and is retried on the next pass. |
+| `replicare_track_leftovers_removed_total` | counter | `sync`, `target`, `table` | Track rows left behind by versions before 0.7.0 that the background clean-up has removed. It only moves while a table still has leftovers. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability(`1` = up, `0` = down). |
 | `replicare_source_up` | gauge | `sync` | Source reachability(`1` = up, `0` = down). |

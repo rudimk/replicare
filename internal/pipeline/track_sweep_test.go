@@ -6,6 +6,9 @@ import (
 	"testing"
 
 	"github.com/rudimk/replicare/internal/engine"
+	"github.com/rudimk/replicare/internal/observability"
+	"github.com/rudimk/replicare/internal/observability/prom"
+	"github.com/rudimk/replicare/internal/observability/telemetry"
 )
 
 // sweepingSource hands out a fixed number of leftover windows per table and records
@@ -44,8 +47,10 @@ func TestTrackSweepRoundClearsEveryTable(t *testing.T) {
 	a := engine.TableRef{Schema: "public", Name: "a"}
 	b := engine.TableRef{Schema: "public", Name: "b"}
 	fresh := &sweepingSource{left: map[engine.TableRef]int{a: 3, b: 1}}
+	reg := prom.New()
 	s := &Syncer{
 		Name: "s1", Target: "dst", Replicable: []engine.TableRef{a, b},
+		Tel:        telemetry.New(reg, nil, nil, nil),
 		Source:     &sweepingSource{},
 		OpenSource: func(context.Context) (engine.Source, error) { return fresh, nil },
 	}
@@ -64,5 +69,23 @@ func TestTrackSweepRoundClearsEveryTable(t *testing.T) {
 	}
 	if !fresh.closed {
 		t.Fatal("the round's source connection was not closed")
+	}
+	perTable := map[string]float64{}
+	fams, _ := reg.Gather()
+	for _, f := range fams {
+		if f.GetName() != observability.MetricTrackLeftoversRemovedTotal {
+			continue
+		}
+		for _, m := range f.Metric {
+			for _, l := range m.Label {
+				if l.GetName() == "table" {
+					perTable[l.GetValue()] = m.Counter.GetValue()
+				}
+			}
+		}
+	}
+	if perTable["public.a"] != 300 || perTable["public.b"] != 100 {
+		t.Fatalf("%s per table = %v, want public.a 300 and public.b 100",
+			observability.MetricTrackLeftoversRemovedTotal, perTable)
 	}
 }

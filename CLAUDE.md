@@ -210,7 +210,8 @@ correctness mechanism** — only a lag/observability signal.
   production incident: in 0.7.0 the sweep ran inside every `Purge`, i.e. every pass, and on a busy
   source with millions of leftovers each pass waited on large deletes; lag climbed and the
   read-order race below fired on every retry). `Syncer.OpenSource`; rounds every 10 min,
-  `track.leftovers_removed` / `track.sweep_failed` events. Each Postgres purge statement runs
+  `track.leftovers_removed` / `track.sweep_failed` events,
+  `replicare_track_leftovers_removed_total{sync,target,table}` + a dashboard panel beside purge time. Each Postgres purge statement runs
   under a 30s `statement_timeout`; track tables get the delta tables' aggressive autovacuum; and
   `replicare_delta_purge_seconds{sync,table}` surfaces a slowing purge. MySQL does the same
   (select the batch's ids, then delete deltas + track rows in one transaction).
