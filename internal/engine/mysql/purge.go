@@ -2,6 +2,7 @@ package mysql
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"sort"
 	"strings"
@@ -137,45 +138,152 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 	return out, nil
 }
 
+// trackSweepWindow bounds the leftover-track sweep: one sweep covers at most this many
+// delta ids per target, so a large backlog of leftovers is cleared over many passes.
+var trackSweepWindow int64 = 100000
+
 // purgeConsumedBy deletes, in batches, delta rows consumed by every target in the
-// set (present in each target's track). With an empty set every row is purgeable —
-// used when a single-target sync's only target is being reseeded. Loops until a
-// pass deletes fewer than batch rows. MySQL 5.7 has no CTEs, so this is a plain
-// single-table DELETE with ORDER BY + LIMIT and a correlated COUNT subquery over
-// the (different) track table — the delta table is only referenced by column, not
-// in the subquery FROM, so the 1093 self-delete restriction does not apply.
+// set (present in each target's track), together with their track rows. With an
+// empty set every row is purgeable — used when a single-target sync's only target is
+// being reseeded (its track was reset by the caller). Loops until a pass deletes
+// fewer than batch rows.
+//
+// A delta's track rows are only needed while the delta exists, and delta ids are
+// never reused, so they are deleted with it. Earlier versions left them behind, and
+// the track table grew by one row per change per target forever (the Postgres purge
+// slowed to minutes on a busy source because of it). MySQL 5.7 has no RETURNING, so
+// each batch first picks its delta ids (a correlated COUNT per delta over the track
+// table's (target, delta_id) key), then deletes those deltas and their track rows in
+// one transaction. Leftovers from earlier versions are swept afterwards, a bounded
+// window per call.
 func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engine.TargetID, batch int) (int64, error) {
 	delta := captureRef(deltaTableName(relID))
 	track := captureRef(trackTableName(relID))
 
-	var q string
-	var baseArgs []any
 	if len(targets) == 0 {
 		// No pinning targets: every delta is purgeable.
-		q = fmt.Sprintf("DELETE FROM %s ORDER BY delta_id LIMIT ?", delta)
-	} else {
-		inClause, inArgs := targetInClause(targets)
-		q = fmt.Sprintf(
-			"DELETE FROM %s WHERE (SELECT COUNT(*) FROM %s tr WHERE tr.delta_id = %s.delta_id AND tr.target IN (%s)) = ? ORDER BY delta_id LIMIT ?",
-			delta, track, delta, inClause)
-		baseArgs = append(baseArgs, inArgs...)
-		baseArgs = append(baseArgs, len(targets))
+		q := fmt.Sprintf("DELETE FROM %s ORDER BY delta_id LIMIT ?", delta)
+		var total int64
+		for {
+			res, err := s.db.ExecContext(ctx, q, batch)
+			if err != nil {
+				return total, err
+			}
+			n, _ := res.RowsAffected()
+			total += n
+			if n < int64(batch) {
+				return total, nil
+			}
+		}
 	}
+
+	inClause, inArgs := targetInClause(targets)
+	pick := fmt.Sprintf(
+		"SELECT d.delta_id FROM %s d WHERE (SELECT COUNT(*) FROM %s tr WHERE tr.delta_id = d.delta_id AND tr.target IN (%s)) = ? ORDER BY d.delta_id LIMIT ?",
+		delta, track, inClause)
+	pickArgs := append(append([]any{}, inArgs...), len(targets), batch)
 
 	var total int64
 	for {
-		args := append(append([]any{}, baseArgs...), batch)
-		res, err := s.db.ExecContext(ctx, q, args...)
+		ids, err := s.pickDeltaIDs(ctx, pick, pickArgs)
 		if err != nil {
 			return total, err
 		}
-		n, _ := res.RowsAffected()
-		total += n
-		if n < int64(batch) {
+		if len(ids) > 0 {
+			if err := s.deleteDeltasAndTrack(ctx, delta, track, inClause, inArgs, ids); err != nil {
+				return total, err
+			}
+		}
+		total += int64(len(ids))
+		if len(ids) < batch {
 			break
 		}
 	}
+	for _, tg := range targets {
+		if err := s.sweepLeftoverTrack(ctx, delta, track, tg); err != nil {
+			return total, err
+		}
+	}
 	return total, nil
+}
+
+// pickDeltaIDs runs the batch-picking query and returns the delta ids it found.
+func (s *Source) pickDeltaIDs(ctx context.Context, q string, args []any) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// deleteDeltasAndTrack deletes the given deltas and the targets' track rows for them,
+// in one transaction.
+func (s *Source) deleteDeltasAndTrack(ctx context.Context, delta, track, inClause string, inArgs []any, ids []int64) error {
+	idPh := make([]string, len(ids))
+	idArgs := make([]any, len(ids))
+	for i, id := range ids {
+		idPh[i] = "?"
+		idArgs[i] = id
+	}
+	idList := strings.Join(idPh, ", ")
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE delta_id IN (%s)", delta, idList), idArgs...); err != nil {
+		return err
+	}
+	trackArgs := append(append([]any{}, inArgs...), idArgs...)
+	if _, err := tx.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE target IN (%s) AND delta_id IN (%s)", track, inClause, idList),
+		trackArgs...); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// sweepLeftoverTrack removes, for one target, track rows below the oldest delta still
+// queued: rows earlier versions left behind when their delta was purged. Delta ids
+// are never reused, so nothing looks those rows up again, and a missing track row can
+// only ever mean "not applied yet", never the reverse. Each call covers at most
+// trackSweepWindow ids from the target's oldest track row, on the (target, delta_id)
+// key. An empty queue sweeps nothing (a change being committed right now may not be
+// visible yet). The bounds are read first: MySQL cannot reference the table being
+// deleted from in a subquery (error 1093).
+func (s *Source) sweepLeftoverTrack(ctx context.Context, delta, track string, target engine.TargetID) error {
+	var minLive, minTrack sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(delta_id) FROM %s", delta)).Scan(&minLive); err != nil {
+		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+	}
+	if !minLive.Valid {
+		return nil
+	}
+	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(delta_id) FROM %s WHERE target = ?", track),
+		string(target)).Scan(&minTrack); err != nil {
+		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+	}
+	if !minTrack.Valid || minTrack.Int64 >= minLive.Int64 {
+		return nil
+	}
+	bound := minLive.Int64
+	if w := minTrack.Int64 + trackSweepWindow; w < bound {
+		bound = w
+	}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE target = ? AND delta_id < ?", track),
+		string(target), bound); err != nil {
+		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+	}
+	return nil
 }
 
 // DeltaBacklog reports a target's unconsumed-delta footprint for a table (MM5c

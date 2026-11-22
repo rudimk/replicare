@@ -108,6 +108,9 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	for tbl, n := range enf.Purged {
 		s.Tel.AddPurged(s.Name, tbl, n)
 	}
+	for tbl, d := range enf.PurgeTook {
+		s.Tel.SetPurgeSeconds(s.Name, tbl, d.Seconds())
+	}
 
 	// Cluster (multi-master) tombstone GC: reclaim version-register tombstones whose
 	// delete every peer has consumed (CLAUDE.md §5.3). Source-side, so it runs every

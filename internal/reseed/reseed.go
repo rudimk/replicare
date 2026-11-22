@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"time"
 
 	"github.com/rudimk/replicare/internal/apply"
 	"github.com/rudimk/replicare/internal/copy"
@@ -67,6 +68,9 @@ func (d Deps) logger() *slog.Logger {
 type EnforceResult struct {
 	Reseeded []engine.TargetID
 	Purged   map[engine.TableRef]int64
+	// PurgeTook is how long each table's purge took this pass (for the purge-time
+	// gauge: a purge that grows slow loads a source we may not own, so it must show).
+	PurgeTook map[engine.TableRef]time.Duration
 }
 
 // Enforce runs a purge/retention pass over the component's tables for the full
@@ -79,10 +83,12 @@ type EnforceResult struct {
 func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.TableRef,
 	targets []engine.TargetID, ret engine.RetentionPolicy) (EnforceResult, error) {
 
-	res := EnforceResult{Purged: map[engine.TableRef]int64{}}
+	res := EnforceResult{Purged: map[engine.TableRef]int64{}, PurgeTook: map[engine.TableRef]time.Duration{}}
 	reseedSet := map[engine.TargetID]bool{}
 	for _, t := range tablesTopo {
+		start := time.Now()
 		stats, err := d.Src.Purge(ctx, t, targets, ret)
+		res.PurgeTook[t] = time.Since(start)
 		if err != nil {
 			return EnforceResult{}, fmt.Errorf("reseed: enforce purge %s: %w", t, err)
 		}

@@ -2603,6 +2603,67 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delta purge time (per table)",
+      "description": "How long each table's last purge of applied changes took on the source, in seconds. It runs on every streaming pass, so it should stay well under a second; each purge statement gives up after 30 seconds. A climbing line means the purge is loading a source we may not own.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 112
+      },
+      "id": 45,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineInterpolation": "linear",
+            "axisPlacement": "auto",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "calcs": []
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (table) (replicare_delta_purge_seconds{sync=~\"$sync\", table=~\"$table\"})",
+          "legendFormat": "{{table}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
     }
   ]
 }

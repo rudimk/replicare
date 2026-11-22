@@ -3,8 +3,11 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -328,5 +331,137 @@ func TestPurgeXminHorizonBloatSurfaced(t *testing.T) {
 	}
 	if freedSize >= pinnedSize {
 		t.Errorf("delta size did not shrink after releasing xmin: pinned=%d freed=%d", pinnedSize, freedSize)
+	}
+}
+
+// TestPurgeRemovesTrackRowsWithDeltas: a purged delta's track rows go with it, so the
+// track table never outgrows the live queue. (Earlier versions left them behind; on a
+// busy production source the track table reached millions of rows and the purge,
+// which reads it, slowed to minutes.)
+func TestPurgeRemovesTrackRowsWithDeltas(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.orders (id int PRIMARY KEY)")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	relID, _, _, _ := lookupCapture(ctx, src.conn, ref)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.orders SELECT g FROM generate_series(1,5) g")
+
+	targets := []engine.TargetID{"a", "b"}
+	keys, _ := src.ReadDirtyKeys(ctx, ref, "a", 0)
+	if err := src.ConfirmConsumed(ctx, ref, "a", dirtyIDs(keys)); err != nil {
+		t.Fatal(err)
+	}
+	// Only "a" has applied them: nothing is purgeable, and a's track rows must stay.
+	if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := trackRowsFor(t, ctx, src, relID, "a"); got != 5 {
+		t.Fatalf("a's track rows before b caught up = %d, want 5 (their deltas still exist)", got)
+	}
+	// "b" applies only the first three: those three deltas go, with every track row
+	// for them; the other two deltas, and a's rows for them, stay.
+	if err := src.ConfirmConsumed(ctx, ref, "b", dirtyIDs(keys[:3])); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.DeltasPurged != 3 {
+		t.Fatalf("purged = %d, want 3", stats.DeltasPurged)
+	}
+	if a, b := trackRowsFor(t, ctx, src, relID, "a"), trackRowsFor(t, ctx, src, relID, "b"); a != 2 || b != 0 {
+		t.Fatalf("track rows after purge: a=%d b=%d, want a=2 b=0", a, b)
+	}
+
+	// The track table gets the delta table's prompt autovacuum.
+	var opts []string
+	if err := src.conn.QueryRow(ctx, "SELECT coalesce(reloptions, '{}') FROM pg_class WHERE oid = $1::regclass",
+		qualifiedCapture(trackTableName(relID))).Scan(&opts); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(opts) == "[]" || !containsString(opts, "autovacuum_vacuum_scale_factor=0") {
+		t.Errorf("track table reloptions = %v, want the aggressive autovacuum settings", opts)
+	}
+}
+
+// TestPurgeSweepsLeftoverTrackRows: track rows left behind by earlier versions (their
+// deltas long purged) are cleared a bounded window at a time, while track rows of
+// deltas still queued are left alone.
+func TestPurgeSweepsLeftoverTrackRows(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.orders (id int PRIMARY KEY)")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	relID, _, _, _ := lookupCapture(ctx, src.conn, ref)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.orders VALUES (1),(2)")
+	keys, _ := src.ReadDirtyKeys(ctx, ref, "dst", 0)
+	// "dst" applied the first delta but "other" did not, so it stays queued with a
+	// real track row that must survive the sweep.
+	if err := src.ConfirmConsumed(ctx, ref, "dst", dirtyIDs(keys[:1])); err != nil {
+		t.Fatal(err)
+	}
+	// 299 leftovers, all below the oldest queued delta, as an earlier version would
+	// have left them.
+	mustExec(t, ctx, src.conn, fmt.Sprintf(
+		"INSERT INTO %s (target, delta_id) SELECT 'dst', g FROM generate_series(-299, -1) g",
+		qualifiedCapture(trackTableName(relID))))
+
+	old := trackSweepWindow
+	trackSweepWindow = 100
+	t.Cleanup(func() { trackSweepWindow = old })
+
+	targets := []engine.TargetID{"dst", "other"}
+	// 299 leftovers + 1 real row; each purge sweeps 100 ids, then only the real row is left.
+	for i, want := range []int{200, 100, 1, 1} {
+		if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := trackRowsFor(t, ctx, src, relID, "dst"); got != want {
+			t.Fatalf("after purge %d: dst track rows = %d, want %d", i+1, got, want)
+		}
+	}
+	if got := deltaCount(t, ctx, src, relID); got != 2 {
+		t.Fatalf("queued deltas = %d, want 2 (neither was applied by both targets)", got)
+	}
+}
+
+func containsString(xs []string, x string) bool {
+	for _, s := range xs {
+		if s == x {
+			return true
+		}
+	}
+	return false
+}
+
+// TestPurgeStatementTimeoutApplies: purge statements run under a short statement
+// timeout, so a purge that turns slow gives up rather than loading the source for
+// minutes, and the session's own setting is left as it was.
+func TestPurgeStatementTimeoutApplies(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	err := src.withStatementTimeout(ctx, 100*time.Millisecond, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, "SELECT pg_sleep(2)")
+		return err
+	})
+	if err == nil || !strings.Contains(err.Error(), "57014") {
+		t.Fatalf("a statement over the limit returned %v, want a statement timeout (57014)", err)
+	}
+	var setting string
+	if err := src.conn.QueryRow(ctx, "SHOW statement_timeout").Scan(&setting); err != nil {
+		t.Fatal(err)
+	}
+	if setting != "0" {
+		t.Errorf("session statement_timeout after the purge = %q, want it untouched (0)", setting)
 	}
 }
