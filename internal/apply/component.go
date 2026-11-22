@@ -35,12 +35,23 @@ type tableWork struct {
 	cols     []string
 }
 
-// gatherWork reads and coalesces each table's dirty keys (bounded by batch),
-// preserving topo order and dropping tables with an empty queue. total is the
-// number of deltas observed across the pass.
+// gatherWork reads and coalesces each table's dirty keys (bounded by batch) and
+// returns them in topo order (parents first, the order they apply in), dropping tables
+// with an empty queue. total is the number of deltas observed across the pass.
+//
+// The queues are READ children first (reverse topo order). The source enforces its
+// FKs, so a child row can only exist once its parent does: a parent's change is
+// committed no later than the change of any child that points at it. Reading a child's
+// queue before its parent's therefore guarantees that every parent a read child row
+// needs is already visible when the parent's queue is read. Read the other way round
+// (parents first), a parent and child committed between the two reads leave the child
+// in this pass without its parent, and the child fails its FK on the target; on a busy
+// source with long passes that happens on every retry, and the pass halts.
 func gatherWork(ctx context.Context, src engine.Source, tablesTopoOrder []engine.TableRef,
 	target engine.TargetID, batch int) (work []tableWork, total int, err error) {
-	for _, ref := range tablesTopoOrder {
+	read := make([]*tableWork, len(tablesTopoOrder))
+	for i := len(tablesTopoOrder) - 1; i >= 0; i-- {
+		ref := tablesTopoOrder[i]
 		dirty, err := src.ReadDirtyKeys(ctx, ref, target, batch)
 		if err != nil {
 			return nil, 0, fmt.Errorf("apply component: read dirty %s: %w", ref, err)
@@ -53,8 +64,13 @@ func gatherWork(ctx context.Context, src engine.Source, tablesTopoOrder []engine
 			return nil, 0, err
 		}
 		distinct, ids := coalesce(dirty)
-		work = append(work, tableWork{ref: ref, distinct: distinct, ids: ids, cols: cols})
+		read[i] = &tableWork{ref: ref, distinct: distinct, ids: ids, cols: cols}
 		total += len(dirty)
+	}
+	for _, w := range read {
+		if w != nil {
+			work = append(work, *w)
+		}
 	}
 	return work, total, nil
 }

@@ -142,6 +142,14 @@ func (t *Telemetry) AddPurged(sync string, table engine.TableRef, n int64) {
 	t.reg.Counter(observability.MetricDeltaPurgedTotal).WithLabelValues(sync, table.String()).Add(float64(n))
 }
 
+// AddTrackLeftoversRemoved counts leftover track rows the background sweep removed.
+func (t *Telemetry) AddTrackLeftoversRemoved(sync string, target engine.TargetID, table engine.TableRef, n int64) {
+	if t == nil || t.reg == nil || n <= 0 {
+		return
+	}
+	t.reg.Counter(observability.MetricTrackLeftoversRemovedTotal).WithLabelValues(sync, string(target), table.String()).Add(float64(n))
+}
+
 // SetPurgeSeconds records how long a table's last delta purge took.
 func (t *Telemetry) SetPurgeSeconds(sync string, table engine.TableRef, seconds float64) {
 	if t.reg == nil {

@@ -171,6 +171,22 @@ func sampleKeys(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []ca
 			SELECT %[2]s FROM (SELECT %[2]s FROM %[3]s TABLESAMPLE SYSTEM ($1)) s ORDER BY random() LIMIT $2
 		) r
 		ORDER BY %[4]s`, textAliases(key), keys, qualifyTable(t), keysOf("r", key))
+	// SYSTEM sampling picks whole pages at random, so on a small table (or a stale row
+	// estimate) it can return fewer keys than asked for, even none. Widen the sample
+	// until there are enough or the whole table was read.
+	for {
+		out, err := sampleOnce(ctx, conn, t, q, pct, n)
+		if err != nil || len(out) >= n || pct >= 100 {
+			return out, err
+		}
+		pct *= 4
+		if pct > 100 {
+			pct = 100
+		}
+	}
+}
+
+func sampleOnce(ctx context.Context, conn *pgx.Conn, t engine.TableRef, q string, pct float64, n int) ([]engine.KeyValues, error) {
 	rows, err := conn.Query(ctx, q, pct, n)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: verify %s: sample keys: %w", t, err)

@@ -134,7 +134,10 @@ The remaining sections are "Backlog detail (per table)", "Throughput & apply lat
 "Errors & maintenance". They cover per-table backlog rows / bytes / oldest age; throughput and apply p95;
 and the error rate, purge rate and reseeds, using the metrics as they're named. "Delta purge time
 (per table)" shows how long each table's last purge on the source took; it should stay well under a
-second, and a climbing line means the purge is loading the source.
+second, and a climbing line means the purge is loading the source. Next to it, "Leftover track rows
+cleared (per table)" shows how fast the background clean-up is removing track rows that versions
+before 0.7.0 left behind. A table has a line only while it still has leftovers, so the panel empties
+once they're gone, and stays empty on a source that never ran an older version.
 
 The Source / Target health and size panels fill in as soon as a sync starts. The lag, backlog
 and throughput panels only fill in once tables reach streaming, so during an initial copy

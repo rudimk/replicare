@@ -206,6 +206,18 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 	// key after bring-up); lets /healthz restart a wedged pod.
 	key := healthKey(name, targetName)
 	syncer.Heartbeat = func() { d.beat.Mark(key) }
+	// The leftover-track sweep runs in the background on short-lived connections of its
+	// own, never inside a streaming pass.
+	syncer.OpenSource = func(ctx context.Context) (engine.Source, error) {
+		s, err := eng.NewSource(srcEp.Conn.ConnConfig())
+		if err != nil {
+			return nil, err
+		}
+		if err := s.Connect(ctx); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
 	return syncer, cleanup, nil
 }
 

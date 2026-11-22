@@ -140,7 +140,7 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 
 // trackSweepWindow bounds the leftover-track sweep: one sweep covers at most this many
 // delta ids per target, so a large backlog of leftovers is cleared over many passes.
-var trackSweepWindow int64 = 100000
+var trackSweepWindow int64 = 10000
 
 // purgeConsumedBy deletes, in batches, delta rows consumed by every target in the
 // set (present in each target's track), together with their track rows. With an
@@ -199,10 +199,33 @@ func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engin
 			break
 		}
 	}
+	return total, nil
+}
+
+var _ engine.TrackSweeper = (*Source)(nil)
+
+// SweepLeftoverTrack implements engine.TrackSweeper: one bounded window of leftover
+// track rows per target (see sweepLeftoverTrack). The pipeline calls it in the
+// background, on a connection of its own, never from a streaming pass.
+func (s *Source) SweepLeftoverTrack(ctx context.Context, t engine.TableRef, targets []engine.TargetID) (int64, error) {
+	if s.db == nil {
+		return 0, errNotConnected
+	}
+	relID, _, ok, err := s.lookupRegistry(ctx, t)
+	if err != nil {
+		return 0, fmt.Errorf("mysql: sweep leftover track rows of %s: %w", t, err)
+	}
+	if !ok {
+		return 0, nil
+	}
+	delta, track := captureRef(deltaTableName(relID)), captureRef(trackTableName(relID))
+	var total int64
 	for _, tg := range targets {
-		if err := s.sweepLeftoverTrack(ctx, delta, track, tg); err != nil {
-			return total, err
+		n, err := s.sweepLeftoverTrack(ctx, delta, track, tg)
+		if err != nil {
+			return total, fmt.Errorf("mysql: %s: %w", t, err)
 		}
+		total += n
 	}
 	return total, nil
 }
@@ -260,30 +283,32 @@ func (s *Source) deleteDeltasAndTrack(ctx context.Context, delta, track, inClaus
 // key. An empty queue sweeps nothing (a change being committed right now may not be
 // visible yet). The bounds are read first: MySQL cannot reference the table being
 // deleted from in a subquery (error 1093).
-func (s *Source) sweepLeftoverTrack(ctx context.Context, delta, track string, target engine.TargetID) error {
+func (s *Source) sweepLeftoverTrack(ctx context.Context, delta, track string, target engine.TargetID) (int64, error) {
 	var minLive, minTrack sql.NullInt64
 	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(delta_id) FROM %s", delta)).Scan(&minLive); err != nil {
-		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+		return 0, fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
 	}
 	if !minLive.Valid {
-		return nil
+		return 0, nil
 	}
 	if err := s.db.QueryRowContext(ctx, fmt.Sprintf("SELECT MIN(delta_id) FROM %s WHERE target = ?", track),
 		string(target)).Scan(&minTrack); err != nil {
-		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+		return 0, fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
 	}
 	if !minTrack.Valid || minTrack.Int64 >= minLive.Int64 {
-		return nil
+		return 0, nil
 	}
 	bound := minLive.Int64
 	if w := minTrack.Int64 + trackSweepWindow; w < bound {
 		bound = w
 	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE target = ? AND delta_id < ?", track),
-		string(target), bound); err != nil {
-		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+	res, err := s.db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE target = ? AND delta_id < ?", track),
+		string(target), bound)
+	if err != nil {
+		return 0, fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
 	}
-	return nil
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 // DeltaBacklog reports a target's unconsumed-delta footprint for a table (MM5c

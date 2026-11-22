@@ -210,12 +210,23 @@ func TestMySQLPurgeRemovesTrackRows(t *testing.T) {
 	old := trackSweepWindow
 	trackSweepWindow = 100
 	t.Cleanup(func() { trackSweepWindow = old })
-	for i, want := range []int{151, 51, 1, 1} {
-		if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+	// The purge leaves the leftovers alone; the sweep clears them a window at a time.
+	if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mysqlTrackRows(t, ctx, src, ref, "a"); got != 251 {
+		t.Fatalf("after purge: a's track rows = %d, want 251 (the purge must not sweep)", got)
+	}
+	for i, step := range []struct{ removed, left int }{{100, 151}, {100, 51}, {50, 1}, {0, 1}} {
+		n, err := src.SweepLeftoverTrack(ctx, ref, targets)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if got := mysqlTrackRows(t, ctx, src, ref, "a"); got != want {
-			t.Fatalf("after purge %d: a's track rows = %d, want %d", i+1, got, want)
+		if n != int64(step.removed) {
+			t.Fatalf("sweep %d removed %d rows, want %d", i+1, n, step.removed)
+		}
+		if got := mysqlTrackRows(t, ctx, src, ref, "a"); got != step.left {
+			t.Fatalf("after sweep %d: a's track rows = %d, want %d", i+1, got, step.left)
 		}
 	}
 }

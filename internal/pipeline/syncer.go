@@ -78,6 +78,10 @@ type Syncer struct {
 	// its own (one builds, one reads progress), since a build can take hours and streaming
 	// keeps the existing ones busy. Nil disables the rebuilder.
 	OpenSink func(ctx context.Context) (engine.Sink, error)
+	// OpenSource opens a new connection to the source. The leftover-track sweep
+	// (engine.TrackSweeper) runs on one of its own, opened for each round and closed after,
+	// so it never shares the streaming connection or delays a pass. Nil disables it.
+	OpenSource func(ctx context.Context) (engine.Source, error)
 
 	// Heartbeat, if set, is called whenever streaming makes progress — after each pass
 	// (success or handled error), and inside a pass as work completes (a table's apply

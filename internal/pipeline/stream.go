@@ -29,6 +29,9 @@ func (s *Syncer) Stream(ctx context.Context) error {
 	// Build again any target indexes taken down for the initial copy, in the background
 	// on connections of its own, while changes stream.
 	defer s.startIndexRebuilder(ctx)()
+	// Clear track rows left behind by versions before 0.7.0, in the background on a
+	// connection of its own, so the deletes never hold up a pass.
+	defer s.startTrackSweeper(ctx)()
 	interval := s.DrainInterval
 	if interval <= 0 {
 		interval = time.Second

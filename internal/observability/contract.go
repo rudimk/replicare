@@ -48,11 +48,14 @@ const (
 	// How long a table's last purge took, in seconds. The purge runs on the source every
 	// pass; one that takes more than a second or so is loading a database we may not own.
 	MetricDeltaPurgeSeconds = "replicare_delta_purge_seconds"
-	MetricReseedTotal       = "replicare_reseed_total"
-	MetricTargetUp          = "replicare_target_up"
-	MetricSourceUp          = "replicare_source_up"
-	MetricSourceDBBytes     = "replicare_source_db_bytes"
-	MetricTargetDBBytes     = "replicare_target_db_bytes"
+	// MetricTrackLeftoversRemovedTotal counts the track rows left behind by versions
+	// before 0.7.0 that the background sweep has removed, per table.
+	MetricTrackLeftoversRemovedTotal = "replicare_track_leftovers_removed_total"
+	MetricReseedTotal                = "replicare_reseed_total"
+	MetricTargetUp                   = "replicare_target_up"
+	MetricSourceUp                   = "replicare_source_up"
+	MetricSourceDBBytes              = "replicare_source_db_bytes"
+	MetricTargetDBBytes              = "replicare_target_db_bytes"
 	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
 	// as opposed to the whole-database *_db_bytes above. This is the
 	// apples-to-apples source↔target figure — it excludes replicare's own capture
@@ -101,6 +104,7 @@ var Metrics = []Metric{
 	{MetricDeltaOldestAgeSeconds, Gauge, "Age of the oldest unconsumed delta", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
 	{MetricDeltaPurgeSeconds, Gauge, "How long the table's last delta purge on the source took, in seconds", []string{LabelSync, LabelTable}},
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
+	{MetricTrackLeftoversRemovedTotal, Counter, "Track rows left by versions before 0.7.0 that the background sweep removed", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},
 	{MetricSourceUp, Gauge, "Source reachability (1=up, 0=down)", []string{LabelSync}},
@@ -186,4 +190,8 @@ const (
 	EventIndexBuilt          = "index.built"
 	EventIndexBuildFailed    = "index.build_failed"
 	EventIndexRebuildDone    = "index.rebuild_done"
+	// Leftover track rows (from versions before 0.7.0) removed by the background sweep,
+	// and a sweep round that failed (tried again later).
+	EventTrackSwept       = "track.leftovers_removed"
+	EventTrackSweepFailed = "track.sweep_failed"
 )
