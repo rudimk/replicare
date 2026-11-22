@@ -146,7 +146,13 @@ Therefore, for Redis:
 - **Upserts = rolling `SCAN` reconciliation** — every streaming pass re-reads the present keys and
   RESTOREs them (idempotent → convergent). A **bounded pass-boundary state machine** holds the
   live per-shard SCAN cursor across ticks and emits one bounded batch per call: memory is
-  **O(batch), never O(keyset)**.
+  **O(batch), never O(keyset)**. **The call after a pass ends returns an empty batch (the pass
+  boundary)**, then the next call starts a fresh pass (fixed in 0.7.3: the finishing call used to
+  reset and start the next pass at once, so a keyspace smaller than one batch never produced an
+  empty batch and a "full pass" never visibly ended; the mesh tests' pass loop hung on it).
+  **Active-active members must run the same Redis version** — a newer server's DUMP cannot be
+  RESTOREd into an older one and a mesh replicates both ways (pre-flight refuses newer→older);
+  the mesh tests run two/three logical DBs on one harness server.
 - **Deletes = durable target-vs-source keyspace diff** (§3.3-aligned, the additive optional
   `KeyLister`/`KeyExister` seam, §8.1) — `SCAN` the target, `EXISTS`-check the source **master**
   (a lagging replica would cause false deletes), `DEL` the missing. Every sweep is a full diff, so
