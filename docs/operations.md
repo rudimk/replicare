@@ -524,9 +524,9 @@ applied it), so both tables stay about the size of the queue. Each purge stateme
 also limited to 30 seconds: a purge that takes longer gives up and tries again on the next pass,
 rather than loading the source for minutes.
 
-Versions before 0.6.2 never deleted track rows, so on a busy source the track tables grew by about
+Versions before 0.7.0 never deleted track rows, so on a busy source the track tables grew by about
 one row per change per target, forever. The purge reads the track table, so it got slower every
-day, until it was taking minutes and slowing the application's own queries. From 0.6.2,
+day, until it was taking minutes and slowing the application's own queries. From 0.7.0,
 `replicare` also clears out those leftover rows by itself, a small batch per table on each pass, so
 a large backlog of them disappears over the first minutes after upgrading. The leftovers are
 harmless to remove: they only record changes that have already been applied and purged. To clear
