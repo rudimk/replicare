@@ -4,6 +4,49 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.0]
+
+### `replicare verify` works on large databases
+
+- **Postgres tables are checked a key range at a time.** Before, `verify` hashed each table in
+  one query per side, which timed out on large tables and put a long scan on the source. Now the
+  source picks where each range ends from its key index(10,000 rows by default), both sides hash
+  that range with the same query, and there's a short pause between ranges. No query holds a long
+  scan or snapshot on the source.
+- **Rows that differ are named.** A range that differs is narrowed down to the exact rows, which
+  are looked up again by key after a wait(30 seconds by default), so rows that were only on their
+  way to the target aren't reported. What still differs is listed by key as missing, extra or
+  different.
+- **New options:** `--table` to check only some tables, `--sample <n>` for a quick check of `n`
+  random ranges per table, and `--chunk-rows`, `--pause` and `--recheck-after` to tune it. A full
+  check prints its progress every 30 seconds and no longer gives up after 30 seconds per table.
+- The report gains a `MODE` column and the differing keys; `--json` gains `mode`, `chunks`,
+  `missing_on_target`, `extra_on_target`, `different`, `keys` and `truncated`.
+- MySQL and Redis tables are still checked in one pass each.
+
+### The purge no longer slows the source down over time
+
+- **Track rows are deleted along with their changes.** Earlier versions never deleted rows from
+  the track tables(the record of which targets have applied each change), so on a busy source
+  they grew forever, and the purge, which reads them, got slower every day until it was taking
+  minutes and slowing the application's own queries.
+- **Leftover track rows from earlier versions are cleared automatically,** a small batch per
+  table on each pass, so a large backlog disappears over the first minutes after upgrading.
+- **Each purge statement on Postgres is limited to 30 seconds;** one that takes longer gives up
+  and tries again on the next pass.
+- Track tables get the same autovacuum settings as the delta tables.
+- **New metric** `replicare_delta_purge_seconds{sync,table}`, and a "Delta purge time (per table)"
+  panel on the Grafana dashboard.
+
+## [0.6.1]
+
+### Fewer needless restarts on a busy source
+
+- **The liveness check counts progress inside a streaming pass,** not only whole passes. Each
+  table applied, each retry attempt and each reseed step now count, so a long but moving pass on
+  a busy source no longer fails `/healthz` and gets the pod restarted. A query that's truly stuck
+  still does.
+
 ## [0.6.0]
 
 ### Faster first copies on Postgres: target indexes taken down and built again

@@ -123,7 +123,7 @@ syncs:
 
 	// --- verify catches an out-of-band target drift (count).
 	mustExec(t, ctx, tgt, "DELETE FROM rc_it.orders WHERE id = 3")
-	vr2 := enricher.Verify(ctx, "s1")
+	vr2 := enricher.VerifyWith(ctx, "s1", live.VerifyOptions{RecheckAfter: -1})
 	if vr2.Converged {
 		t.Fatalf("verify did not catch a target drift: %+v", vr2)
 	}
