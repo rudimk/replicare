@@ -4,7 +4,7 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.2]
 
 - **Clearing old track rows no longer slows down replication.** In 0.7.0 and 0.7.1, the clean-up
   of track rows left behind by earlier versions ran inside every streaming pass. On a busy source
