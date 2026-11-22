@@ -237,3 +237,46 @@ func TestComponentReferentialConsistency(t *testing.T) {
 		t.Errorf("expected empty queue, drained %d", n)
 	}
 }
+
+// raceSource commits a new parent and child on the source right after the parent's
+// queue is read, the way a busy application does between two reads of one pass.
+type raceSource struct {
+	engine.Source
+	parent engine.TableRef
+	inject func()
+	done   bool
+}
+
+func (r *raceSource) ReadDirtyKeys(ctx context.Context, t engine.TableRef, target engine.TargetID, max int) ([]engine.DirtyKey, error) {
+	keys, err := r.Source.ReadDirtyKeys(ctx, t, target, max)
+	if err == nil && t == r.parent && !r.done {
+		r.done = true
+		r.inject()
+	}
+	return keys, err
+}
+
+// TestComponentChildReadBeforeParent: a parent and child committed on the source in
+// the middle of a pass must not make the pass fail. The child's queue is read before
+// the parent's, so the new child is either not read this pass, or its parent is.
+// Reading parents first, the new child was read without its parent and failed its FK.
+func TestComponentChildReadBeforeParent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	f := newCompFixture(t, ctx)
+
+	exec(t, ctx, f.rawSrc, "UPDATE rc_it.parent SET label='p1new' WHERE id=1")
+	exec(t, ctx, f.rawSrc, "UPDATE rc_it.child SET note='c1new' WHERE id=1")
+
+	rs := &raceSource{Source: f.src, parent: f.topo[0], inject: func() {
+		exec(t, ctx, f.rawSrc, "BEGIN")
+		exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.parent VALUES (9,'p9')")
+		exec(t, ctx, f.rawSrc, "INSERT INTO rc_it.child VALUES (9,9,'c9')")
+		exec(t, ctx, f.rawSrc, "COMMIT")
+	}}
+	if _, err := DrainComponent(ctx, rs, f.sink, f.topo, f.target, 100, false); err != nil {
+		t.Fatalf("a parent and child committed mid-pass failed the pass: %v", err)
+	}
+	f.drainAll(t, ctx)
+	f.assertConsistent(t, ctx)
+}
