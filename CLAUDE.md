@@ -396,7 +396,10 @@ target) is streaming**:
   **Never** on a target that is also an active-active member (unset → off there; explicit `true` →
   refused at load), never for a table the role doesn't own (`pg_has_role(owner,'USAGE')`; kept +
   `index.kept` WARN, copy just slower), never partitioned tables/partition indexes. A table is
-  deferred whole or not at all.
+  deferred whole or not at all. **Only a table the state store says is not copied** is deferred
+  (decision, from a production review): a table whose copy progress can't be read keeps its
+  indexes (it may be copied already — dropping would cost a full rebuild for nothing), and a cyclic
+  component is deferred whole only when one of its tables is known not to be copied.
 - **Durability:** the definition (`pg_get_indexdef`, tablespace, comment / CLUSTER / per-column
   statistics as follow-up statements, link flag) is written to the **state store**
   (`replicare_state.deferred_indexes`, v4) **before** the drop, and also logged in full

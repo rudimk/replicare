@@ -400,7 +400,9 @@ since `replicare` needs them to apply changes. It also leaves alone:
    and retries, so it never holds the application up. Every drop is logged as `index.dropped`,
    with the index's full `CREATE INDEX` statement in the message, so the definition is in the logs
    as well as in the state store. Only tables this run is about to copy are touched: a restart
-   leaves tables that are already copied alone.
+   leaves tables that are already copied alone. If `replicare` can't read a table's copy progress
+   from the state store, it leaves that table's indexes alone too, rather than risk taking down the
+   indexes of a table that's already copied.
 2. **During the copy**, nothing else changes; the copy just runs faster.
 3. **Once every table is streaming**, `replicare` builds the saved indexes again with
    `CREATE INDEX CONCURRENTLY`, so reads and writes carry on throughout. It builds one at a time,
