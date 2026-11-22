@@ -231,6 +231,18 @@ tasks:
       - defer: { task: harness:down }
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 ./internal/engine/mysql/... ./internal/daemon/...
 
+  test:integration:redis:ci:
+    desc: CI's Redis job - the Redis engine tests and the daemon's Redis tests (6.2 -> 7.4, Postgres state store)
+    cmds:
+      # A Redis sync keeps its state in Postgres (v1's only StateStore backend), so the
+      # Postgres harness comes up too. Only the two packages with Redis tests run here.
+      # The cluster harness needs host networking and redis-cli, so it stays local.
+      - task: harness:up
+      - task: harness:redis:up
+      - defer: { task: harness:redis:down }
+      - defer: { task: harness:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1 go test -count=1 -p 1 ./internal/engine/redis/... ./internal/daemon/...
+
   test:integration:tri:
     desc: Run daemon tri-engine coexistence tests against ALL THREE harnesses (Postgres + MySQL + Redis)
     cmds:
