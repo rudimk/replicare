@@ -213,7 +213,7 @@ func (s *Source) pickDeltaIDs(ctx context.Context, q string, args []any) ([]int6
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []int64
 	for rows.Next() {
 		var id int64
