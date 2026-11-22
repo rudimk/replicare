@@ -114,44 +114,112 @@ useful with only state-store access, or for the cheapest possible check.
 `--watch <dur>` re-renders on the given interval(for example `10s` or `1m`) until `SIGINT`;
 combine it with `--json` to stream snapshots.
 
-## `verify <config> [--json] [--sync <name>] [--watch <dur>]`
+## `verify <config> [options]`
 
 ```sh
-replicare verify config.yml                    # all syncs
-replicare verify config.yml --sync pg-pipeline # one sync
-replicare verify config.yml --json             # machine-readable
-replicare verify config.yml --watch 30s        # re-check every 30s until Ctrl-C
+replicare verify config.yml                                  # every row of every sync
+replicare verify config.yml --sync pg-pipeline               # one sync
+replicare verify config.yml --sync pg-pipeline --table public.orders --table public.customers
+replicare verify config.yml --sample 50                      # quick check: 50 random ranges per table
+replicare verify config.yml --json                           # machine-readable
+replicare verify config.yml --watch 30m                      # re-check every 30 minutes until Ctrl-C
 ```
 
-This is a read-only convergence spot-check between a source and its targets. For every
-replicated unit, it counts and content-fingerprints the source and each target, then compares
-them. It writes nothing and installs nothing, so it's safe to run against a source we may not
-own, and against live targets. For each table it reports one of:
+This is a read-only check that a source and its targets hold the same data. It writes nothing
+and installs nothing, so it's safe to run against a source we may not own, and against live
+targets.
 
-- `ok` - the row counts *and* the content checksums match.
-- `drift-count` - the row counts differ(the target is missing rows / has extra rows).
-- `drift-checksum` - the counts match but the content differs(a value has diverged).
+| Option | Default | Meaning |
+|---|---|---|
+| `--sync <name>` | every sync | Check one sync only |
+| `--table <schema.table>` | every table | Check only this table; repeat it for more. Needs `--sync` when the config has more than one sync |
+| `--sample <n>` | off | Check `n` random key ranges per table instead of every row |
+| `--chunk-rows <n>` | `10000` | Rows in each key range |
+| `--pause <dur>` | `100ms` | Wait between key ranges, to keep the load on the source down. `0` means no wait |
+| `--recheck-after <dur>` | `30s` | Wait before looking up rows that differed a second time. `0` means look them up straight away |
+| `--json` | off | Print the report as JSON |
+| `--watch <dur>` | off | Run the check again on this interval until `SIGINT` |
+
+### How a Postgres table is checked
+
+On Postgres, `verify` compares a table one key range at a time, rather than in one pass over
+the whole table. The source picks where each range ends(the key `--chunk-rows` rows further on,
+read from the table's key index), then the source and every target hash the rows in that same
+range with the same query and compare the results. Each query reads only the rows in its range,
+so no query holds a long scan or a long-running snapshot on the source, and a large table is
+checked bit by bit with a short pause in between.
+
+When a range differs, `verify` fetches that range's rows on both sides, with a hash per row, to
+find exactly which keys differ. It then waits `--recheck-after` and looks those keys up again by
+key on both sides. A row that was just on its way to the target matches by then and isn't
+reported, so a busy, streaming sync can be checked without false alarms. What still differs is
+reported by key, as one of:
+
+- `missing` - on the source, not on the target.
+- `extra` - on the target, not on the source.
+- `different` - on both, with different values.
+
+A full check reads every row, so it takes a while on a large table; it prints a progress line
+every 30 seconds while a table is being checked. `--sample <n>` is the quick version: it picks
+`n` random starting keys(with `TABLESAMPLE`, so finding them reads only a small share of the
+table) and compares the `--chunk-rows` rows after each one. A sampled check can only find
+differences in the rows it looked at, so an `ok` means "nothing wrong in the sample", not
+"nothing wrong anywhere". In sampled mode the row counts in the report are the rows that were
+checked, not the size of the table.
+
+Tables are walked in the source's key order. If the target sorts text keys differently(a
+different collation), rows can land in different ranges on the two sides; the key-by-key
+re-check sorts that out, so it isn't reported as drift, but it does make the check slower for
+such tables.
+
+MySQL and Redis tables are checked whole: one count and one content hash for the whole table on
+each side, with no key list.
+
+### Reading the report
+
+For each table, `verify` prints how it was checked(`MODE`: `chunked`, `sampled` or `whole`), the
+row counts, and one of:
+
+- `ok` - the rows match.
+- `drift-count` - rows are missing from the target, or the target has extra rows.
+- `drift-checksum` - the same rows are on both sides, but some values differ.
 - `count-only-ok` - the counts match, but there was no content hash to compare. Every engine
   `replicare` ships today hashes content, so this shouldn't normally appear.
 - `error` - a table couldn't be compared(for example, it's missing on the target).
 
-The content fingerprint is an order-independent hash over a name-matched column projection, so
-it isn't thrown by differences in physical column order, and it streams in constant server
-memory. The relational engines(Postgres and MySQL) hash row content. Redis hashes each key's
-name, type and value, so it catches a changed value as well as missing / extra keys. Values are
-read in their logical form rather than as raw `DUMP` bytes; transport is a value-faithful `DUMP`
-then `RESTORE`, but the bytes themselves can differ between Redis versions for the same value, so
-hashing them would report drift that isn't there. Key expiry times aren't part of the hash, since
-they're replicated as time remaining and differ slightly by design. Stream entries are compared,
-but stream consumer groups aren't.
+A Postgres table that differs also lists how many rows are missing, extra and different, followed
+by up to 20 of their keys(a composite key is shown with its parts comma-separated). `--json`
+carries the same keys, along with `mode`, `chunks`, `missing_on_target`, `extra_on_target` and
+`different`. When a table differs in more rows than `verify` keeps track of(10,000 per table and
+target), `truncated` is set, and the counts cover only the rows it tracked.
+
+The content hash is order-independent and works on a name-matched list of columns, so it isn't
+thrown by differences in physical column order. Postgres and MySQL hash each row's content. Redis
+hashes each key's name, type and value, so it catches a changed value as well as missing / extra
+keys. Values are read in their logical form rather than as raw `DUMP` bytes; transport is a
+value-faithful `DUMP` then `RESTORE`, but the bytes themselves can differ between Redis versions
+for the same value, so hashing them would report drift that isn't there. Key expiry times aren't
+part of the hash, since they're replicated as time remaining and differ slightly by design.
+Stream entries are compared, but stream consumer groups aren't.
 
 The exit codes make `replicare verify config.yml` scriptable as a convergence gate. `0` means
-every selected sync converged, `1` means drift or an endpoint that couldn't be reached, and `2`
+every checked sync matched, `1` means drift or an endpoint that couldn't be reached, and `2`
 means a usage / config error. In `--watch` mode, the exit code reflects the last completed pass.
 
-> ⚠️ Replication has lag, so a `drift-count`/`drift-checksum` straight after a burst of source
-> writes usually just means the target hasn't caught up yet. Re-run it(or use `--watch`);
-> drift that persists is the real signal.
+### Load on the source
+
+A full check reads every replicated row on the source once, through short range queries on the
+key index. With the defaults, that's 10,000 rows per query and a 100 ms pause between queries.
+A larger `--pause` or a smaller `--chunk-rows` spreads the reads out further; `--sample` reads a
+small fraction of each table. On a very large database, a good habit is a `--sample` run first,
+then a full check of the tables that matter most, with `--table`, at a quiet time.
+
+> ⚠️ MySQL and Redis tables are hashed in one pass each, which reads the whole table in a single
+> query. On a very large MySQL table, it's best to run that at a quiet time.
+
+> ⚠️ Rows still waiting in the delta queue differ until they're applied. The re-check handles
+> rows that arrive within `--recheck-after`; a sync that's far behind will still show drift, and
+> the fix is to let it catch up(see `replicare status`) and check again.
 
 ## `capture install|remove <config> [--sync <name>]`
 

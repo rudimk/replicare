@@ -369,7 +369,9 @@ being copied.
 2. Wait for the target to catch up: "Caught up" on the Catch-up ETA panel, or a `BACKLOG` of `0`
    in `replicare status`.
 3. Run `replicare verify <config>` to check the source and target hold the same data(see
-   [Checking progress from the CLI](#checking-progress-from-the-cli-no-grafana-required)).
+   [Checking progress from the CLI](#checking-progress-from-the-cli-no-grafana-required)). On a
+   large database, a `--sample 50` run is a quick first look; a full check reads every row, so
+   it's best run at a quiet time, a few tables at a time with `--table`.
 
 ## Target indexes during the first copy
 
@@ -783,7 +785,8 @@ directly against the config, with no metrics stack:
 ```sh
 replicare status config.yml            # phase, lag, LIVE row counts + delta backlog
 replicare status config.yml --watch 5s # refresh in place until Ctrl-C
-replicare verify config.yml            # source<->target convergence spot-check (exit 0 = converged)
+replicare verify config.yml            # source<->target convergence check (exit 0 = converged)
+replicare verify config.yml --sample 50 # quick check: 50 random key ranges per table
 ```
 
 `status` is [live by default](cli.md#status-config---json---sync-name---no-live---watch-dur). Each
@@ -797,11 +800,14 @@ mode adds `SRC_ROWS` / `TGT_ROWS` and the per-target delta `BACKLOG`, where `0` 
 why). An unknown backlog is never conflated with `0`. `--no-live` drops the source / target
 connections, but keeps the state-store signals(phase, `SEEN`, `LAST_SYNC`, reseed).
 
-`verify` is a [read-only convergence check](cli.md#verify-config---json---sync-name---watch-dur).
-It counts and content-fingerprints every replicated unit on both ends, reports `ok` /
-`drift-count` / `drift-checksum` per table, and exits non-zero on drift. It's the same
-count-and-checksum convergence logic the load-test harnesses use, folded into the shipped binary.
-The fingerprint is by value content, including for Redis, where it hashes each key's type and
+`verify` is a [read-only convergence check](cli.md#verify-config-options). On Postgres it
+compares each table one key range at a time, narrows any difference down to the exact rows, and
+looks those rows up again after a short wait, so rows that were only on their way to the target
+aren't reported; it then lists the keys that are missing, extra or different. It exits non-zero on
+drift. On a large database, `--sample <n>` checks a few random ranges per table as a quick check,
+and `--table` limits a full check to the tables that matter most; see
+[Load on the source](cli.md#load-on-the-source). MySQL and Redis tables are compared in one pass
+each. The fingerprint is by value content, including for Redis, where it hashes each key's type and
 canonical logical value(not just which keys exist), so a changed value on an existing key is
 caught, not only missing / extra keys. A paused sync(`enabled: false`) is tagged `[PAUSED]` in the
 output, since convergence of a static source and target says nothing about whether the pipeline is

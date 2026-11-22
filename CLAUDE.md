@@ -782,9 +782,18 @@ the databases, not just the state store:
   per-target delta **backlog** (rows + oldest-unconsumed age). `--no-live` drops back to state-store
   only; `--watch <dur>` refreshes in place. Best-effort: an unreachable endpoint degrades to a
   `live: partial` note, never a failure.
-- **`replicare verify`** is a source↔target convergence spot-check: it counts and content-fingerprints
-  every replicated unit on both ends and reports `ok`/`drift-count`/`drift-checksum` per table, exit
-  non-zero on drift (the load-harness convergence check, folded into the binary).
+- **`replicare verify`** is a source↔target convergence check: it reports `ok`/`drift-count`/
+  `drift-checksum` per table, exit non-zero on drift (the load-harness convergence check, folded into
+  the binary). **Chunked by default where the engine supports it (decision, from a production
+  migration — one whole-table fingerprint per side timed out and loaded a big source):** optional
+  `engine.ChunkVerifier` (Postgres): the source picks each range end (`NextKey`, `--chunk-rows`
+  10k, key index), both sides hash `(after, upTo]` with the same SQL, a differing range is
+  pinpointed row by row (`RangeRowHashes`), and the suspect keys are looked up again **by key**
+  after `--recheck-after` (30s) so in-flight rows and collation-order differences aren't drift;
+  survivors are reported as missing/extra/different keys (capped, `truncated`). `--pause` between
+  ranges (100ms), `--sample n` (TABLESAMPLE start keys, n ranges) for huge DBs, `--table` to
+  narrow. No long-held snapshot or scan on the source. MySQL/Redis fall back to whole-table
+  `Fingerprint` (`mode: whole`); MySQL can implement `ChunkVerifier` later.
 Both go through the optional **`engine.Verifier`** capability (`CountRows` + an order-independent,
 column-name-matched `Fingerprint`), implemented per engine (Postgres/MySQL: content hash; Redis:
 **content hash by default** — key + type + canonical *logical* value XOR-folded, so it catches
@@ -982,7 +991,7 @@ invasive.
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
 | Streaming liveness (`/healthz`) | Fails only when a streaming loop makes **no progress** for `observability.stall_timeout` (2m). Progress = a pass finishing **or work finishing inside one** (each table apply committing, each component retry attempt returning — even a transient FK, since both DBs answered — and each reseed table cleared / chunk copied), carried down via `apply.WithProgress` / `reseed.Deps.Progress`. A long but moving pass on a busy source never trips it (production: 9 restarts in 2.5h when only whole passes counted); a hung query still does. `health.Beat.Mark` ignores unregistered keys, so nothing during bring-up starts the clock on an initial copy. |
-| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target count+content convergence spot-check, exit≠0 on drift), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
+| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target convergence check, exit≠0 on drift; **chunked + key-level re-check on Postgres** via optional `engine.ChunkVerifier`, `--sample`/`--table` for big DBs, whole-table elsewhere), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
 | Docs site | **mdBook from `docs/`**, GitHub Pages via `.github/workflows/docs.yml`, at replicare.rudimk.com. **Never publish, mention or link CLAUDE.md or `.sisyphus/`; internal design notes live in `.sisyphus/`, never `docs/` (user pages only, no milestone vocabulary)**; outside-`docs/` files via `{{#include}}` with absolute links; `internal/docscheck` enforces links, anchors and the ban (§11). |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
