@@ -45,11 +45,14 @@ const (
 	MetricDeltaBacklogBytes     = "replicare_delta_backlog_bytes"
 	MetricDeltaOldestAgeSeconds = "replicare_delta_oldest_unconsumed_age_seconds"
 	MetricDeltaPurgedTotal      = "replicare_delta_purged_total"
-	MetricReseedTotal           = "replicare_reseed_total"
-	MetricTargetUp              = "replicare_target_up"
-	MetricSourceUp              = "replicare_source_up"
-	MetricSourceDBBytes         = "replicare_source_db_bytes"
-	MetricTargetDBBytes         = "replicare_target_db_bytes"
+	// How long a table's last purge took, in seconds. The purge runs on the source every
+	// pass; one that takes more than a second or so is loading a database we may not own.
+	MetricDeltaPurgeSeconds = "replicare_delta_purge_seconds"
+	MetricReseedTotal       = "replicare_reseed_total"
+	MetricTargetUp          = "replicare_target_up"
+	MetricSourceUp          = "replicare_source_up"
+	MetricSourceDBBytes     = "replicare_source_db_bytes"
+	MetricTargetDBBytes     = "replicare_target_db_bytes"
 	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
 	// as opposed to the whole-database *_db_bytes above. This is the
 	// apples-to-apples source↔target figure — it excludes replicare's own capture
@@ -96,6 +99,7 @@ var Metrics = []Metric{
 	{MetricDeltaBacklog, Gauge, "Unconsumed delta rows", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
 	{MetricDeltaBacklogBytes, Gauge, "Estimated unconsumed delta bytes", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
 	{MetricDeltaOldestAgeSeconds, Gauge, "Age of the oldest unconsumed delta", []string{LabelSync, LabelTarget, LabelTable, LabelComponent}},
+	{MetricDeltaPurgeSeconds, Gauge, "How long the table's last delta purge on the source took, in seconds", []string{LabelSync, LabelTable}},
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},

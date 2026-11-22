@@ -6,6 +6,8 @@ import (
 	"sort"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/rudimk/replicare/internal/engine"
 )
 
@@ -17,6 +19,16 @@ import (
 // defaultPurgeBatch bounds a single purge DELETE so transaction churn on the
 // source stays small; the purge loops until a pass deletes fewer than a batch.
 const defaultPurgeBatch = 10000
+
+// purgeStatementTimeout caps each purge statement on the source. The purge runs on
+// every streaming pass against a database we may not own, so a purge that turns slow
+// must give up and try again next pass, never hold the source's disk for minutes.
+const purgeStatementTimeout = 30 * time.Second
+
+// trackSweepWindow bounds the leftover-track sweep: one sweep statement covers at most
+// this many delta ids per target, so clearing a large backlog of leftovers (from a
+// version that never removed them) is spread over many passes in small deletes.
+var trackSweepWindow int64 = 100000
 
 // Purge removes deltas consumed by all configured targets, subject to retention.
 // If a target's pinned backlog exceeds a retention cap it is sacrificed: its
@@ -134,14 +146,24 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 // purgeable — used when a single-target sync's only target is being reseeded.
 // Loops until a pass deletes fewer than batch rows.
 //
-// The consumed set is derived set-based from the (small) track table via its
-// (target, delta_id) PK — GROUP BY delta_id, one row per target — rather than a
-// per-delta correlated subquery. The original correlated form was O(delta ×
-// track): under a large partially-consumed backlog it scanned the entire delta
-// table running a track scan per row, stalling the (synchronous) streaming pass
-// that calls it every tick. Driving from delta with a semijoin to that set keeps
-// each pass O(track + batch) and lets batches make progress (already-deleted
-// deltas cannot reappear).
+// A delta's track rows are deleted in the same statement as the delta itself. A
+// track row only matters while its delta exists (it records that the target applied
+// it), and delta ids are never reused, so once the delta is gone its track rows are
+// dead weight. Leaving them behind (as earlier versions did) grew the track
+// table by one row per change per target, forever, and since the consumed set below
+// is read from the track table, every purge got slower: on a busy production source
+// the purge reached minutes and starved the application's own queries of disk.
+// Deleting them here keeps the track table no bigger than the live delta queue
+// (times the targets), so reading it stays cheap.
+//
+// The consumed set is derived set-based from the track table via its (target,
+// delta_id) PK — GROUP BY delta_id, one row per target — rather than a per-delta
+// correlated subquery. The original correlated form was O(delta × track): under a
+// large partially-consumed backlog it scanned the entire delta table running a track
+// scan per row, stalling the (synchronous) streaming pass that calls it every tick.
+//
+// Each statement runs under purgeStatementTimeout. Leftover track rows from earlier
+// versions are swept afterwards, a bounded window per call (sweepLeftoverTrack).
 func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engine.TargetID, batch int) (int64, error) {
 	deltaTbl := qualifiedCapture(deltaTableName(relID))
 	trackTbl := qualifiedCapture(trackTableName(relID))
@@ -149,44 +171,109 @@ func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engin
 	var q string
 	var args []any
 	if len(targets) == 0 {
-		// No consumers to gate on: every delta row is purgeable.
+		// No consumers to gate on: every delta row is purgeable. Every target's track
+		// was reset by the caller, so there are no track rows to remove with them.
 		q = fmt.Sprintf(`
-			DELETE FROM %s WHERE delta_id IN (
-				SELECT delta_id FROM %s ORDER BY delta_id LIMIT $1
-			)`, deltaTbl, deltaTbl)
+			WITH gone AS (
+				DELETE FROM %s WHERE delta_id IN (
+					SELECT delta_id FROM %s ORDER BY delta_id LIMIT $1
+				) RETURNING delta_id
+			)
+			SELECT count(*) FROM gone`, deltaTbl, deltaTbl)
 		args = []any{batch}
 	} else {
 		q = fmt.Sprintf(`
 			WITH purgeable AS (
 				SELECT d.delta_id
-				FROM %s d
+				FROM %[1]s d
 				WHERE d.delta_id IN (
-					SELECT tr.delta_id FROM %s tr
+					SELECT tr.delta_id FROM %[2]s tr
 					WHERE tr.target = ANY($1)
 					GROUP BY tr.delta_id
 					HAVING count(*) = $2
 				)
 				ORDER BY d.delta_id
 				LIMIT $3
+			),
+			gone AS (
+				DELETE FROM %[1]s WHERE delta_id IN (SELECT delta_id FROM purgeable)
+				RETURNING delta_id
+			),
+			untracked AS (
+				DELETE FROM %[2]s
+				WHERE target = ANY($1) AND delta_id IN (SELECT delta_id FROM gone)
+				RETURNING 1
 			)
-			DELETE FROM %s WHERE delta_id IN (SELECT delta_id FROM purgeable)`,
-			deltaTbl, trackTbl, deltaTbl)
+			-- untracked always runs to completion, even though the result does not read
+			-- it: Postgres executes every data-modifying WITH exactly once.
+			SELECT count(*) FROM gone`,
+			deltaTbl, trackTbl)
 		args = []any{targetStrings(targets), len(targets), batch}
 	}
 
 	var total int64
 	for {
-		ct, err := s.conn.Exec(ctx, q, args...)
+		var n int64
+		err := s.withStatementTimeout(ctx, purgeStatementTimeout, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, q, args...).Scan(&n)
+		})
 		if err != nil {
 			return total, err
 		}
-		n := ct.RowsAffected()
 		total += n
 		if n < int64(batch) {
 			break
 		}
 	}
+	for _, tg := range targets {
+		if err := s.sweepLeftoverTrack(ctx, relID, tg); err != nil {
+			return total, err
+		}
+	}
 	return total, nil
+}
+
+// sweepLeftoverTrack removes, for one target, track rows whose delta no longer exists
+// and lies below the oldest delta still queued: rows left behind by versions that did
+// not delete them with their delta. Delta ids are never reused, so nothing will look
+// those rows up again, and removing them can never make a change look applied when it
+// is not (a missing track row only ever means "not applied yet"). Each call covers at
+// most trackSweepWindow ids, using the track table's (target, delta_id) key, so a large
+// backlog of leftovers is cleared over many passes in small, quick deletes. An empty
+// queue sweeps nothing (a change being committed right now may not be visible yet).
+func (s *Source) sweepLeftoverTrack(ctx context.Context, relID int, target engine.TargetID) error {
+	q := fmt.Sprintf(`
+		DELETE FROM %[2]s
+		WHERE target = $1
+		  AND delta_id < LEAST(
+		        (SELECT coalesce(min(delta_id), 0) FROM %[1]s),
+		        (SELECT min(delta_id) FROM %[2]s WHERE target = $1) + $2)`,
+		qualifiedCapture(deltaTableName(relID)), qualifiedCapture(trackTableName(relID)))
+	err := s.withStatementTimeout(ctx, purgeStatementTimeout, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, q, string(target), trackSweepWindow)
+		return err
+	})
+	if err != nil {
+		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+	}
+	return nil
+}
+
+// withStatementTimeout runs fn in a transaction whose statements may each run for at
+// most d (SET LOCAL, so the session's own setting is untouched afterwards).
+func (s *Source) withStatementTimeout(ctx context.Context, d time.Duration, fn func(pgx.Tx) error) error {
+	tx, err := s.conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", d.Milliseconds())); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // DeltaBacklog reports a target's unconsumed-delta footprint for a table (M5c

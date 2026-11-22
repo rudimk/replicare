@@ -171,6 +171,7 @@ func (s *Source) installOne(ctx context.Context, ref engine.TableRef, cols []cap
 		deltaTableDDL(relID, cols),
 		trackTableDDL(relID),
 		deltaAutovacuumDDL(relID),
+		trackAutovacuumDDL(relID),
 	}
 	if origin {
 		triggerFn = meshTriggerFunctionDDL(relID, ref, cols)

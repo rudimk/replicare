@@ -142,6 +142,14 @@ func (t *Telemetry) AddPurged(sync string, table engine.TableRef, n int64) {
 	t.reg.Counter(observability.MetricDeltaPurgedTotal).WithLabelValues(sync, table.String()).Add(float64(n))
 }
 
+// SetPurgeSeconds records how long a table's last delta purge took.
+func (t *Telemetry) SetPurgeSeconds(sync string, table engine.TableRef, seconds float64) {
+	if t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricDeltaPurgeSeconds).WithLabelValues(sync, table.String()).Set(seconds)
+}
+
 // IncReseed advances the forced-reseed counter for a target.
 func (t *Telemetry) IncReseed(sync string, target engine.TargetID) {
 	if t.reg == nil {

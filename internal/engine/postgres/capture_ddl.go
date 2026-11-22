@@ -93,6 +93,17 @@ func deltaAutovacuumDDL(relID int) string {
 )`, qualifiedCapture(deltaTableName(relID)))
 }
 
+// trackAutovacuumDDL gives the track table the same prompt autovacuum as the delta
+// table: its rows are deleted together with their deltas on every purge, so it is
+// just as much a high-churn queue table (CLAUDE.md §3.4).
+func trackAutovacuumDDL(relID int) string {
+	return fmt.Sprintf(`ALTER TABLE %s SET (
+	autovacuum_vacuum_scale_factor = 0,
+	autovacuum_vacuum_threshold = 1000,
+	autovacuum_vacuum_cost_delay = 0
+)`, qualifiedCapture(trackTableName(relID)))
+}
+
 // triggerFunctionDDL builds the SECURITY DEFINER PL/pgSQL trigger function
 // (CLAUDE.md §3.1). It records only the changed row's primary key. A PK-changing
 // UPDATE enqueues BOTH the old key (as a delete) and the new key (as an upsert)

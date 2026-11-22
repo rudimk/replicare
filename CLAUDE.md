@@ -198,7 +198,17 @@ correctness mechanism** — only a lag/observability signal.
   then write track / purge deltas on source.** A crash before the final step leaves deltas in
   place → reprocessed → idempotent re-read+upsert → harmless. (When the `StateStore` is the
   target DB, the track-write can even ride the apply transaction.)
-- **Purge:** a delta row is deletable once present in **all** targets' track (fan-out safe).
+- **Purge:** a delta row is deletable once present in **all** targets' track (fan-out safe), and
+  **its track rows are deleted with it, in the same statement** (decision, from a production
+  incident): a track row only matters while its delta exists and delta ids are never reused.
+  Before this, track rows were never deleted, the track table grew by one row per change per
+  target forever (7.8M rows / 752 MB on one busy table), and since the purge reads the track
+  table it slowed to minutes per run and starved the source application of disk. Leftovers from
+  older versions are swept a bounded window per purge (`sweepLeftoverTrack`: rows below the oldest
+  queued delta, per target, on the `(target, delta_id)` key); each Postgres purge statement runs
+  under a 30s `statement_timeout`; track tables get the delta tables' aggressive autovacuum; and
+  `replicare_delta_purge_seconds{sync,table}` surfaces a slowing purge. MySQL does the same
+  (select the batch's ids, then delete deltas + track rows in one transaction).
 - **`bigserial`/seq column:** kept for **lag metrics and ordering hints only**, never as the
   resume cursor.
 

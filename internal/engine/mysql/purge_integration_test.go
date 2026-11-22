@@ -150,3 +150,72 @@ func TestMySQLRetentionForcesReseed(t *testing.T) {
 		t.Errorf("size-cap purge purged %d, want 2", ps.DeltasPurged)
 	}
 }
+
+// mysqlTrackRows counts a target's track rows for a captured table.
+func mysqlTrackRows(t *testing.T, ctx context.Context, src *Source, ref engine.TableRef, target string) int {
+	t.Helper()
+	relID, _, ok, err := src.lookupRegistry(ctx, ref)
+	if err != nil || !ok {
+		t.Fatalf("lookup capture %s: ok=%v err=%v", ref, ok, err)
+	}
+	var n int
+	if err := src.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+captureRef(trackTableName(relID))+" WHERE target = ?", target).Scan(&n); err != nil {
+		t.Fatalf("count track rows: %v", err)
+	}
+	return n
+}
+
+// TestMySQLPurgeRemovesTrackRows: a purged delta's track rows go with it, and track
+// rows left behind by earlier versions are swept a bounded window at a time, while
+// the track rows of deltas still queued stay.
+func TestMySQLPurgeRemovesTrackRows(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	src := connectSource(t, ctx)
+	t.Cleanup(func() { _, _ = src.db.Exec("DROP DATABASE IF EXISTS replicare") })
+
+	mustExec(t, ctx, src.db, "CREATE TABLE rc_it.orders (id INT PRIMARY KEY) ENGINE=InnoDB")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install capture: %v", err)
+	}
+	mustExec(t, ctx, src.db, "INSERT INTO rc_it.orders VALUES (1),(2),(3),(4),(5)")
+	targets := []engine.TargetID{"a", "b"}
+
+	// Both targets apply everything: all five deltas and all ten track rows go.
+	consumeAll(t, ctx, src, ref, "a")
+	consumeAll(t, ctx, src, ref, "b")
+	stats, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.DeltasPurged != 5 {
+		t.Fatalf("purged = %d, want 5", stats.DeltasPurged)
+	}
+	if a, b := mysqlTrackRows(t, ctx, src, ref, "a"), mysqlTrackRows(t, ctx, src, ref, "b"); a != 0 || b != 0 {
+		t.Fatalf("track rows after purge: a=%d b=%d, want 0 and 0", a, b)
+	}
+
+	// A new delta that only "a" has applied stays queued, with a's track row; plus 250
+	// leftovers below it, as an earlier version would have left them.
+	mustExec(t, ctx, src.db, "INSERT INTO rc_it.orders VALUES (6)")
+	consumeAll(t, ctx, src, ref, "a")
+	relID, _, _, _ := src.lookupRegistry(ctx, ref)
+	for i := 1; i <= 250; i++ {
+		mustExecArgs(t, ctx, src.db, "INSERT INTO "+captureRef(trackTableName(relID))+" (target, delta_id) VALUES ('a', ?)", -i)
+	}
+	old := trackSweepWindow
+	trackSweepWindow = 100
+	t.Cleanup(func() { trackSweepWindow = old })
+	for i, want := range []int{151, 51, 1, 1} {
+		if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+			t.Fatal(err)
+		}
+		if got := mysqlTrackRows(t, ctx, src, ref, "a"); got != want {
+			t.Fatalf("after purge %d: a's track rows = %d, want %d", i+1, got, want)
+		}
+	}
+}

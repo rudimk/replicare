@@ -505,6 +505,9 @@ per target / table, are:
 - `replicare_delta_oldest_unconsumed_age_seconds` - how stale the queue is.
 - `replicare_target_up` - reachability(1 or 0).
 - `replicare_reseed_total` - forced reseeds.
+- `replicare_delta_purge_seconds` - how long each table's last purge took. The purge runs on the
+  source on every streaming pass, so it should take well under a second; anything longer is load
+  on a database we may not own.
 
 A slow or unreachable target holds up the delta queue, since nothing is purged until every target
 has consumed it. Left alone, that queue would keep growing on the source, so `replicare` caps
@@ -513,6 +516,40 @@ its consumption record is reset, the unpinned deltas are purged, and it's brough
 full copy. This is on by default - it trades a re-copy of one target for a protected source. Watch
 the `retention.cap_approaching` logs, which escalate from INFO to WARN to ERROR as the backlog nears
 the cap.
+
+Purging a change also deletes its rows in the track table(the record of which targets have
+applied it), so both tables stay about the size of the queue. Each purge statement on Postgres is
+also limited to 30 seconds: a purge that takes longer gives up and tries again on the next pass,
+rather than loading the source for minutes.
+
+Versions before 0.6.2 never deleted track rows, so on a busy source the track tables grew by about
+one row per change per target, forever. The purge reads the track table, so it got slower every
+day, until it was taking minutes and slowing the application's own queries. From 0.6.2,
+`replicare` also clears out those leftover rows by itself, a small batch per table on each pass, so
+a large backlog of them disappears over the first minutes after upgrading. The leftovers are
+harmless to remove: they only record changes that have already been applied and purged. To clear
+them sooner, or without upgrading, delete them by hand in batches; for a table whose capture
+tables are numbered 20:
+
+```sql
+DELETE FROM replicare.track_20
+WHERE target = 'warehouse'
+  AND delta_id < LEAST(
+        (SELECT coalesce(min(delta_id), 0) FROM replicare.delta_20),
+        (SELECT min(delta_id) + 200000 FROM replicare.track_20 WHERE target = 'warehouse'))
+\watch 5
+```
+
+Here `warehouse` is the target's name in the config. Stop it with Ctrl-C once it prints
+`DELETE 0`, then run `VACUUM (ANALYZE) replicare.track_20;`. This query lists the track tables by
+size:
+
+```sql
+SELECT c.relname, pg_size_pretty(pg_total_relation_size(c.oid)) AS size, c.reltuples::bigint AS approx_rows
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'replicare' AND c.relname LIKE 'track\_%'
+ORDER BY pg_total_relation_size(c.oid) DESC;
+```
 
 > ⚠️ There's one caveat here, the `xmin` horizon. A long idle-in-transaction session(or any other
 > held-back `xmin`) on the source stops autovacuum from reclaiming purged delta rows, so the delta
@@ -649,6 +686,7 @@ table exactly.
 | `replicare_delta_backlog_bytes` | gauge | `sync`, `target`, `table`, `component` | Estimated unconsumed delta bytes. |
 | `replicare_delta_oldest_unconsumed_age_seconds` | gauge | `sync`, `target`, `table`, `component` | Age of the oldest unconsumed delta(how stale the queue is). |
 | `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
+| `replicare_delta_purge_seconds` | gauge | `sync`, `table` | How long the table's last purge on the source took, in seconds. It should stay well under a second; each purge statement gives up after 30 seconds and is retried on the next pass. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability(`1` = up, `0` = down). |
 | `replicare_source_up` | gauge | `sync` | Source reachability(`1` = up, `0` = down). |
