@@ -140,10 +140,10 @@ targets.
 | `--json` | off | Print the report as JSON |
 | `--watch <dur>` | off | Run the check again on this interval until `SIGINT` |
 
-### How a Postgres table is checked
+### How a Postgres or MySQL table is checked
 
-On Postgres, `verify` compares a table one key range at a time, rather than in one pass over
-the whole table. The source picks where each range ends(the key `--chunk-rows` rows further on,
+On Postgres and MySQL, `verify` compares a table one key range at a time, rather than in one pass
+over the whole table. The source picks where each range ends(the key `--chunk-rows` rows further on,
 read from the table's key index), then the source and every target hash the rows in that same
 range with the same query and compare the results. Each query reads only the rows in its range,
 so no query holds a long scan or a long-running snapshot on the source, and a large table is
@@ -161,8 +161,13 @@ reported by key, as one of:
 
 A full check reads every row, so it takes a while on a large table; it prints a progress line
 every 30 seconds while a table is being checked. `--sample <n>` is the quick version: it picks
-`n` random starting keys(with `TABLESAMPLE`, so finding them reads only a small share of the
-table) and compares the `--chunk-rows` rows after each one. A sampled check can only find
+`n` random starting keys and compares the `--chunk-rows` rows after each one. On Postgres the
+starting keys come from `TABLESAMPLE`, so finding them reads only a small share of the table. On
+MySQL each one is a single lookup on the key index: a random value between the smallest and
+largest key(for number, text and binary keys), then the first key at or after it. For a MySQL
+table whose key starts with another type(a date, a decimal), a random position in key order is
+used instead, which reads through the key index up to that position and is slower on a large
+table. A sampled check can only find
 differences in the rows it looked at, so an `ok` means "nothing wrong in the sample", not
 "nothing wrong anywhere". In sampled mode the row counts in the report are the rows that were
 checked, not the size of the table.
@@ -172,8 +177,8 @@ different collation), rows can land in different ranges on the two sides; the ke
 re-check sorts that out, so it isn't reported as drift, but it does make the check slower for
 such tables.
 
-MySQL and Redis tables are checked whole: one count and one content hash for the whole table on
-each side, with no key list.
+Redis keys are checked whole: one count and one content hash for the whole unit on each side,
+with no key list.
 
 ### Reading the report
 
@@ -214,8 +219,8 @@ A larger `--pause` or a smaller `--chunk-rows` spreads the reads out further; `-
 small fraction of each table. On a very large database, a good habit is a `--sample` run first,
 then a full check of the tables that matter most, with `--table`, at a quiet time.
 
-> ⚠️ MySQL and Redis tables are hashed in one pass each, which reads the whole table in a single
-> query. On a very large MySQL table, it's best to run that at a quiet time.
+> ⚠️ Redis is hashed in one pass, which reads every selected key; on a large keyspace it's best
+> run at a quiet time.
 
 > ⚠️ Rows still waiting in the delta queue differ until they're applied. The re-check handles
 > rows that arrive within `--recheck-after`; a sync that's far behind will still show drift, and

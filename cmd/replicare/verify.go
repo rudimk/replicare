@@ -24,7 +24,7 @@ import (
 //
 // It is a READ-ONLY source↔target convergence check: for every replicated unit it
 // content-fingerprints the source and each target and compares. Engines with chunked
-// checks (Postgres) compare one key range at a time, with a pause between ranges, and
+// checks (Postgres, MySQL) compare one key range at a time, with a pause between ranges, and
 // narrow any difference to the exact rows; --sample checks a few random ranges only.
 // (CLAUDE.md §1.7 faithful transport — verify never writes). It installs nothing and
 // is safe against a source we may not own. Because a sync is single-engine (§6), the

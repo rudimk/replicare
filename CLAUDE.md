@@ -146,7 +146,13 @@ Therefore, for Redis:
 - **Upserts = rolling `SCAN` reconciliation** — every streaming pass re-reads the present keys and
   RESTOREs them (idempotent → convergent). A **bounded pass-boundary state machine** holds the
   live per-shard SCAN cursor across ticks and emits one bounded batch per call: memory is
-  **O(batch), never O(keyset)**.
+  **O(batch), never O(keyset)**. **The call after a pass ends returns an empty batch (the pass
+  boundary)**, then the next call starts a fresh pass (fixed in 0.7.3: the finishing call used to
+  reset and start the next pass at once, so a keyspace smaller than one batch never produced an
+  empty batch and a "full pass" never visibly ended; the mesh tests' pass loop hung on it).
+  **Active-active members must run the same Redis version** — a newer server's DUMP cannot be
+  RESTOREd into an older one and a mesh replicates both ways (pre-flight refuses newer→older);
+  the mesh tests run two/three logical DBs on one harness server.
 - **Deletes = durable target-vs-source keyspace diff** (§3.3-aligned, the additive optional
   `KeyLister`/`KeyExister` seam, §8.1) — `SCAN` the target, `EXISTS`-check the source **master**
   (a lagging replica would cause false deletes), `DEL` the missing. Every sweep is a full diff, so
@@ -803,14 +809,18 @@ the databases, not just the state store:
   `drift-checksum` per table, exit non-zero on drift (the load-harness convergence check, folded into
   the binary). **Chunked by default where the engine supports it (decision, from a production
   migration — one whole-table fingerprint per side timed out and loaded a big source):** optional
-  `engine.ChunkVerifier` (Postgres): the source picks each range end (`NextKey`, `--chunk-rows`
+  `engine.ChunkVerifier` (Postgres and MySQL): the source picks each range end (`NextKey`, `--chunk-rows`
   10k, key index), both sides hash `(after, upTo]` with the same SQL, a differing range is
   pinpointed row by row (`RangeRowHashes`), and the suspect keys are looked up again **by key**
   after `--recheck-after` (30s) so in-flight rows and collation-order differences aren't drift;
   survivors are reported as missing/extra/different keys (capped, `truncated`). `--pause` between
   ranges (100ms), `--sample n` (TABLESAMPLE start keys, n ranges) for huge DBs, `--table` to
-  narrow. No long-held snapshot or scan on the source. MySQL/Redis fall back to whole-table
-  `Fingerprint` (`mode: whole`); MySQL can implement `ChunkVerifier` later.
+  narrow. No long-held snapshot or scan on the source. Redis falls back to whole-table
+  `Fingerprint` (`mode: whole`). **MySQL `--sample` has no `TABLESAMPLE`:** each start key is one
+  index lookup at a random value between `MIN` and `MAX` of the key's first column (integers as
+  numbers; char/varchar/binary as byte strings, text points kept printable ASCII), else a random
+  `OFFSET` in key order (dates, decimals: slower). Every MySQL verify SELECT carries a
+  `MAX_EXECUTION_TIME` hint from the context deadline; 5.7-safe (no window functions).
 Both go through the optional **`engine.Verifier`** capability (`CountRows` + an order-independent,
 column-name-matched `Fingerprint`), implemented per engine (Postgres/MySQL: content hash; Redis:
 **content hash by default** — key + type + canonical *logical* value XOR-folded, so it catches
@@ -1008,7 +1018,7 @@ invasive.
 | HA / ownership | **Single active daemon per sync in v1** (K8s restarts handle failure). Leader election (`pg_advisory_lock`) deferred but must remain addable without redesign. |
 | Observability | **Prometheus + OpenTelemetry + slog + status HTTP API.** |
 | Streaming liveness (`/healthz`) | Fails only when a streaming loop makes **no progress** for `observability.stall_timeout` (2m). Progress = a pass finishing **or work finishing inside one** (each table apply committing, each component retry attempt returning — even a transient FK, since both DBs answered — and each reseed table cleared / chunk copied), carried down via `apply.WithProgress` / `reseed.Deps.Progress`. A long but moving pass on a busy source never trips it (production: 9 restarts in 2.5h when only whole passes counted); a hung query still does. `health.Beat.Mark` ignores unregistered keys, so nothing during bring-up starts the clock on an initial copy. |
-| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target convergence check, exit≠0 on drift; **chunked + key-level re-check on Postgres** via optional `engine.ChunkVerifier`, `--sample`/`--table` for big DBs, whole-table elsewhere), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
+| Operator CLI live surface | **`status` live-by-default** (state store + live source/target counts + per-target delta backlog; `--no-live`, `--watch`) and **`verify`** (read-only source↔target convergence check, exit≠0 on drift; **chunked + key-level re-check on Postgres and MySQL** via optional `engine.ChunkVerifier`, `--sample`/`--table` for big DBs, whole-table elsewhere), both engine-neutral via optional **`engine.Verifier`** (PG/MySQL content hash; Redis **content hash by default** — key+type+canonical logical value, catches value drift; version-gap-safe via logical reads, not DUMP bytes; TTL excluded; pipelined). The no-Grafana path when replicare runs in the source cluster. Runtime image **`wolfi-base`** (not `scratch`) so `kubectl exec … -- replicare status <config>` needs no shell yet one exists. |
 | Config/deploy | **YAML (+ env overrides)**, single static binary + systemd; Helm later. Secrets inline+env; TLS per connection. Include/exclude + schema globs for selection. |
 | Docs site | **mdBook from `docs/`**, GitHub Pages via `.github/workflows/docs.yml`, at replicare.rudimk.com. **Never publish, mention or link CLAUDE.md or `.sisyphus/`; internal design notes live in `.sisyphus/`, never `docs/` (user pages only, no milestone vocabulary)**; outside-`docs/` files via `{{#include}}` with absolute links; `internal/docscheck` enforces links, anchors and the ban (§11). |
 | Stack | Go 1.23+, `pgx` v5, `go-redis` v9, MIT, module `github.com/rudimk/replicare`. |
@@ -1025,7 +1035,8 @@ invasive.
 | Redis privileges | Redis 6+ ACL, no admin; **`+restore` granted explicitly** (`@dangerous`); notification-enable/`PSUBSCRIBE` are privilege-gated extras (`deploy/acl-*-redis.txt`). |
 | Redis non-goals (v1) | **Redis fan-out** (one source → many Redis targets), **Sentinel-hardened failover**, **Dragonfly**, cross-engine — deferred. **Redis active-active IS shipped** (MM6: metadata-keyspace version register, version-guarded Lua apply, tombstone deletes; .sisyphus/multi-master-design.md §5.4). |
 | Redis multi-master (MM6) | **Shipped.** Capture-less, so the `(hlc,node,deleted,vhash)` register lives in a **parallel metadata keyspace** (`\x00rc:m:{slot}K`, co-located in K's slot for atomic value+register Lua). Local writes detected by a **logical-value fingerprint** (version-gap-stable, not DUMP bytes); apply is **version-guarded** (loop suppression + LWW in one compare); deletes are **tombstones** (stateless sweep disabled in mesh); tombstone **GC by age**. Metadata excluded from all data ops at `selection.match`. One-way Redis unchanged. Correctness on the local gate (`REPLICARE_REDIS=1`); pure logic in CI. |
-| CI vs local (Redis) | **CI = compile/unit/PG-regression only**; Redis correctness is a **LOCAL** gate (`REPLICARE_INTEGRATION=1 REPLICARE_REDIS=1`, or `REPLICARE_REDIS_CLUSTER=1`; the tri-engine daemon test via `task test:integration:tri`). |
+| CI vs local (MySQL) | **MySQL runs in CI** (decision, 0.7.3): job `integration-mysql` → `task test:integration:mysql:ci` brings up the 5.7→8.4 MySQL harness + the Postgres harness (state store) and runs `./internal/engine/mysql/...` + `./internal/daemon/...` with `REPLICARE_MYSQL=1`. Before this, MySQL correctness was a local-only gate and never ran on a PR. |
+| CI vs local (Redis) | **Standalone Redis runs in CI** (decision, 0.7.3): job `integration-redis` → `task test:integration:redis:ci` brings up the 6.2→7.4 standalone Redis harness + the Postgres harness (state store) and runs `./internal/engine/redis/...` + `./internal/daemon/...` with `REPLICARE_REDIS=1`. **Redis Cluster stays a LOCAL gate** (`REPLICARE_REDIS_CLUSTER=1`; its harness needs host networking + `redis-cli`); the tri-engine daemon test via `task test:integration:tri`. The Postgres job is `integration-postgres`. |
 
 ---
 

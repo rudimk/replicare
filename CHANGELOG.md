@@ -4,6 +4,23 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.3]
+
+- **`replicare verify` checks MySQL tables a key range at a time,** like Postgres: no single
+  long read of a whole table, a short pause between ranges, and rows that differ reported by key
+  as missing, extra or different after a second look. `--sample` works on MySQL too: for tables
+  keyed by a number, text or binary value each sampled range starts with one index lookup; other
+  keys(dates, decimals) use a slower random position in key order. Each query also gets a
+  server-side time limit.
+- **Redis reconciliation passes now end properly.** When a full scan of the keyspace finished,
+  the next one started straight away in the same step, so on a keyspace smaller than one batch a
+  pass never visibly ended. Now the step after a pass ends is empty, so `replicare` pauses for one
+  drain interval between full passes, as intended. This also fixes the active-active Redis tests,
+  which waited for a pass to end and never saw one.
+- **MySQL and Redis integration tests now run in CI** on every pull request, next to Postgres:
+  MySQL 5.7 to 8.4, and standalone Redis 6.2 to 7.4(Redis Cluster stays a local check). The CI
+  jobs are now named `integration-postgres`, `integration-mysql` and `integration-redis`.
+
 ## [0.7.2]
 
 - **Clearing old track rows no longer slows down replication.** In 0.7.0 and 0.7.1, the clean-up

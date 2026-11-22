@@ -15,6 +15,7 @@ permissions:
 
 jobs:
   ci:
+    name: Lint, unit tests and build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,7 +46,8 @@ jobs:
       - name: CI gate (fmt, vet, lint, race tests, build)
         run: task ci
 
-  integration:
+  integration-postgres:
+    name: Integration tests (Postgres)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,8 +64,55 @@ jobs:
           version: 3.x
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Runs the multi-version harness (source 9.6 -> target 17) and the
+      # The multi-version Postgres harness (source 9.6 -> target 17) and the
       # REPLICARE_INTEGRATION=1 suite: the connection/GUC, version-tolerant
       # introspection, and end-to-end validate acceptance tests.
-      - name: Integration matrix (harness up, test, down)
+      - name: Postgres integration (harness up, test, down)
         run: task test:integration
+
+  integration-mysql:
+    name: Integration tests (MySQL)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The MySQL harness (5.7 source -> 8.4 target) plus the Postgres harness for
+      # the state store, running the MySQL engine tests and the daemon's MySQL tests.
+      - name: MySQL integration (harnesses up, test, down)
+        run: task test:integration:mysql:ci
+
+  integration-redis:
+    name: Integration tests (Redis)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The standalone Redis harness (6.2 source -> 7.4 target) plus the Postgres
+      # harness for the state store, running the Redis engine tests and the daemon's
+      # Redis tests. The Redis Cluster harness needs host networking, so it stays local.
+      - name: Redis integration (harnesses up, test, down)
+        run: task test:integration:redis:ci

@@ -810,14 +810,13 @@ mode adds `SRC_ROWS` / `TGT_ROWS` and the per-target delta `BACKLOG`, where `0` 
 why). An unknown backlog is never conflated with `0`. `--no-live` drops the source / target
 connections, but keeps the state-store signals(phase, `SEEN`, `LAST_SYNC`, reseed).
 
-`verify` is a [read-only convergence check](cli.md#verify-config-options). On Postgres it
-compares each table one key range at a time, narrows any difference down to the exact rows, and
+`verify` is a [read-only convergence check](cli.md#verify-config-options). On Postgres and MySQL
+it compares each table one key range at a time, narrows any difference down to the exact rows, and
 looks those rows up again after a short wait, so rows that were only on their way to the target
 aren't reported; it then lists the keys that are missing, extra or different. It exits non-zero on
 drift. On a large database, `--sample <n>` checks a few random ranges per table as a quick check,
 and `--table` limits a full check to the tables that matter most; see
-[Load on the source](cli.md#load-on-the-source). MySQL and Redis tables are compared in one pass
-each. The fingerprint is by value content, including for Redis, where it hashes each key's type and
+[Load on the source](cli.md#load-on-the-source). Redis is compared in one pass. The fingerprint is by value content, including for Redis, where it hashes each key's type and
 canonical logical value(not just which keys exist), so a changed value on an existing key is
 caught, not only missing / extra keys. A paused sync(`enabled: false`) is tagged `[PAUSED]` in the
 output, since convergence of a static source and target says nothing about whether the pipeline is

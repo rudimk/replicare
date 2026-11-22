@@ -86,6 +86,20 @@ func meshFingerprint(t *testing.T, ctx context.Context, m meshMember) (int64, ui
 	return n, sum
 }
 
+// meshPair returns two empty mesh members on two logical DBs of the SAME server.
+// Active-active members must run the same Redis version: data DUMPed by a newer Redis
+// cannot be RESTOREd into an older one, and a mesh replicates both ways (pre-flight
+// refuses a newer->older edge for exactly this reason). The harness's source and
+// target are different versions (6.2, 7.4), so a pair across them could never work.
+func meshPair(t *testing.T, ctx context.Context) (meshMember, meshMember) {
+	t.Helper()
+	a := newMeshMember(t, ctx, cfgDB(srcCfg(), 0), "a")
+	b := newMeshMember(t, ctx, cfgDB(srcCfg(), 1), "b")
+	must(t, a.src.db.uc.FlushDB(ctx).Err())
+	must(t, b.src.db.uc.FlushDB(ctx).Err())
+	return a, b
+}
+
 // cfgDB returns cfg pointed at a specific logical DB, so several isolated mesh members
 // can run against one harness Redis (each DB is a separate keyspace).
 func cfgDB(cfg engine.ConnConfig, db int) engine.ConnConfig {
@@ -159,10 +173,7 @@ func TestMeshDisjointConverges(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	a := newMeshMember(t, ctx, srcCfg(), "a")
-	b := newMeshMember(t, ctx, tgtCfg(), "b")
-	must(t, a.src.db.uc.FlushAll(ctx).Err())
-	must(t, b.src.db.uc.FlushAll(ctx).Err())
+	a, b := meshPair(t, ctx)
 
 	for i := 0; i < 5; i++ {
 		must(t, a.src.db.uc.Set(ctx, "a-"+strconv.Itoa(i), "va", 0).Err())
@@ -188,10 +199,7 @@ func TestMeshSameKeyConflictConverges(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	a := newMeshMember(t, ctx, srcCfg(), "a")
-	b := newMeshMember(t, ctx, tgtCfg(), "b")
-	must(t, a.src.db.uc.FlushAll(ctx).Err())
-	must(t, b.src.db.uc.FlushAll(ctx).Err())
+	a, b := meshPair(t, ctx)
 
 	must(t, a.src.db.uc.Set(ctx, "k", "from-a", 0).Err())
 	must(t, b.src.db.uc.Set(ctx, "k", "from-b", 0).Err())
@@ -217,10 +225,7 @@ func TestMeshDeletePropagates(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	a := newMeshMember(t, ctx, srcCfg(), "a")
-	b := newMeshMember(t, ctx, tgtCfg(), "b")
-	must(t, a.src.db.uc.FlushAll(ctx).Err())
-	must(t, b.src.db.uc.FlushAll(ctx).Err())
+	a, b := meshPair(t, ctx)
 
 	must(t, a.src.db.uc.Set(ctx, "gone", "v", 0).Err())
 	meshConverge(t, ctx, a, b)
@@ -245,10 +250,7 @@ func TestMeshPeerWriteNotDestroyed(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	a := newMeshMember(t, ctx, srcCfg(), "a")
-	b := newMeshMember(t, ctx, tgtCfg(), "b")
-	must(t, a.src.db.uc.FlushAll(ctx).Err())
-	must(t, b.src.db.uc.FlushAll(ctx).Err())
+	a, b := meshPair(t, ctx)
 
 	must(t, a.src.db.uc.Set(ctx, "shared", "v", 0).Err())
 	must(t, b.src.db.uc.Set(ctx, "b-only", "peer", 0).Err())
