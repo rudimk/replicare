@@ -67,3 +67,25 @@ jobs:
       # introspection, and end-to-end validate acceptance tests.
       - name: Integration matrix (harness up, test, down)
         run: task test:integration
+
+  integration-mysql:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install go-task
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # The MySQL harness (5.7 source -> 8.4 target) plus the Postgres harness for
+      # the state store, running the MySQL engine tests and the daemon's MySQL tests.
+      - name: MySQL integration (harnesses up, test, down)
+        run: task test:integration:mysql:ci
