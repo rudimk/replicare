@@ -51,11 +51,11 @@ const (
 	// MetricTrackLeftoversRemovedTotal counts the track rows left behind by versions
 	// before 0.7.0 that the background sweep has removed, per table.
 	MetricTrackLeftoversRemovedTotal = "replicare_track_leftovers_removed_total"
-	MetricReseedTotal       = "replicare_reseed_total"
-	MetricTargetUp          = "replicare_target_up"
-	MetricSourceUp          = "replicare_source_up"
-	MetricSourceDBBytes     = "replicare_source_db_bytes"
-	MetricTargetDBBytes     = "replicare_target_db_bytes"
+	MetricReseedTotal                = "replicare_reseed_total"
+	MetricTargetUp                   = "replicare_target_up"
+	MetricSourceUp                   = "replicare_source_up"
+	MetricSourceDBBytes              = "replicare_source_db_bytes"
+	MetricTargetDBBytes              = "replicare_target_db_bytes"
 	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
 	// as opposed to the whole-database *_db_bytes above. This is the
 	// apples-to-apples source↔target figure — it excludes replicare's own capture
