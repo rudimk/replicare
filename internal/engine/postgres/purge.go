@@ -28,7 +28,7 @@ const purgeStatementTimeout = 30 * time.Second
 // trackSweepWindow bounds the leftover-track sweep: one sweep statement covers at most
 // this many delta ids per target, so clearing a large backlog of leftovers (from a
 // version that never removed them) is spread over many passes in small deletes.
-var trackSweepWindow int64 = 100000
+var trackSweepWindow int64 = 10000
 
 // Purge removes deltas consumed by all configured targets, subject to retention.
 // If a target's pinned backlog exceeds a retention cap it is sacrificed: its
@@ -163,7 +163,8 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 // scan per row, stalling the (synchronous) streaming pass that calls it every tick.
 //
 // Each statement runs under purgeStatementTimeout. Leftover track rows from earlier
-// versions are swept afterwards, a bounded window per call (sweepLeftoverTrack).
+// versions are not touched here: they are swept in the background (SweepLeftoverTrack),
+// never inside a streaming pass.
 func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engine.TargetID, batch int) (int64, error) {
 	deltaTbl := qualifiedCapture(deltaTableName(relID))
 	trackTbl := qualifiedCapture(trackTableName(relID))
@@ -225,10 +226,32 @@ func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engin
 			break
 		}
 	}
+	return total, nil
+}
+
+var _ engine.TrackSweeper = (*Source)(nil)
+
+// SweepLeftoverTrack implements engine.TrackSweeper: one bounded window of leftover
+// track rows per target (see sweepLeftoverTrack). The pipeline calls it in the
+// background, on a connection of its own, never from a streaming pass.
+func (s *Source) SweepLeftoverTrack(ctx context.Context, t engine.TableRef, targets []engine.TargetID) (int64, error) {
+	if err := s.requireConn(); err != nil {
+		return 0, err
+	}
+	relID, _, ok, err := lookupCapture(ctx, s.conn, t)
+	if err != nil {
+		return 0, fmt.Errorf("postgres: sweep leftover track rows of %s: %w", t, err)
+	}
+	if !ok {
+		return 0, nil
+	}
+	var total int64
 	for _, tg := range targets {
-		if err := s.sweepLeftoverTrack(ctx, relID, tg); err != nil {
-			return total, err
+		n, err := s.sweepLeftoverTrack(ctx, relID, tg)
+		if err != nil {
+			return total, fmt.Errorf("postgres: %s: %w", t, err)
 		}
+		total += n
 	}
 	return total, nil
 }
@@ -241,7 +264,7 @@ func (s *Source) purgeConsumedBy(ctx context.Context, relID int, targets []engin
 // most trackSweepWindow ids, using the track table's (target, delta_id) key, so a large
 // backlog of leftovers is cleared over many passes in small, quick deletes. An empty
 // queue sweeps nothing (a change being committed right now may not be visible yet).
-func (s *Source) sweepLeftoverTrack(ctx context.Context, relID int, target engine.TargetID) error {
+func (s *Source) sweepLeftoverTrack(ctx context.Context, relID int, target engine.TargetID) (int64, error) {
 	q := fmt.Sprintf(`
 		DELETE FROM %[2]s
 		WHERE target = $1
@@ -249,14 +272,16 @@ func (s *Source) sweepLeftoverTrack(ctx context.Context, relID int, target engin
 		        (SELECT coalesce(min(delta_id), 0) FROM %[1]s),
 		        (SELECT min(delta_id) FROM %[2]s WHERE target = $1) + $2)`,
 		qualifiedCapture(deltaTableName(relID)), qualifiedCapture(trackTableName(relID)))
+	var removed int64
 	err := s.withStatementTimeout(ctx, purgeStatementTimeout, func(tx pgx.Tx) error {
-		_, err := tx.Exec(ctx, q, string(target), trackSweepWindow)
+		tag, err := tx.Exec(ctx, q, string(target), trackSweepWindow)
+		removed = tag.RowsAffected()
 		return err
 	})
 	if err != nil {
-		return fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
+		return 0, fmt.Errorf("sweep leftover track rows for %s: %w", target, err)
 	}
-	return nil
+	return removed, nil
 }
 
 // withStatementTimeout runs fn in a transaction whose statements may each run for at

@@ -389,10 +389,11 @@ func TestPurgeRemovesTrackRowsWithDeltas(t *testing.T) {
 	}
 }
 
-// TestPurgeSweepsLeftoverTrackRows: track rows left behind by earlier versions (their
-// deltas long purged) are cleared a bounded window at a time, while track rows of
+// TestSweepLeftoverTrackRows: track rows left behind by earlier versions (their deltas
+// long purged) are not touched by the purge (which runs inside every streaming pass),
+// and are cleared by SweepLeftoverTrack a bounded window at a time, while track rows of
 // deltas still queued are left alone.
-func TestPurgeSweepsLeftoverTrackRows(t *testing.T) {
+func TestSweepLeftoverTrackRows(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	src := captureSource(t, ctx)
@@ -420,13 +421,24 @@ func TestPurgeSweepsLeftoverTrackRows(t *testing.T) {
 	t.Cleanup(func() { trackSweepWindow = old })
 
 	targets := []engine.TargetID{"dst", "other"}
-	// 299 leftovers + 1 real row; each purge sweeps 100 ids, then only the real row is left.
-	for i, want := range []int{200, 100, 1, 1} {
-		if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+	// The purge leaves the leftovers alone: 299 leftovers + 1 real row.
+	if _, err := src.Purge(ctx, ref, targets, engine.RetentionPolicy{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := trackRowsFor(t, ctx, src, relID, "dst"); got != 300 {
+		t.Fatalf("after purge: dst track rows = %d, want 300 (the purge must not sweep)", got)
+	}
+	// Each sweep removes 100 ids' worth, then only the real row is left.
+	for i, step := range []struct{ removed, left int }{{100, 200}, {100, 100}, {99, 1}, {0, 1}} {
+		n, err := src.SweepLeftoverTrack(ctx, ref, targets)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if got := trackRowsFor(t, ctx, src, relID, "dst"); got != want {
-			t.Fatalf("after purge %d: dst track rows = %d, want %d", i+1, got, want)
+		if n != int64(step.removed) {
+			t.Fatalf("sweep %d removed %d rows, want %d", i+1, n, step.removed)
+		}
+		if got := trackRowsFor(t, ctx, src, relID, "dst"); got != step.left {
+			t.Fatalf("after sweep %d: dst track rows = %d, want %d", i+1, got, step.left)
 		}
 	}
 	if got := deltaCount(t, ctx, src, relID); got != 2 {

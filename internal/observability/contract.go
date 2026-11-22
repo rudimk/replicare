@@ -186,4 +186,8 @@ const (
 	EventIndexBuilt          = "index.built"
 	EventIndexBuildFailed    = "index.build_failed"
 	EventIndexRebuildDone    = "index.rebuild_done"
+	// Leftover track rows (from versions before 0.7.0) removed by the background sweep,
+	// and a sweep round that failed (tried again later).
+	EventTrackSwept       = "track.leftovers_removed"
+	EventTrackSweepFailed = "track.sweep_failed"
 )
