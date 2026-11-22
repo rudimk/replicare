@@ -219,6 +219,18 @@ tasks:
       - defer: { task: harness:down }
       - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 ./internal/daemon/...
 
+  test:integration:mysql:ci:
+    desc: CI's MySQL job - the MySQL engine tests and the daemon's MySQL tests (5.7 -> 8.4, Postgres state store)
+    cmds:
+      # The daemon's MySQL tests keep their state in Postgres (v1's only StateStore
+      # backend), so the Postgres harness comes up too. Only the two packages with
+      # MySQL tests run here; the Postgres suite has its own job.
+      - task: harness:up
+      - task: harness:mysql:up
+      - defer: { task: harness:mysql:down }
+      - defer: { task: harness:down }
+      - REPLICARE_INTEGRATION=1 REPLICARE_MYSQL=1 go test -count=1 -p 1 ./internal/engine/mysql/... ./internal/daemon/...
+
   test:integration:tri:
     desc: Run daemon tri-engine coexistence tests against ALL THREE harnesses (Postgres + MySQL + Redis)
     cmds:
