@@ -149,6 +149,15 @@ func scanBatchFiltered(ctx context.Context, r *reconState, scanCount int64, max 
 		if cur == 0 {
 			r.done[r.idx] = true
 			r.idx = (r.idx + 1) % len(r.scanners)
+			if r.allDone() {
+				// The rolling pass just ended. Return its last keys now and leave the
+				// state as is: the NEXT call sees every shard done, resets, and returns
+				// the empty batch that marks the pass boundary (so a caller can tell a
+				// pass has ended and idle). Resetting here instead made a small keyspace
+				// (fewer keys than max) start the next pass in the same call, so no call
+				// ever returned empty and a pass never visibly ended.
+				return keys, false, nil
+			}
 		}
 	}
 	return keys, false, nil
