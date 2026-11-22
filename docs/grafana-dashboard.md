@@ -135,9 +135,12 @@ The remaining sections are "Backlog detail (per table)", "Throughput & apply lat
 and the error rate, purge rate and reseeds, using the metrics as they're named. "Delta purge time
 (per table)" shows how long each table's last purge on the source took; it should stay well under a
 second, and a climbing line means the purge is loading the source. Next to it, "Leftover track rows
-cleared (per table)" shows how fast the background clean-up is removing track rows that versions
-before 0.7.0 left behind. A table has a line only while it still has leftovers, so the panel empties
-once they're gone, and stays empty on a source that never ran an older version.
+cleared (per table)" shows how many track rows left behind by versions before 0.7.0 the background
+clean-up has removed from each table since the daemon started, with each table's total in the legend.
+A table appears once its first leftovers are removed, and its line then stays flat at its total; a
+source that never ran an older version shows nothing. Tables can appear at different times: the
+clean-up only removes a table's leftovers while something is waiting in that table's queue, and checks
+again every 10 minutes, so a quiet table is cleared on the first round after one of its rows changes.
 
 The Source / Target health and size panels fill in as soon as a sync starts. The lag, backlog
 and throughput panels only fill in once tables reach streaming, so during an initial copy

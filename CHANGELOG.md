@@ -4,6 +4,13 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **The "Leftover track rows cleared" dashboard panel shows totals.** It showed a rate, which read 0:
+  the clean-up usually clears a table in one round, so each table's count appears already at its total,
+  and a rate can't see that first step. It now shows how many leftover rows were removed from each
+  table since the daemon started, with the totals in the legend.
+
 ## [0.7.3]
 
 - **`replicare verify` checks MySQL tables a key range at a time,** like Postgres: no single
