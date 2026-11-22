@@ -4,7 +4,7 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.3]
 
 - **`replicare verify` checks MySQL tables a key range at a time,** like Postgres: no single
   long read of a whole table, a short pause between ranges, and rows that differ reported by key
