@@ -4,6 +4,24 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **Clearing old track rows no longer slows down replication.** In 0.7.0 and 0.7.1, the clean-up
+  of track rows left behind by earlier versions ran inside every streaming pass. On a busy source
+  with millions of them, every pass waited on large deletes, and lag climbed until they were gone.
+  It now runs in the background on a connection of its own, 10,000 rows at a time with a pause in
+  between, so streaming never waits for it. New log events: `track.leftovers_removed` and
+  `track.sweep_failed`.
+- **Fewer failed passes on a busy source.** Each pass used to read the parent tables' queued
+  changes before the child tables'. A parent and child written by the application between those
+  two reads left the child in the pass without its parent, so the target rejected it, the pass was
+  retried, and on a busy source the same thing could happen on every retry until the pass gave up.
+  The child tables' queues are now read first, which rules this out: the source only accepts a
+  child row once its parent exists.
+- **`verify --sample` checks the number of ranges asked for on small tables too.** Sampling picks
+  whole pages at random, and on a small table it sometimes found fewer starting keys than asked
+  for; it now widens the sample until it has enough.
+
 ## [0.7.1]
 
 - **Restarts never take down the indexes of a table that's already copied.** If `replicare`

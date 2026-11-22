@@ -204,8 +204,13 @@ correctness mechanism** — only a lag/observability signal.
   Before this, track rows were never deleted, the track table grew by one row per change per
   target forever (7.8M rows / 752 MB on one busy table), and since the purge reads the track
   table it slowed to minutes per run and starved the source application of disk. Leftovers from
-  older versions are swept a bounded window per purge (`sweepLeftoverTrack`: rows below the oldest
-  queued delta, per target, on the `(target, delta_id)` key); each Postgres purge statement runs
+  older versions are swept by optional `engine.TrackSweeper` (rows below the oldest queued delta,
+  per target, on the `(target, delta_id)` key, 10k ids per statement) **in a background goroutine
+  on its own short-lived source connection, never inside a streaming pass** (decision, from a
+  production incident: in 0.7.0 the sweep ran inside every `Purge`, i.e. every pass, and on a busy
+  source with millions of leftovers each pass waited on large deletes; lag climbed and the
+  read-order race below fired on every retry). `Syncer.OpenSource`; rounds every 10 min,
+  `track.leftovers_removed` / `track.sweep_failed` events. Each Postgres purge statement runs
   under a 30s `statement_timeout`; track tables get the delta tables' aggressive autovacuum; and
   `replicare_delta_purge_seconds{sync,table}` surfaces a slowing purge. MySQL does the same
   (select the batch's ids, then delete deltas + track rows in one transaction).
@@ -216,6 +221,14 @@ correctness mechanism** — only a lag/observability signal.
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply
 parent→child, deletes apply child→parent (reverse)**. This ordering is always complete because
 apply is scoped to an **FK connected component** (see §8.1) — no edge crosses the unit boundary.
+**Dirty-key queues are READ children first (reverse topo order), applied parents first (decision,
+from a production incident).** The source enforces its FKs, so a parent's delta commits no later
+than any child delta that needs it; reading the child queue first therefore guarantees every
+parent a read child row needs is already visible when the parent queue is read. Read parents-first,
+a parent+child committed between the two reads left the child in the pass without its parent →
+23503 on the target, and on a busy source with long passes it recurred on every retry attempt
+until the pass halted (`gatherWork`). It still happens for a parent beyond `drain_batch` (a deep
+backlog) — the retry fallback covers that.
 **FK cycles and self-references cannot be topo-sorted**, so a **retry fallback** is required: a
 row that hits a transient FK violation stays dirty (its delta isn't tracked/purged) and is
 retried on a later pass once its dependency lands. This keeps us correct and self-healing without

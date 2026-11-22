@@ -528,9 +528,12 @@ rather than loading the source for minutes.
 
 Versions before 0.7.0 never deleted track rows, so on a busy source the track tables grew by about
 one row per change per target, forever. The purge reads the track table, so it got slower every
-day, until it was taking minutes and slowing the application's own queries. From 0.7.0,
-`replicare` also clears out those leftover rows by itself, a small batch per table on each pass, so
-a large backlog of them disappears over the first minutes after upgrading. The leftovers are
+day, until it was taking minutes and slowing the application's own queries. `replicare` clears
+out those leftover rows by itself, in the background on a connection of its own: 10,000 rows at a
+time with a short pause in between, table by table, so streaming never waits for it. It logs
+`track.leftovers_removed` with how many it removed, and checks again every 10 minutes. (In 0.7.0
+and 0.7.1 the clean-up ran inside each streaming pass instead, and on a busy source with millions
+of leftovers it made every pass slow until they were gone.) The leftovers are
 harmless to remove: they only record changes that have already been applied and purged. To clear
 them sooner, or without upgrading, delete them by hand in batches; for a table whose capture
 tables are numbered 20:
@@ -753,6 +756,8 @@ field to grep / alert on:
 | `index.rebuild_started` / `index.rebuild_done` | INFO | the indexes taken down are being built again / are all back |
 | `index.built` | INFO | one index is built again, with how long it took and how many are back |
 | `index.build_failed` | WARN | an index build failed; it's tried again a minute later |
+| `track.leftovers_removed` | INFO | the background clean-up removed track rows left behind by versions before 0.7.0, with how many |
+| `track.sweep_failed` | WARN | a round of that clean-up failed; it's tried again 10 minutes later |
 | `retention.cap_approaching` | INFO, then WARN, then ERROR | delta backlog nearing the retention cap(escalates as it gets closer) |
 | `target.unreachable` / `target.recovered` | ERROR / INFO | target connectivity, cross-channel with the `target_up` gauge and the errored span |
 | `target.needs_reseed` | ERROR | a target was sacrificed to the retention cap and will re-copy |
