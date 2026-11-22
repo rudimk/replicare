@@ -127,7 +127,7 @@ func (e *Enricher) Verify(ctx context.Context, name string) VerifyReport {
 }
 
 // VerifyWith runs the convergence check for sync `name`. For engines that support it
-// (engine.ChunkVerifier, Postgres) each table is compared one key range at a time: the
+// (engine.ChunkVerifier: Postgres, MySQL) each table is compared one key range at a time: the
 // source picks the end of each range, both ends fingerprint it with the same query,
 // and a range that differs is narrowed to the exact rows, which are re-checked after
 // opts.RecheckAfter so rows still on their way are not reported. Other engines get one
