@@ -94,21 +94,40 @@ func (s *Syncer) deferIndexesWith(ctx context.Context, tables []engine.TableRef,
 // deferIndexesForComponent takes down the indexes of the component's tables that this
 // run is about to copy: every table of a cyclic component that is not wholly copied
 // (it is copied again from the start), else just the tables not marked copied.
+//
+// Only a table the state store says is not copied counts. If its copy progress cannot
+// be read, the table keeps its indexes: dropping them on a table that is in fact copied
+// would cost a full rebuild of each, for nothing, while the copy itself stops on the
+// same read error. A cyclic component is taken down whole only when one of its tables
+// is known not to be copied.
 func (s *Syncer) deferIndexesForComponent(ctx context.Context, comp engine.Component) {
 	if !s.DeferIndexes {
 		return
 	}
-	var todo []engine.TableRef
-	for _, t := range comp.Order {
-		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t)
-		if err != nil || !prog.Done {
-			todo = append(todo, t)
-		}
-	}
+	todo := s.tablesToCopy(ctx, comp)
 	if comp.HasCycle() && len(todo) > 0 {
 		todo = comp.Order
 	}
 	s.deferIndexes(ctx, todo)
+}
+
+// tablesToCopy returns the component's tables whose copy progress says not done.
+// A table whose progress cannot be read is left out, and logged.
+func (s *Syncer) tablesToCopy(ctx context.Context, comp engine.Component) []engine.TableRef {
+	var todo []engine.TableRef
+	for _, t := range comp.Order {
+		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t)
+		if err != nil {
+			if ctx.Err() == nil {
+				s.log(ctx, fmt.Sprintf("read copy progress of %s; keeping its target indexes", t), err)
+			}
+			continue
+		}
+		if !prog.Done {
+			todo = append(todo, t)
+		}
+	}
+	return todo
 }
 
 // publishIndexCounts refreshes the deferred / built gauges for this target.
