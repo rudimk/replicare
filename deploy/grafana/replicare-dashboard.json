@@ -2668,7 +2668,7 @@
     {
       "type": "timeseries",
       "title": "Leftover track rows cleared (per table)",
-      "description": "rate(replicare_track_leftovers_removed_total) \u2014 track rows left behind by versions before 0.7.0, removed in the background on a connection of their own. A line only while a table still has leftovers; it drops to nothing once they are gone, and stays empty on a source that never ran an older version.",
+      "description": "replicare_track_leftovers_removed_total - how many track rows left behind by versions before 0.7.0 the background clean-up has removed from each table since the daemon started. A table appears once its first leftovers are removed and its line then stays flat at its total; a source that never ran an older version shows nothing. (A rate would read 0 here: the clean-up usually clears a table in one round, so its count appears already at its total.)",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2682,12 +2682,12 @@
       "id": 46,
       "fieldConfig": {
         "defaults": {
-          "unit": "rps",
+          "unit": "short",
           "custom": {
             "drawStyle": "line",
-            "fillOpacity": 10,
+            "fillOpacity": 0,
             "showPoints": "never",
-            "lineInterpolation": "linear",
+            "lineInterpolation": "stepAfter",
             "axisPlacement": "auto",
             "stacking": {
               "mode": "none",
@@ -2702,9 +2702,11 @@
       },
       "options": {
         "legend": {
-          "displayMode": "list",
+          "displayMode": "table",
           "placement": "bottom",
-          "calcs": []
+          "calcs": [
+            "lastNotNull"
+          ]
         },
         "tooltip": {
           "mode": "multi",
@@ -2718,7 +2720,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum by (table) (rate(replicare_track_leftovers_removed_total{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"}[5m]))",
+          "expr": "max by (table) (replicare_track_leftovers_removed_total{sync=~\"$sync\", target=~\"$target\", table=~\"$table\"})",
           "legendFormat": "{{table}}",
           "range": true,
           "instant": false,
