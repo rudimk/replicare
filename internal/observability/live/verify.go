@@ -70,6 +70,8 @@ type VerifyKey struct {
 type VerifyOptions struct {
 	// Tables limits the check to these tables (schema.table); empty means all.
 	Tables []string
+	// Targets limits the check to these of the sync's targets; empty means all.
+	Targets []string
 	// ChunkRows is how many rows each key range covers (default 10,000).
 	ChunkRows int
 	// Pause is the wait between key ranges, to keep the load on the source low
@@ -175,6 +177,9 @@ func (e *Enricher) VerifyWith(ctx context.Context, name string, opts VerifyOptio
 	rep.Converged = true
 	targets := make([]*verifyTarget, 0, len(sync.Targets))
 	for _, tgtName := range sync.Targets {
+		if len(opts.Targets) > 0 && !contains(opts.Targets, tgtName) {
+			continue
+		}
 		vt := &verifyTarget{report: VerifyTarget{Target: tgtName, Converged: true}}
 		targets = append(targets, vt)
 		tgtEp := e.cfg.Targets[tgtName]
@@ -241,6 +246,15 @@ func (e *Enricher) VerifyWith(ctx context.Context, name string, opts VerifyOptio
 		rep.Targets = append(rep.Targets, vt.report)
 	}
 	return rep
+}
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyTarget is one target being compared: its report and its verifiers.

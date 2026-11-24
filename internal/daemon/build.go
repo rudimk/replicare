@@ -36,6 +36,14 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 		MaintenanceWorkMem: sync.DeferIndexes.MaintenanceWorkMem,
 		ParallelWorkers:    sync.DeferIndexes.ParallelWorkers,
 	}
+	// skip_initial_copy (one-way syncs only): mark the uncopied tables copied, and check
+	// them against the source once the target has caught up unless that is turned off.
+	// The check is wired even with skipping turned off, so tables an earlier run skipped
+	// are still checked; it does nothing when there are none.
+	syncer.SkipInitialCopy = sync.SkipsInitialCopy()
+	if sync.VerifiesSkippedCopy() {
+		syncer.SkipCheck = d.skipCheck(sync.Name, targetName)
+	}
 	syncer.OpenSink = func(ctx context.Context) (engine.Sink, error) {
 		eng, err := engine.Get(tgtEp.Engine)
 		if err != nil {

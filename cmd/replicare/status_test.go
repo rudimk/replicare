@@ -124,3 +124,35 @@ func TestStatusWatchInvalidDuration(t *testing.T) {
 		t.Fatalf("expected --watch error, got %q", errb.String())
 	}
 }
+
+// TestRenderReportsSkippedCopy: a table that skipped its copy and has not passed its
+// check shows "skipped" in the COPY column, under a warning naming how many.
+func TestRenderReportsSkippedCopy(t *testing.T) {
+	reports := []status.Report{{
+		Sync: "back",
+		Tables: []status.TableStatus{
+			{Table: "public.a", CopyDone: true, CopySkipped: true,
+				Targets: []status.TargetStatus{{Target: "old", Phase: "streaming"}}},
+			{Table: "public.b", CopyDone: true,
+				Targets: []status.TargetStatus{{Target: "old", Phase: "streaming"}}},
+		},
+	}}
+	var out bytes.Buffer
+	renderReports(&out, reports, false, time.Now())
+	got := out.String()
+	if !strings.Contains(got, "WARNING: 1 table skipped its copy") {
+		t.Errorf("missing the skipped-copy warning:\n%s", got)
+	}
+	var aLine, bLine string
+	for _, l := range strings.Split(got, "\n") {
+		switch {
+		case strings.Contains(l, "public.a"):
+			aLine = l
+		case strings.Contains(l, "public.b"):
+			bLine = l
+		}
+	}
+	if !strings.Contains(aLine, "skipped") || !strings.Contains(bLine, "done") {
+		t.Errorf("COPY column: a=%q b=%q, want skipped / done", aLine, bLine)
+	}
+}

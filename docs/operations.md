@@ -697,6 +697,7 @@ table exactly.
 | `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
 | `replicare_delta_purge_seconds` | gauge | `sync`, `table` | How long the table's last purge on the source took, in seconds. It should stay well under a second; each purge statement gives up after 30 seconds and is retried on the next pass. |
 | `replicare_track_leftovers_removed_total` | counter | `sync`, `target`, `table` | Track rows left behind by versions before 0.7.0 that the background clean-up has removed. It only moves while a table still has leftovers. |
+| `replicare_copy_skipped_tables` | gauge | `sync`, `target`, `check` | Tables marked copied without being copied(`skip_initial_copy`), by where their check against the source stands: `pending`, `ok`, `drift`, or `off` when the check is turned off. Unset when no table skipped its copy. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability(`1` = up, `0` = down). |
 | `replicare_source_up` | gauge | `sync` | Source reachability(`1` = up, `0` = down). |
@@ -752,6 +753,11 @@ field to grep / alert on:
 | `copy.component_started` | INFO | the initial copy of a group of linked tables(a component) began; the message names its size and first table |
 | `copy.link_fill_started` / `copy.link_fill_done` | INFO | for a table linked in a loop, its rows are in and the pass filling in the links between them began / ended |
 | `copy.transient_retry` | WARN | a group's copy hit a row whose parent the target didn't have yet, and is being retried |
+| `copy.skipped` | INFO, or WARN with the check off | `skip_initial_copy` marked tables copied without copying them, with how many |
+| `copy.skip_check_started` | INFO | the check of those tables against the source began, once the target caught up |
+| `copy.skip_check_ok` | INFO | one of them matches the source |
+| `copy.skip_check_drift` | ERROR | one of them differs from the source, with how many rows are missing, extra or different and some of their keys; copy it with `replicare reseed` |
+| `copy.skip_check_failed` | WARN | the check couldn't run for a table(for example, a database was unreachable); it's tried again 5 minutes later |
 | `table.cutover_to_streaming` | INFO | a group of tables finished its initial copy and switched to streaming |
 | `stream.pass_error` | WARN | a streaming pass failed and will be retried |
 | `index.dropped` | INFO | a plain target index was taken down for the initial copy; the message carries its full `CREATE INDEX` statement |
@@ -979,6 +985,63 @@ nothing, in this order:
 The next start installs capture afresh and copies everything again. The target can stay as it is:
 a group of tables linked in a loop is emptied on the target before it's copied, and any other table
 that already holds rows is merged into rather than duplicated.
+
+## Cutting over, with a way back
+
+A migration ends with a cutover: writes stop on the old database, the last changes reach the new
+one, and the applications move across. To keep the old database usable as a fallback, a second
+sync runs the other way, from the new database back to the old one. Since at the moment of the
+cutover the two hold the same data, that sync doesn't need to copy anything; it only has to carry
+the changes made after it. Below, *old* is the database being moved off and *new* the one being
+moved to; `forward` is the sync from old to new, and `back` the one from new to old.
+
+### Before the day
+
+1. Add the `back` sync to the config: source *new*, target *old*, the same `include` and
+   `exclude` as `forward`, `enabled: false` for now, and
+   [`skip_initial_copy`](configuration.md#starting-without-a-copy-skip_initial_copy) turned on.
+   One config may hold both directions as long as only one runs at a time(see
+   [cycle safety](configuration.md#cycle-safety-for-one-way-syncs)).
+2. Run `replicare validate <config>`. It checks *new*'s tables against *old*'s for `back`, which
+   matters most when *old* runs an older version.
+
+### On the day
+
+1. Stop writes to *old*. Wait until the `forward` backlog is 0 and stays there, and optionally run
+   `replicare verify <config> --sync forward`.
+2. Pause `forward`(`enabled: false`) and restart the daemon. This comes before the next step:
+   running both directions at once would send every change round in a loop, which is why the
+   config refuses it.
+3. Install capture on *new* for `back`, before any application writes to it:
+
+   ```sh
+   replicare capture install <config> --sync back
+   ```
+
+   Every change on *new* is queued for *old* from here on, even before `back` runs.
+4. Move the applications to *new*.
+5. Remove `forward`'s capture from *old*:
+
+   ```sh
+   replicare capture remove <config> --sync forward
+   ```
+
+   This works with `forward` paused. Without it, *old*'s triggers would record every write `back`
+   makes, in queue tables nothing reads; and if `forward` ran again later, it would send all of
+   them to *new* for nothing.
+6. Turn `back` on(`enabled: true`) and restart the daemon. It streams the queued changes straight
+   away, and checks every table against *new* once it has caught up. Watch for
+   `copy.skip_check_ok` per table in the logs; `replicare status` shows `skipped` against each
+   table until then.
+
+Anything written to *new* before step 3 never reaches *old*, deletes included, and the check
+reports it as drift; that's why the order matters.
+
+### Falling back
+
+The same steps the other way round: stop writes to *new*, wait for the `back` backlog to reach 0,
+pause `back`, and move the applications to *old*. If `forward` will run again, it needs its
+capture back on *old* first(step 3 the other way round), and the same order applies.
 
 ## Sequences & identity counters: DR / promotion
 

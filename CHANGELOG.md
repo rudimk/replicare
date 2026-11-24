@@ -4,8 +4,22 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.4]
 
+- **A sync can start without its initial copy:** `skip_initial_copy: { enabled: true }`.
+  For a target that already holds the source's data, usually the old source after a cutover as
+  the target of a sync running the other way, the copy would rewrite every row for nothing. With
+  it on, every table that hasn't started copying is marked copied and the sync streams the changes
+  queued since capture was installed on the source. Once the target has caught up, each of those
+  tables is compared with the source, row by row like `replicare verify`, and a difference is
+  logged at ERROR with the keys involved; `replicare status` shows `skipped` until a table passes,
+  and `replicare_copy_skipped_tables` counts them. `verify: false` turns the check off. Postgres
+  and MySQL. It's set per sync, so with Helm it goes in the sync's entry in the chart's values.
+  See [cutting over, with a way back](https://replicare.rudimk.com/operations.html#cutting-over-with-a-way-back).
+- **A config can hold a sync and its reverse while one of them is paused.** The check against
+  replication loops counted paused syncs too, so `A→B` and `B→A` in one config were refused even
+  with one of them off. Now only running syncs count; two running in opposite directions are still
+  refused.
 - **The "Leftover track rows cleared" dashboard panel shows totals.** It showed a rate, which read 0:
   the clean-up usually clears a table in one round, so each table's count appears already at its total,
   and a rate can't see that first step. It now shows how many leftover rows were removed from each

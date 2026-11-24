@@ -83,6 +83,15 @@ type Syncer struct {
 	// so it never shares the streaming connection or delays a pass. Nil disables it.
 	OpenSource func(ctx context.Context) (engine.Source, error)
 
+	// SkipInitialCopy marks every table that has not started copying as copied without
+	// copying it (the sync's skip_initial_copy), for a target that already holds the
+	// source's data. Never set on a cluster edge.
+	SkipInitialCopy bool
+	// SkipCheck compares the given skipped tables of this target against the source,
+	// row by row, once the target has caught up. Nil turns the check off
+	// (skip_initial_copy.verify: false); the tables then stay marked as unchecked.
+	SkipCheck func(ctx context.Context, tables []engine.TableRef) ([]SkipCheckResult, error)
+
 	// Heartbeat, if set, is called whenever streaming makes progress — after each pass
 	// (success or handled error), and inside a pass as work completes (a table's apply
 	// committing, a component attempt returning, a reseed's table emptied or chunk
@@ -115,6 +124,12 @@ type Syncer struct {
 	indexMu sync.Mutex
 	// indexKick wakes the rebuilder after a reseed has dropped indexes again.
 	indexKick chan struct{}
+
+	// caughtUp is closed on the first healthy pass where every table's oldest queued
+	// change is under a minute old; the skipped-copy check waits for it. Nil when no
+	// check is waiting.
+	caughtUp     chan struct{}
+	caughtUpOnce sync.Once
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
@@ -140,6 +155,12 @@ func (s *Syncer) Bringup(ctx context.Context) error {
 		Sync: s.Name, Level: "INFO", Event: observability.EventCaptureInstalled,
 		Message: fmt.Sprintf("capture installed on %d tables", len(s.Replicable)),
 	})
+	// skip_initial_copy: with capture on, mark the tables that have not started copying
+	// as copied. Everything below then treats them as an earlier run's finished copy:
+	// no copy, no index deferral, no rows-to-copy estimate, straight to cutover.
+	if err := s.skipCopies(ctx); err != nil {
+		return err
+	}
 
 	// Publish every table's phase up front, so the metrics page shows the copy is under
 	// way from the first scrape — before this, nothing was reported until a table reached
@@ -236,6 +257,11 @@ func (s *Syncer) installCapture(ctx context.Context) error {
 // tables' cursors to streaming for this target. The copy is checkpointed by the
 // StateStore, so an interrupted component resumes rather than restarting.
 func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) error {
+	// A component whose every table is already copied (an earlier run, or skipped)
+	// has nothing to copy: cut it over without announcing a copy.
+	if s.componentCopied(ctx, comp) {
+		return s.cutover(ctx, comp)
+	}
 	// A cyclic component has no parents-first order, so the plain chunked copy would
 	// fail; delegate the whole component to the engine's cycle-safe copier when it
 	// offers one (Postgres/MySQL). Acyclic components (and engines without a cyclic
@@ -261,6 +287,24 @@ func (s *Syncer) copyAndCutover(ctx context.Context, comp engine.Component) erro
 		}
 	}
 	stopSizes()
+	return s.cutover(ctx, comp)
+}
+
+// componentCopied reports whether every table of the component is marked copied. An
+// unreadable progress counts as not copied, so the copy path (which reads it again and
+// fails loud) decides.
+func (s *Syncer) componentCopied(ctx context.Context, comp engine.Component) bool {
+	for _, t := range comp.Order {
+		prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t)
+		if err != nil || !prog.Done {
+			return false
+		}
+	}
+	return true
+}
+
+// cutover flips each of the component's tables to streaming for this target.
+func (s *Syncer) cutover(ctx context.Context, comp engine.Component) error {
 	for _, t := range comp.Order {
 		cur, err := s.Store.LoadCursor(ctx, s.Name, s.Target, t)
 		if err != nil {

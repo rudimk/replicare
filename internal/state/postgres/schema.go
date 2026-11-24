@@ -154,5 +154,16 @@ var schemaSet = migrate.Set{
 				)`,
 			},
 		},
+		{
+			Version: 5,
+			Name:    "copy_progress_skipped",
+			// A table marked copied without being copied (skip_initial_copy), whose
+			// after-catch-up check has not yet confirmed it matches the source. Kept with
+			// the progress row, so a restart still runs the pending check. Additive: a new
+			// defaulted column, every existing row reads as an ordinary copy.
+			Statements: []string{
+				`ALTER TABLE replicare_state.copy_progress ADD COLUMN skipped boolean NOT NULL DEFAULT false`,
+			},
+		},
 	},
 }

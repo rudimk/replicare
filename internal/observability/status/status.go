@@ -50,8 +50,11 @@ type IndexStatus struct {
 // state within the sync. SourceRows is a live signal (populated only by the CLI's
 // live mode, nil in the state-store-only HTTP path).
 type TableStatus struct {
-	Table         string         `json:"table"`
-	CopyDone      bool           `json:"copy_done"`
+	Table    string `json:"table"`
+	CopyDone bool   `json:"copy_done"`
+	// CopySkipped: marked copied without being copied (skip_initial_copy) and not yet
+	// confirmed by the check against the source (pending, drifted, or the check is off).
+	CopySkipped   bool           `json:"copy_skipped,omitempty"`
 	CopyUpdatedAt *time.Time     `json:"copy_updated_at,omitempty"`
 	SourceRows    *int64         `json:"source_rows,omitempty"`
 	Targets       []TargetStatus `json:"targets"`
@@ -148,6 +151,7 @@ func (r *Reporter) Report(ctx context.Context, sync string) (Report, error) {
 	for _, p := range progs {
 		e := ensure(p.Table.String())
 		e.st.CopyDone = p.Done
+		e.st.CopySkipped = e.st.CopySkipped || (p.Done && p.Skipped)
 		if !p.UpdatedAt.IsZero() {
 			ts := p.UpdatedAt
 			e.st.CopyUpdatedAt = &ts

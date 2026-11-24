@@ -344,6 +344,36 @@ syncs:
 			wantCycle: true,
 		},
 		{
+			name: "A<->B with one direction paused is fine",
+			yaml: `
+sources:
+  ` + fk("a", "db://a") + `
+  ` + fk("b", "db://b") + `
+targets:
+  ` + fk("a", "db://a") + `
+  ` + fk("b", "db://b") + `
+syncs:
+  - { name: a2b, source: a, targets: [b], enabled: false }
+  - { name: b2a, source: b, targets: [a] }
+`,
+			wantCycle: false,
+		},
+		{
+			name: "A<->B with both directions paused is fine",
+			yaml: `
+sources:
+  ` + fk("a", "db://a") + `
+  ` + fk("b", "db://b") + `
+targets:
+  ` + fk("a", "db://a") + `
+  ` + fk("b", "db://b") + `
+syncs:
+  - { name: a2b, source: a, targets: [b], enabled: false }
+  - { name: b2a, source: b, targets: [a], enabled: false }
+`,
+			wantCycle: false,
+		},
+		{
 			name: "fan-out A->{B,C} is fine",
 			yaml: `
 sources:

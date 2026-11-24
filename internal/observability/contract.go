@@ -51,11 +51,15 @@ const (
 	// MetricTrackLeftoversRemovedTotal counts the track rows left behind by versions
 	// before 0.7.0 that the background sweep has removed, per table.
 	MetricTrackLeftoversRemovedTotal = "replicare_track_leftovers_removed_total"
-	MetricReseedTotal                = "replicare_reseed_total"
-	MetricTargetUp                   = "replicare_target_up"
-	MetricSourceUp                   = "replicare_source_up"
-	MetricSourceDBBytes              = "replicare_source_db_bytes"
-	MetricTargetDBBytes              = "replicare_target_db_bytes"
+	// MetricCopySkippedTables counts the tables a sync marked copied without copying
+	// (skip_initial_copy), by where their check against the source stands: pending,
+	// ok, drift, or off (the check is turned off).
+	MetricCopySkippedTables = "replicare_copy_skipped_tables"
+	MetricReseedTotal       = "replicare_reseed_total"
+	MetricTargetUp          = "replicare_target_up"
+	MetricSourceUp          = "replicare_source_up"
+	MetricSourceDBBytes     = "replicare_source_db_bytes"
+	MetricTargetDBBytes     = "replicare_target_db_bytes"
 	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
 	// as opposed to the whole-database *_db_bytes above. This is the
 	// apples-to-apples source↔target figure — it excludes replicare's own capture
@@ -105,6 +109,7 @@ var Metrics = []Metric{
 	{MetricDeltaPurgeSeconds, Gauge, "How long the table's last delta purge on the source took, in seconds", []string{LabelSync, LabelTable}},
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
 	{MetricTrackLeftoversRemovedTotal, Counter, "Track rows left by versions before 0.7.0 that the background sweep removed", []string{LabelSync, LabelTarget, LabelTable}},
+	{MetricCopySkippedTables, Gauge, "Tables marked copied without being copied (skip_initial_copy), by where their check against the source stands (pending, ok, drift, off)", []string{LabelSync, LabelTarget, "check"}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},
 	{MetricSourceUp, Gauge, "Source reachability (1=up, 0=down)", []string{LabelSync}},
@@ -194,4 +199,13 @@ const (
 	// and a sweep round that failed (tried again later).
 	EventTrackSwept       = "track.leftovers_removed"
 	EventTrackSweepFailed = "track.sweep_failed"
+	// skip_initial_copy: tables marked copied without being copied, the check against
+	// the source starting once the target has caught up, a table that matches, a table
+	// that differs (ERROR: the target is missing data or holds data the source doesn't),
+	// and a check that could not run (tried again later).
+	EventCopySkipped          = "copy.skipped"
+	EventCopySkipCheckStarted = "copy.skip_check_started"
+	EventCopySkipCheckOK      = "copy.skip_check_ok"
+	EventCopySkipCheckDrift   = "copy.skip_check_drift"
+	EventCopySkipCheckFailed  = "copy.skip_check_failed"
 )

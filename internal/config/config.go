@@ -113,6 +113,40 @@ type Sync struct {
 	// and builds them again once the whole sync is streaming (CLAUDE.md §4.1 "deferred
 	// target indexes"). On by default for Postgres syncs; see DeferIndexes.
 	DeferIndexes DeferIndexes `yaml:"defer_indexes"`
+	// SkipInitialCopy starts the sync streaming without its initial copy, for a target
+	// that already holds the source's data (for example the old source, after a cutover,
+	// as the target of the sync running the other way). See SkipInitialCopy.
+	SkipInitialCopy SkipInitialCopy `yaml:"skip_initial_copy"`
+}
+
+// SkipInitialCopy configures starting a sync without its initial copy. With it on, every
+// table whose copy has not started is marked copied, and the sync streams the changes
+// queued since capture was installed. That is only correct when the target matched the
+// source at the moment capture went on (writes stopped, capture installed, then writes
+// resumed), so once the target has caught up the daemon compares every table against the
+// source, like `replicare verify`, and reports any difference loudly. A table that has
+// started copying finishes its copy, and a reseed always re-copies.
+type SkipInitialCopy struct {
+	// Enabled: unset or false → the normal initial copy (the default); true → skip it.
+	Enabled *bool `yaml:"enabled"`
+	// Verify: unset or true → compare each skipped table against the source once the
+	// target has caught up (the default), including tables skipped by an earlier run
+	// after Enabled is turned off; false → don't (the operator has checked).
+	Verify *bool `yaml:"verify"`
+}
+
+// SkipsInitialCopy reports whether this sync starts without its initial copy. Unset is
+// off, so it is a pure opt-in.
+func (s *Sync) SkipsInitialCopy() bool {
+	return s.SkipInitialCopy.Enabled != nil && *s.SkipInitialCopy.Enabled
+}
+
+// VerifiesSkippedCopy reports whether tables marked copied by skip_initial_copy are
+// compared against the source once the target has caught up. On unless set false, and
+// independent of Enabled: tables an earlier run skipped are still checked after the
+// option is turned off.
+func (s *Sync) VerifiesSkippedCopy() bool {
+	return s.SkipInitialCopy.Verify == nil || *s.SkipInitialCopy.Verify
 }
 
 // DeferIndexes configures dropping a Postgres target's plain indexes for the initial
@@ -453,6 +487,21 @@ func (c *Config) Validate() error {
 				}
 			}
 		}
+
+		// Skipping the initial copy relies on trigger capture (every change since capture
+		// went on is queued) and on a row-level check of the result, which Postgres and
+		// MySQL have. Never on a mesh member: its rows include its peers' data.
+		if s.SkipsInitialCopy() {
+			if src.Engine != "postgres" && src.Engine != "mysql" {
+				return fmt.Errorf("sync %q: skip_initial_copy is only supported for postgres and mysql syncs (this one is %q)", s.Name, src.Engine)
+			}
+			members := c.clusterMemberIdentities()
+			for _, ref := range s.Targets {
+				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
+					return fmt.Errorf("sync %q: skip_initial_copy cannot be enabled when target %q (%s) is also an active-active cluster member", s.Name, ref, id)
+				}
+			}
+		}
 	}
 
 	for i, cl := range c.Clusters {
@@ -502,7 +551,10 @@ func (c *Config) clusterMemberIdentities() map[string]bool {
 // detectSyncCycles builds the directed graph of one-way syncs (each source → each of
 // its targets, keyed by connection identity) and rejects any cycle, including a
 // self-loop (a sync whose source and target are the same DB). Clusters are excluded
-// by construction — they are the sanctioned bidirectional topology.
+// by construction — they are the sanctioned bidirectional topology. A paused sync
+// (enabled: false) moves no data, so it adds no edge: a config may hold a sync and its
+// reverse while only one of them runs (the cutover and failback case), but never both
+// running at once.
 func (c *Config) detectSyncCycles() error {
 	adj := map[string]map[string]bool{}
 	addNode := func(id string) {
@@ -511,6 +563,9 @@ func (c *Config) detectSyncCycles() error {
 		}
 	}
 	for _, s := range c.Syncs {
+		if !s.IsEnabled() {
+			continue
+		}
 		from := connIdentity(c.Sources[s.Source])
 		addNode(from)
 		for _, ref := range s.Targets {

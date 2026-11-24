@@ -31,3 +31,23 @@ syncs:
 		t.Fatalf("enabled: true on a non-Postgres sync: err = %v, want a refusal", err)
 	}
 }
+
+// TestSkipInitialCopyEngines: skipping the initial copy relies on trigger capture and
+// a row-level check, so another engine's sync is refused.
+func TestSkipInitialCopyEngines(t *testing.T) {
+	registerFake(t)
+	base := `
+sources:
+  s: { engine: fake, fake: {dsn: "x"} }
+targets:
+  t: { engine: fake, fake: {dsn: "y"} }
+syncs:
+  - name: only
+    source: s
+    targets: [t]
+`
+	_, err := Load(writeTemp(t, base+"    skip_initial_copy: { enabled: true }\n"))
+	if err == nil || !strings.Contains(err.Error(), "only supported for postgres and mysql") {
+		t.Fatalf("enabled on a fake-engine sync: err = %v, want a refusal", err)
+	}
+}

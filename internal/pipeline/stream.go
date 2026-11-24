@@ -32,6 +32,9 @@ func (s *Syncer) Stream(ctx context.Context) error {
 	// Clear track rows left behind by versions before 0.7.0, in the background on a
 	// connection of its own, so the deletes never hold up a pass.
 	defer s.startTrackSweeper(ctx)()
+	// Check the tables that skipped their copy (skip_initial_copy) against the source,
+	// in the background on connections of its own, once the target has caught up.
+	defer s.startSkipCheck(ctx)()
 	interval := s.DrainInterval
 	if interval <= 0 {
 		interval = time.Second
@@ -146,18 +149,23 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// the escalating retention log once the backlog is actually approaching the cap
 	// (half or more) — logging it at proximity 0 every tick is just noise. Refresh
 	// the cursor so its age reflects liveness (not a stale cutover timestamp).
+	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
 	for _, t := range s.Replicable {
 		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
 		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
 		if err != nil {
 			continue
 		}
+		backlogs[t] = bl
 		comp := s.componentOf(t)
 		s.Tel.SetBacklog(s.Name, s.Target, t, comp, bl)
 		s.Tel.SetReplicationLag(s.Name, s.Target, t, comp, bl.OldestAge.Seconds())
 		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
 			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
 		}
+	}
+	if allCaughtUp(backlogs, s.Replicable) {
+		s.noteCaughtUp()
 	}
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
