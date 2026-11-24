@@ -28,6 +28,12 @@ type CopyProgress struct {
 	Watermark engine.KeyValues // everything strictly below this key is copied
 	Completed []CompletedRange // out-of-order completed ranges above the watermark
 	UpdatedAt time.Time        // last checkpoint time (read-only; ignored on write)
+	// Skipped marks a table set Done WITHOUT being copied (the sync's skip_initial_copy:
+	// the operator says the target already holds the data) that no check has confirmed
+	// yet. The daemon's after-catch-up check clears it when the table matches the source;
+	// it stays set while the check is pending, has found drift, or is turned off. Any
+	// ordinary progress write (a copy, a reseed's reset) clears it.
+	Skipped bool
 }
 
 // CompletedRange is one finished chunk's half-open key range.

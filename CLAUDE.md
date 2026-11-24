@@ -323,6 +323,26 @@ metrics, AND OTel traces** — not just one:
 - After bulk copy completes, the daemon transitions the table to **streaming** (drain delta queue
   continuously).
 
+**Skipping the initial copy (`skip_initial_copy`, decision, from a production cutover; Postgres +
+MySQL, off by default).** The way back after a cutover is a sync from the new source to the old one,
+which at that moment holds the same data, so the copy would rewrite every row for nothing. With the
+option on, bring-up (after capture install) marks every table that **has not started copying**
+(no progress, not needs-reseed) `Done` with **`CopyProgress.Skipped`** (state store v5,
+`copy_progress.skipped`); everything downstream then treats it as an earlier run's finished copy (no
+copy, no index deferral, no row estimate, straight to cutover). Correct only if the target matched
+the source **when capture was installed** (operator: stop writes → `capture install` → resume
+writes → start the sync), so the mark is not trusted: once every table's oldest queued change is
+under a minute old, a background goroutine (`startSkipCheck`, own connections via the live verify
+path, `daemon.skipCheck`) compares each skipped table with the source row by row (chunked verify +
+re-check). Match → `Skipped` cleared (`copy.skip_check_ok`); difference → **ERROR**
+`copy.skip_check_drift` with counts + keys, the table keeps streaming but stays marked (status
+`skipped`, `replicare_copy_skipped_tables{check}`), re-checked on every start until a reseed copies
+it; a check that can't run retries in 5 min. A sampled or target-less report never passes a table.
+`verify: false` turns the check off (WARN at skip time); the check runs even after `enabled` is
+turned off, for tables skipped earlier. Refused on Redis and on a mesh-member target. **The one-way
+cycle check ignores paused syncs** (they move no data), so one config may hold `A→B` and `B→A` with
+only one enabled — the cutover/failback layout; both enabled is still refused.
+
 ### 4.1 Chunked-copy mechanics
 
 **Chunking (decision: keyset PK-range default, ctid fallback).**
@@ -989,6 +1009,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target constraints / PK / unique indexes. |
 | Deferred target indexes | **Postgres, on by default** (`defer_indexes`, per sync): plain target indexes are saved to the state store (+ logged in full) and dropped just before each table's copy, then rebuilt `CONCURRENTLY` one at a time (link columns first, then `ANALYZE`) on dedicated connections once the whole sync streams. Owned tables only; never on a mesh member; restart-safe; reseeds too; `replicare indexes restore` as the way out. See §4.1. |
+| Skip initial copy | **`skip_initial_copy` (opt-in, PG + MySQL):** tables not yet started are marked copied (`Skipped`, state store v5) and the sync streams from the capture queue; **after catch-up each is verified row by row** against the source, drift → ERROR + stays marked until reseed; restart-safe. Only correct if capture went on while target == source (documented cutover order). The one-way cycle check **ignores paused syncs**, so a sync and its reverse can share a config with one paused. See §4. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
 | Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass** (except a link column in a unique index where empty values collide — `NULLS NOT DISTINCT`, expression or filtered unique, detected from source+target indexes: a **self-reference** keeps it real and loads the table in **one statement**, existing rows first, and streaming keeps it real too; a **cross-table loop** is **blocked at pre-flight** → make it `DEFERRABLE`; never a schema change); **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |
 | PK updates | `UPDATE` changing the key enqueues **both** old + new PK (= delete(old) + upsert(new)); lets copy treat PKs as immutable. |

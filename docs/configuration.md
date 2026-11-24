@@ -182,6 +182,8 @@ syncs:
     sync_sequences: false     # optional; true keeps DR counters warm (see below)
     defer_indexes:            # optional; Postgres only, on unless set false (see below)
       enabled: true
+    skip_initial_copy:        # optional; Postgres and MySQL, off unless set true (see below)
+      enabled: false
     include: ["public.*"]     # selection globs (schema.table)
     exclude: ["*_audit"]      # excluded from the include set
     tuning: { ... }           # optional (see below)
@@ -237,6 +239,68 @@ serves live traffic: unset, it's simply off there, and `enabled: true` is refuse
 Setting `enabled: true` on a MySQL or Redis sync is refused too. How it runs, how to watch it, and
 how to put the indexes back by hand are in
 [operations](operations.md#target-indexes-during-the-first-copy).
+
+With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
+sync setting.
+
+### Starting without a copy: `skip_initial_copy`
+
+A new sync normally copies every table before it starts streaming changes. When the target
+already holds the same data as the source, that copy rewrites every row for nothing. The usual
+case is the way back after a cutover: the old source becomes the target of a sync running the
+other way, and at the moment of the cutover it holds exactly what the new source does.
+`skip_initial_copy` starts such a sync streaming straight away:
+
+```yaml
+syncs:
+  - name: back-to-old
+    # ...
+    skip_initial_copy:
+      enabled: true   # default false: copy as usual
+      verify: true    # default; false skips the check described below
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | off | `true` marks every table that hasn't started copying as copied, without copying it, and streams from there. |
+| `verify` | on | Once the target has caught up, compare each of those tables with the source, row by row, and report any difference. `false` leaves them unchecked. |
+
+Skipping the copy is only right if the target matched the source **when capture was installed
+on the source**. From that moment every insert, update and delete on the source is queued, so the
+sync only has to work through the queue. A change made before capture went on is never sent. So
+the order matters:
+
+1. Stop writes to the source, and wait until the target has every change(for the way back after a
+   cutover: the forward sync's backlog is 0).
+2. Install capture on the source with
+   [`replicare capture install <config> --sync <name>`](cli.md#capture-installremove-config---sync-name), before any write reaches it.
+3. Let writes resume. They're captured from now on.
+4. Start the sync with `skip_initial_copy` on, whenever suits; the queue holds everything until then.
+
+The check is what makes a mistake visible. Once every table's oldest queued change is under a
+minute old, the daemon compares each skipped table with the source, exactly as
+[`replicare verify`](cli.md#verify-config-options) does: one key range at a time, on
+connections of its own, with rows still on their way checked again before they're reported. It
+reads every row on both sides, so on a large database it can take hours; changes keep streaming
+meanwhile. Each table that matches is logged(`copy.skip_check_ok`) and counts as an ordinary
+finished copy from then on. A table that differs is logged at ERROR(`copy.skip_check_drift`)
+with how many rows are missing, extra or different and a few of their keys. Its changes still
+stream, but those rows stay wrong, so copy it properly with
+[`replicare reseed`](operations.md#forcing-a-reseed). Until a table has passed,
+`replicare status` shows `skipped` in its `COPY` column, and the
+`replicare_copy_skipped_tables` metric counts tables by where their check stands. A restart
+checks again any table that hasn't passed yet; one that has isn't checked again.
+
+A few more details:
+
+- Only tables that haven't started copying are skipped. A table part-way through a copy finishes
+  it, and a reseed always copies for real. So turn it on for a sync that has never run, not one
+  that's half-way through its copy.
+- Nothing is dropped or rewritten on the target: no index is taken down, and no table is emptied.
+- With the option turned off again later, tables skipped earlier are still checked, unless
+  `verify` is `false`.
+- It's for Postgres and MySQL syncs; on a Redis sync, or a target that's also a member of an
+  active-active cluster, it's refused at config load.
 
 With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
 sync setting.
@@ -385,10 +449,15 @@ skipped at startup.
 
 ### Cycle safety for one-way syncs
 
-Separately from clusters, `replicare` now rejects an undeclared replication cycle among plain
+Separately from clusters, `replicare` rejects an undeclared replication cycle among plain
 one-way `syncs` at config load - for example `A→B` *and* `B→A`, or a longer ring. Before this
 check existed, that topology silently corrupted data. A genuine active-active setup has to be
 declared as a `clusters:` entry, which is exempt from the check.
+
+A paused sync(`enabled: false`) moves no data, so it doesn't count. That lets one config hold
+a sync and its way back, `A→B` and `B→A`, as long as only one of them runs at a time; switching
+over is a config change plus a restart, as with any pause. See
+[cutting over, with a way back](operations.md#cutting-over-with-a-way-back).
 
 ## Full example
 

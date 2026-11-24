@@ -94,6 +94,14 @@ config:
       # is easy to pause the wrong one, so prefer editing the block. Verify in the pod
       # logs: "sync disabled (paused); skipping sync=<name>" vs "sync streaming sync=<name>".
       enabled: true
+      # Start streaming without the initial copy, for a target that already holds the
+      # source's data (the way back after a cutover). Install capture on the source while
+      # the two match, before writes resume, then turn this on; once the target has caught
+      # up every table is checked against the source and any difference is logged at
+      # ERROR. See https://replicare.rudimk.com/configuration.html#starting-without-a-copy-skip_initial_copy
+      # skip_initial_copy:
+      #   enabled: true
+      #   verify: true      # default; false skips the check
       include: ["*"]
       tuning:
         drain_interval: 1s

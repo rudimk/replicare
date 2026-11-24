@@ -230,6 +230,11 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 		for _, ix := range rep.Indexes {
 			fmt.Fprintf(w, "  %s\n", indexLine(ix))
 		}
+		if n := skippedCount(rep.Tables); n == 1 {
+			fmt.Fprintln(w, "  WARNING: 1 table skipped its copy and is not yet confirmed to match the source (COPY = skipped; see the copy.skip_check_* events)")
+		} else if n > 1 {
+			fmt.Fprintf(w, "  WARNING: %d tables skipped their copy and are not yet confirmed to match the source (COPY = skipped; see the copy.skip_check_* events)\n", n)
+		}
 		if len(rep.Tables) == 0 {
 			fmt.Fprintln(w, "  (no tables tracked yet)")
 		}
@@ -243,6 +248,9 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 			cp := "pending"
 			if tbl.CopyDone {
 				cp = "done"
+			}
+			if tbl.CopySkipped {
+				cp = "skipped"
 			}
 			src := countCell(tbl.SourceRows)
 			if len(tbl.Targets) == 0 {
@@ -424,4 +432,16 @@ func summarizeSync(rep status.Report, live bool, now time.Time) string {
 		}
 	}
 	return strings.Join(parts, " · ")
+}
+
+// skippedCount counts the tables marked copied without being copied that no check has
+// confirmed yet.
+func skippedCount(tables []status.TableStatus) int {
+	n := 0
+	for _, t := range tables {
+		if t.CopySkipped {
+			n++
+		}
+	}
+	return n
 }

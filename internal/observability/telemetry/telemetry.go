@@ -150,6 +150,20 @@ func (t *Telemetry) AddTrackLeftoversRemoved(sync string, target engine.TargetID
 	t.reg.Counter(observability.MetricTrackLeftoversRemovedTotal).WithLabelValues(sync, string(target), table.String()).Add(float64(n))
 }
 
+// SetCopySkipped publishes how many of a target's tables were marked copied without
+// being copied, by where their check stands. Every state is set, so a count that
+// drops to 0 shows as 0 rather than keeping its old value.
+func (t *Telemetry) SetCopySkipped(sync string, target engine.TargetID, pending, ok, drift, off int) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	g := t.reg.Gauge(observability.MetricCopySkippedTables)
+	g.WithLabelValues(sync, string(target), "pending").Set(float64(pending))
+	g.WithLabelValues(sync, string(target), "ok").Set(float64(ok))
+	g.WithLabelValues(sync, string(target), "drift").Set(float64(drift))
+	g.WithLabelValues(sync, string(target), "off").Set(float64(off))
+}
+
 // SetPurgeSeconds records how long a table's last delta purge took.
 func (t *Telemetry) SetPurgeSeconds(sync string, table engine.TableRef, seconds float64) {
 	if t.reg == nil {
