@@ -911,7 +911,7 @@ without changing the single-static-binary distribution.
   (milestones, design reviews, implementation status, "proposed design") never go in `docs/`;
   they live in `.sisyphus/` (e.g. `.sisyphus/multi-master-design.md`,
   `.sisyphus/reseed-state-machine.md`).** What a user needs from a design note is rewritten in
-  plain language on a user page (e.g. `docs/active-active.md`). **Site docs voice:** always
+  plain language on a user page (e.g. `docs/failover.md`, which also holds the active-active user docs; the old `active-active.html` redirects there). **Site docs voice:** always
   British spelling for prose, the sentences we write (anything that's a name in code / tech -
   HTTP bearer auth's `Authorization` header, a config key, an API - keeps its own spelling,
   in inline code); page title in Title Case, **every subheading in sentence case**;

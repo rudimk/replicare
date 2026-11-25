@@ -318,7 +318,7 @@ mesh target.
 > member of an active-active cluster. There, the same `max(id)+1` collapses every node onto one
 > counter and silently drops rows through last-write-wins. In active-active, allocating ids is a
 > schema concern, and the answer is globally-unique keys(UUID v7 / ULID); see
-> [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids).
+> [active-active, Rule 1](failover.md#rule-1-use-globally-unique-ids).
 
 ## Signals
 

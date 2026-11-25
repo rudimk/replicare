@@ -1081,7 +1081,7 @@ about it:
 > active-active cluster member, since there the same `max(id)+1` would collapse every node onto the
 > same counter and silently drop rows via last-write-wins. Active-active id allocation is a schema
 > concern, so use globally-unique keys(UUID v7 / ULID) instead; see
-> [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids). (This isn't the same as
+> [active-active, Rule 1](failover.md#rule-1-use-globally-unique-ids). (This isn't the same as
 > `reseed`, which re-copies a target's data.)
 
 ### Keeping counters warm continuously: `sync_sequences`

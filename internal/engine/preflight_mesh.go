@@ -105,7 +105,7 @@ func meshFindingsForTable(t Table) []Finding {
 			"%s.%s is a locally-allocated integer (%s) in %s — in an active-active mesh "+
 				"every node allocates from the same counter, so two nodes mint the same id "+
 				"for different rows and HLC last-write-wins silently drops one. Use "+
-				"globally-unique keys (UUID v7 / ULID); see Rule 1 at https://replicare.rudimk.com/active-active.html.",
+				"globally-unique keys (UUID v7 / ULID); see Rule 1 at https://replicare.rudimk.com/failover.html#rule-1-use-globally-unique-ids.",
 			t.Ref, col.Name, strings.TrimSpace(col.DataType), keyRole)
 		if narrow {
 			msg += " (This key is 32-bit or narrower, so even the deferred integer-window fallback would have little range.)"

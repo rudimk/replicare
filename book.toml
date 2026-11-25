@@ -21,3 +21,8 @@ edit-url-template = "https://github.com/rudimk/replicare/edit/main/{path}"
 
 [output.html.search]
 enable = true
+
+# The active-active page was merged into the failover page; keep old links (including the
+# ones older versions print in their error messages) working.
+[output.html.redirect]
+"/active-active.html" = "failover.html#several-active"

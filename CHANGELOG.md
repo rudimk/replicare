@@ -17,10 +17,15 @@ All notable changes to replicare are documented here. The format follows
   limit still bounds the queue, but a sync now only gives up on its own target, never another
   sync's, which may be mid-copy or paused. Only targets in the same config are counted: a database
   read by two separate `replicare` configs isn't covered.
-- **New page: [failover and high availability](https://replicare.rudimk.com/failover.html).**
-  Three layouts(one active and one passive; one active and several passive, as a fan-out or a
-  chain; several active), with how to fail over, recover the changes stuck on a failed database,
-  bring it back, and fail back.
+- **New page: [failover and high availability](https://replicare.rudimk.com/failover.html),**
+  which replaces the active-active page. It covers three layouts(one active and one passive; one
+  active and several passive, as a fan-out or a chain; several active), and for each: setting it
+  up, what to watch, a planned switchover, an unplanned failover, a copy or node failing, finding
+  the changes stuck on a failed database(Postgres and MySQL queries), bringing it back, failing
+  back, and adding or removing copies. The active-active content(set-up, conflicts, the two rules)
+  is now its "several active" section, with what last-write-wins can't settle spelled out. The old
+  `active-active.html` address redirects to it, so links in error messages from earlier versions
+  still work.
 
 ## [0.7.4]
 

@@ -118,7 +118,7 @@ about 500M rows per node; the harness refuses a scale that approaches the size o
 
 Take a `replicare` `clusters:` mesh running over three Postgres nodes, `A`, `B` and
 `C`(configured as described in
-[Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)),
+[Active-active replication](https://replicare.rudimk.com/failover.html#setting-up-a-cluster)),
 with `$A`/`$B`/`$C` as their DSNs:
 
 ```sh

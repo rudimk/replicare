@@ -35,7 +35,7 @@ clusters:       [ ... ]   # active-active (multi-master) groups (optional)
 
 `nodes` and `clusters` are optional and purely additive; a config with neither of them behaves
 exactly like a one-way daemon. See [Active-active clusters](#active-active-clusters-nodes-and-clusters)
-and [Active-active replication](active-active.md).
+and [Active-active replication](failover.md#several-active).
 
 ## `logging`
 
@@ -396,7 +396,7 @@ exactly like a one-way daemon.
 An active-active cluster keeps N peer databases in step, with writes accepted on *any* node.
 Conflicting changes are settled automatically: the later change wins, using a timestamp
 `replicare` keeps for each row, with no column to add and nothing to declare. See
-[Active-active replication](active-active.md) for how this works. Like a sync, a cluster sticks
+[Active-active replication](failover.md#several-active) for how this works. Like a sync, a cluster sticks
 to a single engine.
 
 > ⚠️ A `replicare` `clusters:` entry(a group of active-active peer databases) and a Redis

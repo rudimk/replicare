@@ -249,7 +249,7 @@ user on every master, and add `+cluster|shards`/`|slots`.
 
 Redis can take part in an active-active `clusters:` mesh, where writes are accepted on *any*
 node and converge on all of them under HLC last-write-wins. It uses the same config surface as
-the relational engines, described in [Active-active replication](active-active.md).
+the relational engines, described in [Active-active replication](failover.md#several-active).
 
 Since Redis is capture-less, the `(hlc, node_id)` version register lives in a parallel metadata
 keyspace. For each data key `K`, there's a sibling hash `\x00rc:m:{…}K`(placed in `K`'s cluster

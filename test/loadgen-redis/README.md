@@ -137,7 +137,7 @@ since Redis holds everything in RAM and the mesh target holds every node's union
 
 Take a `replicare` `clusters:` mesh running over three Redis nodes, `A`, `B` and `C`(configured
 as described in
-[Active-active replication](https://replicare.rudimk.com/active-active.html#setting-up-a-cluster)),
+[Active-active replication](https://replicare.rudimk.com/failover.html#setting-up-a-cluster)),
 with `$A`/`$B`/`$C` as their connection specs. There's no `ddl` step, since Redis has no schema:
 
 ```sh

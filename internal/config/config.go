@@ -465,7 +465,7 @@ func (c *Config) Validate() error {
 			members := c.clusterMemberIdentities()
 			for _, ref := range s.Targets {
 				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
-					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/active-active.html)", s.Name, ref, id)
+					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/failover.html#several-active)", s.Name, ref, id)
 				}
 			}
 		}
@@ -615,7 +615,7 @@ func (c *Config) detectSyncCycles() error {
 	}
 	for n := range adj {
 		if color[n] == white && dfs(n) {
-			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (https://replicare.rudimk.com/active-active.html)",
+			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (https://replicare.rudimk.com/failover.html#several-active)",
 				strings.Join(cycle, " -> "))
 		}
 	}
@@ -641,11 +641,11 @@ func (c *Config) validateCluster(i int, cl *Cluster, seen map[string]bool) error
 	// Reject engines that can't do active-active here, at config time, instead of
 	// failing later at capture install with an opaque error. See .sisyphus/multi-master-design.md.
 	if why, bad := clusterEngineUnsupported[cl.Engine]; bad {
-		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres, mysql and redis do — use a one-way `syncs:` entry for this engine instead (see https://replicare.rudimk.com/active-active.html)",
+		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres, mysql and redis do — use a one-way `syncs:` entry for this engine instead (see https://replicare.rudimk.com/failover.html#several-active)",
 			cl.Name, cl.Engine, why)
 	}
 	if cl.Topology != topologyMesh {
-		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see https://replicare.rudimk.com/active-active.html)",
+		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see https://replicare.rudimk.com/failover.html#several-active)",
 			cl.Name, cl.Topology, topologyMesh)
 	}
 	if len(cl.Members) < 2 {

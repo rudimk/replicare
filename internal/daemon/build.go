@@ -199,7 +199,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		if mf := engine.MeshIDAllocationFindings(srcSchema); len(mf) > 0 {
 			report.Findings = append(report.Findings, mf...)
 			if detail := meshBlockDetail(mf); detail != "" {
-				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — see Rule 1 at https://replicare.rudimk.com/active-active.html):%s", name, detail))
+				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — see Rule 1 at https://replicare.rudimk.com/failover.html#rule-1-use-globally-unique-ids):%s", name, detail))
 			}
 		}
 	}
