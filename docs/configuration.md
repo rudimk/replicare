@@ -170,7 +170,11 @@ across engines.
 
 A sync with several `targets`(fan-out) copies and streams to each target independently.
 Initial-copy progress is checkpointed per `(sync, target, table)`, so one slow or restarted
-target never disturbs another's watermark, and each target converges on its own. This is also
+target never disturbs another's watermark, and each target converges on its own. A change queued
+on the source is only cleared once every target reading that table from the same database has it:
+every target of the sync, the targets of other syncs reading the same database, and paused syncs
+that have run before. So a target that's slow, down or paused misses nothing. The retention limit
+still bounds the queue, but a sync only ever gives up on its own target. This is also
 the per-node building block of an active-active [cluster](#active-active-clusters-nodes-and-clusters).
 
 ```yaml

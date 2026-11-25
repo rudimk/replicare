@@ -29,6 +29,10 @@ Both are decisions that live in the database and in the deployment process, befo
 ever sees a row. `replicare` is built to stop loudly rather than corrupt anything, but it can't
 fix either of these on its own; the two rules at the end of this page are how to avoid them.
 
+If the goal is only to have somewhere to move the application when a database fails, one
+database taking writes with passive copies standing by is far simpler and has none of these
+rules; see [failover and high availability](failover.md).
+
 ## Setting up a cluster
 
 Each node is listed under `nodes:`, and the nodes that belong together are grouped in a

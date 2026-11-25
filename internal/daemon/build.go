@@ -28,6 +28,12 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if err != nil {
 		return nil, nil, err
 	}
+	// A queued change is deleted only once every target reading it from this source has
+	// it, not just this one (fan-out, other syncs from the same database).
+	if syncer.PurgeTargets, err = d.purgeTargets(ctx, syncer.Source, srcEp); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("consumers of source %q: %w", sync.Source, err)
+	}
 	// Deferred target indexes (one-way syncs only; never a cluster edge). The rebuilder
 	// is wired either way, so indexes dropped by an earlier run are still put back after
 	// the setting is turned off.
@@ -76,7 +82,17 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 	sel := engine.Selection{Include: e.cluster.Include, Exclude: e.cluster.Exclude}
 	// A cluster edge never syncs sequences (false): a mesh counter advance is silent data
 	// loss (.sisyphus/sequence-reseed-plan.md §5); the knob is one-way only.
-	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID, false)
+	syncer, cleanup, err := d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Every peer reads this node's changes, each on its own edge: a change is deleted
+	// only once all of them have it.
+	if syncer.PurgeTargets, err = d.purgeTargets(ctx, syncer.Source, srcEp); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("consumers of node %q: %w", e.srcNode, err)
+	}
+	return syncer, cleanup, nil
 }
 
 // buildSyncerCore is the shared build path for a one-way sync target and a cluster

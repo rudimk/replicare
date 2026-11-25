@@ -35,8 +35,9 @@
   - [Version support](redis-version-support.md)
   - [State store for Redis syncs](redis-statestore.md)
 
-# Active-active
+# Failover and active-active
 
+- [Failover and high availability](failover.md)
 - [Active-active replication](active-active.md)
 
 # Testing

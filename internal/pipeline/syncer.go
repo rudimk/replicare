@@ -83,6 +83,14 @@ type Syncer struct {
 	// so it never shares the streaming connection or delays a pass. Nil disables it.
 	OpenSource func(ctx context.Context) (engine.Source, error)
 
+	// PurgeTargets lists, per table, every target that reads that table's changes from
+	// this source: the other targets of a fan-out sync, other syncs from the same
+	// database, and paused syncs that have started. A queued change is deleted only
+	// once all of them have it; deleting it once this syncer's own target had it lost
+	// changes for a target that was slower or down at the time. Nil, or a table not
+	// listed, means this syncer's own target only (a source with a single consumer).
+	PurgeTargets map[engine.TableRef][]engine.TargetID
+
 	// SkipInitialCopy marks every table that has not started copying as copied without
 	// copying it (the sync's skip_initial_copy), for a target that already holds the
 	// source's data. Never set on a cluster edge.

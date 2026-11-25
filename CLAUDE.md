@@ -221,6 +221,16 @@ correctness mechanism** — only a lag/observability signal.
   under a 30s `statement_timeout`; track tables get the delta tables' aggressive autovacuum; and
   `replicare_delta_purge_seconds{sync,table}` surfaces a slowing purge. MySQL does the same
   (select the batch's ids, then delete deltas + track rows in one transaction).
+- **Purge waits for every consumer of the table on that source, not just the caller's target
+  (decision, 0.7.5, from a confirmed data-loss bug).** One `Syncer` runs per (job, target), and each
+  used to purge with only its own target, so with fan-out, two syncs on one database, a paused sync,
+  or a 3+-node mesh, a slower/down/paused target lost changes silently (test: 9 of 10 rows). The
+  daemon now computes `Syncer.PurgeTargets` per table (`daemon.purgeTargets`: every sync target and
+  cluster edge in the config whose source has the same `config.ConnIdentity`, introspected with its
+  own selection; paused jobs count only once they have state in the store) and the purge gates on
+  all of them (`reseed.Deps.TargetsFor`). Retention may only sacrifice the caller's own target
+  (`RetentionPolicy.Sacrificable`): another job's target may be mid-copy or paused and only its own
+  syncer can reseed it. Consumers in a different config/daemon are not seen (documented).
 - **`bigserial`/seq column:** kept for **lag metrics and ordering hints only**, never as the
   resume cursor.
 
@@ -1000,6 +1010,7 @@ invasive.
 | Delta capture | **PK-only**, re-read current row at sync time. |
 | Capture install locks | **Never stall the app.** Restart skips a trigger that is already correct (no user-table lock); any trigger change runs with a **2s lock wait**, backs off, retries, then fails loud. Never queue the application behind a waiting lock request (§3.1). Same on MySQL (`lock_wait_timeout`, body-compare skip, `replicare` database created only when missing). |
 | Delta sequencing | **Dirty-key set**, NOT an ordered log. **No scalar high-water-mark cursor** (commit-order skew). Consume via **`delta MINUS track` set-difference**, **delete-by-`delta_id`**, per-PK coalescing. seq = lag metric only. See §3.3. |
+| Purge gating | A delta is purged only when **every consumer of that table on the source** has it (all targets of all syncs + cluster edges on the same DB in the config; paused ones once started); retention sacrifices **only the caller's own target**. Fixed a silent fan-out/pause/3+-mesh data-loss bug (0.7.5, §3.3). |
 | Track location | **On the source DB**, atomic with delta consume + purge. StateStore holds copy-progress/lag/ownership only. |
 | Crash safety | read → apply to target → then track/purge on source. At-least-once, no 2PC. |
 | FK on target | **Dependency-ordered apply** within an FK component: **upserts parent→child, deletes child→parent** **+ retry fallback** for cycles/self-refs/cross-pass deps. **Unique-value reuse within a pass** (row deleted + new row with the same secondary-unique value; 23505 because deletes follow upserts) is a **transient unique clash** (`engine.TransientConstraintError{Unique:true}`, Postgres streaming upsert only): the table's **delete phase still runs** (staging via optional `engine.PresentStager`, no upsert), it is **not confirmed**, next pass retries; the single-txn path runs a separate deletes-only pass. A true swap of a unique value between two live rows in one pass cannot be applied row by row and stays a loud per-pass halt. |

@@ -525,6 +525,11 @@ func (c *Config) Validate() error {
 // port + database ⇒ the same physical DB, regardless of the endpoint name, user, or
 // TLS mode it was reached through. This is what lets us catch A->B + B->A even when
 // the two directions name the same DB differently.
+// ConnIdentity is an endpoint's database identity (engine, host, port, database), the
+// same across the sources, targets and nodes maps: two endpoints with the same identity
+// are the same database, whatever they are called.
+func ConnIdentity(ep *Endpoint) string { return connIdentity(ep) }
+
 func connIdentity(ep *Endpoint) string {
 	if ep == nil || ep.Conn == nil {
 		return ""

@@ -561,6 +561,24 @@ const (
 type RetentionPolicy struct {
 	MaxAgeSeconds int64 // 0 = unbounded by age
 	MaxBytes      int64 // 0 = unbounded by size
+	// Sacrificable limits which of the purge's targets the caps may give up on (mark
+	// for a reseed and stop waiting for). Nil means any of them. A sync passes only its
+	// own target: the purge waits for every target reading the source, but a sync may
+	// only give up on its own, never another sync's (which may be mid-copy, or paused).
+	Sacrificable []TargetID
+}
+
+// MaySacrifice reports whether the caps may give up on target tg.
+func (r RetentionPolicy) MaySacrifice(tg TargetID) bool {
+	if r.Sacrificable == nil {
+		return true
+	}
+	for _, s := range r.Sacrificable {
+		if s == tg {
+			return true
+		}
+	}
+	return false
 }
 
 // PurgeStats reports the outcome of a purge pass.

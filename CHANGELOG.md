@@ -4,6 +4,24 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.7.5]
+
+- **Fixed: a target could silently miss changes when several targets read the same database.**
+  Each target's job cleared a queued change from the source as soon as *its own* target had it,
+  so a target that was slower, down, or paused at that moment never received it, with no error.
+  This hit a sync with several targets(fan-out), two syncs reading the same database, a paused
+  sync whose source another sync kept reading(breaking the promise that pausing loses nothing),
+  and active-active clusters of three or more databases. A change is now cleared only once every
+  target reading that table from the database has it, paused syncs that have run before
+  included; a sync with a narrower table selection only holds back its own tables. The retention
+  limit still bounds the queue, but a sync now only gives up on its own target, never another
+  sync's, which may be mid-copy or paused. Only targets in the same config are counted: a database
+  read by two separate `replicare` configs isn't covered.
+- **New page: [failover and high availability](https://replicare.rudimk.com/failover.html).**
+  Three layouts(one active and one passive; one active and several passive, as a fan-out or a
+  chain; several active), with how to fail over, recover the changes stuck on a failed database,
+  bring it back, and fail back.
+
 ## [0.7.4]
 
 - **A sync can start without its initial copy:** `skip_initial_copy: { enabled: true }`.

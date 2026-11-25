@@ -47,6 +47,10 @@ type Deps struct {
 	// each chunk re-copied). A reseed runs inside a streaming pass and can take as long
 	// as an initial copy, so the streaming liveness check needs to see it moving.
 	Progress func()
+	// TargetsFor, if set, gives the targets a table's queued changes must reach before
+	// the purge may delete them: every target reading that table from this source, not
+	// just the caller's. Nil means the targets passed to Enforce.
+	TargetsFor func(engine.TableRef) []engine.TargetID
 }
 
 func (d Deps) progress() {
@@ -87,7 +91,11 @@ func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.T
 	reseedSet := map[engine.TargetID]bool{}
 	for _, t := range tablesTopo {
 		start := time.Now()
-		stats, err := d.Src.Purge(ctx, t, targets, ret)
+		tgs := targets
+		if d.TargetsFor != nil {
+			tgs = d.TargetsFor(t)
+		}
+		stats, err := d.Src.Purge(ctx, t, tgs, ret)
 		res.PurgeTook[t] = time.Since(start)
 		if err != nil {
 			return EnforceResult{}, fmt.Errorf("reseed: enforce purge %s: %w", t, err)
