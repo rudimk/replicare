@@ -20,6 +20,10 @@ All notable changes to replicare are documented here. The format follows
   again a minute later(`copy.skip_check_repairing`). Only a difference that stops shrinking over 3
   rounds is still logged at ERROR(`copy.skip_check_drift`). This also covers the passive layouts in
   the failover guide, where a copy that was behind no longer needs copying again from scratch.
+- **Fixed: Redis keyspace notifications could miss the first changes.** The subscription was
+  started without waiting for Redis to confirm it, so a change made in the first moments after
+  start-up could fire no event. Notifications only speed up delivery and the reconciliation scan
+  still found the change, so nothing was lost; it now waits for the confirmation(up to 5 seconds).
 - **New page: [cutting over](https://replicare.rudimk.com/cutover.html).** How a cutover works,
   what to check before the day(indexes rebuilt, checks done, tables without a key, data that isn't
   replicated, counters, every writer known), the steps on the day with a way back, falling back,
