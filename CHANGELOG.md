@@ -4,6 +4,14 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **Grafana dashboard: a "Syncs, triggers & checks" row**, below "Index rebuild": syncs failing
+  to start(`replicare_sync_start_failed`), tables each sync replicates(`replicare_sync_tables`, red
+  at 0), the target's own triggers skipped or switched off(`replicare_target_triggers`), and tables
+  waiting to be checked or being repaired(`replicare_tables_to_check`, red when a table couldn't be
+  repaired). Re-import the dashboard to get it; it works with 0.8.0 as released.
+
 ## [0.8.0]
 
 - **Tables copied while the target's own triggers fired are checked and repaired by themselves.**

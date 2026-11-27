@@ -60,7 +60,7 @@ This section sits at the top, since the initial copy is the first thing a new sy
 | Panel | Query | Reading |
 |---|---|---|
 | Initial copy (overall) | `replicare_initial_copy_progress_ratio` | How much of the copy is done, weighted by table size and counting the link-filling pass. It stays under 100% until every table has switched to streaming |
-| Initial copy ETA | `replicare_initial_copy_eta_seconds` | How long the copy has left, as a duration. `replicare` works it out from how much is still to copy and how fast it went over the last 10 minutes, weighing each table by its size on the source, so a table of large rows isn't made to look quick by a run of small ones. It reads "Not moving" when nothing was copied in that time, "Done" at the end, and "Working it out…" for the first minute. The pass that fills in the links for tables linked in a loop counts as extra work for those tables. A guide, not a promise: the row counts are the source's estimates |
+| Initial copy ETA | `replicare_initial_copy_eta_seconds` | How long the copy has left, as a duration. `replicare` works it out from how much is still to copy and how fast it went over the last 10 minutes, weighing each table by its size on the source, so a table of large rows isn't made to look quick by a run of small ones. It reads "Not moving" when nothing was copied in that time, "Done" at the end, and "Working it out…" for the first minute, or for the first 30 minutes while less than 1% of the copy is done(the start of a copy is mostly set-up on small tables, which says little about the big ones). The pass that fills in the links for tables linked in a loop counts as extra work for those tables. A guide, not a promise: the row counts are the source's estimates |
 | Tables still copying / Tables streaming | `count(replicare_table_phase_info{phase=…})` | How many tables are in each phase; copying reaches 0 once the whole sync is streaming |
 | Copy rate (rows/s) | `rate(replicare_rows_copied_total[2m])` | Current copy speed |
 | Initial copy progress % (per table) / Rows copied vs target (per table) | `replicare_rows_copied_total` / `replicare_initial_copy_rows_target`, `by (table)` | Which tables have their rows in, and which are still moving |
@@ -89,6 +89,19 @@ This row follows that rebuild:
 Each build reads the table, sorts, writes the index, then reads the table a second time to pick
 up rows written meanwhile, so on a big table each index takes a while, and "Current stage
 progress" goes round once per stage.
+
+### Syncs, triggers & checks
+
+This row shows whether each sync is running and replicating something, and the two things
+`replicare` does for a target on its own: keeping the target's own triggers from firing on its
+writes, and checking and repairing tables that may differ from the source:
+
+| Panel | Query | Reading |
+|---|---|---|
+| Syncs failing | `replicare_sync_start_failed` | Syncs that failed to start, or stopped while streaming, and are waiting to be started again; the other syncs keep running. 0 is healthy; the cause is in the `sync.start_failed` log events |
+| Tables replicated | `replicare_sync_tables`, `by (sync, target)` | How many tables each sync replicates: the ones its selection matches that have a primary key or unique key. Red at 0, which means the sync replicates nothing; the `sync.tables_selected` log event says why |
+| Target triggers held back | `replicare_target_triggers`, by `how` | Skipped: the target's ordinary triggers, skipped for `replicare`'s writes by replica mode, with nothing changed on the target. Switched off: triggers `replicare` switched off while the sync runs, which must be back on before the application writes to the target(see [the target's own triggers](operations.md#the-targets-own-triggers)) |
+| Tables to check | `replicare_tables_to_check`, by `state` | Tables waiting to be compared with the source once the sync has caught up, and those being repaired. "Couldn't repair" turns red when a difference stopped shrinking; the `check.drift` log event says which table(see [tables copied while the triggers fired](operations.md#tables-copied-while-the-triggers-fired)) |
 
 ### Source & target
 
