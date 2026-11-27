@@ -211,5 +211,20 @@ var schemaSet = migrate.Set{
 				)`,
 			},
 		},
+		{
+			Version: 8,
+			Name:    "copy_progress_storage_order",
+			// Progress of a copy that reads the table in storage order (CLAUDE.md §4.1):
+			// the block below which everything is copied, and the identity of the table's
+			// storage when the copy started. Separate from watermark/completed (key
+			// progress), so an older version reads such a copy as not started and copies
+			// the table again in key order, which is safe. Additive: defaulted columns.
+			Statements: []string{
+				`ALTER TABLE replicare_state.copy_progress
+				   ADD COLUMN storage_order boolean NOT NULL DEFAULT false,
+				   ADD COLUMN block_watermark bigint NOT NULL DEFAULT 0,
+				   ADD COLUMN rel_file bigint NOT NULL DEFAULT 0`,
+			},
+		},
 	},
 }

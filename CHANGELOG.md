@@ -4,6 +4,23 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.2]
+
+- **Large tables whose rows aren't stored in key order are copied in storage order.** A first copy
+  reads each table one key range at a time. When the rows of a table are scattered on disk relative
+  to its key, every row of a range is a separate disk read on the source: a big table then copies at
+  a few hundred rows a second, for days or weeks, and the application's queries wait behind the
+  source's disk. On a Postgres 14+ source, a table of 1 GiB or more whose key's first column has a
+  correlation below 0.9(from `pg_stats`) is now read a run of disk blocks at a time instead, so the
+  source reads it sequentially. It also skips the read through the key column that plans key
+  ranges. Rows that move while the copy runs are caught by capture as before, a row seen twice is
+  merged, and a `VACUUM FULL`, `CLUSTER`, `pg_repack` or `TRUNCATE` of
+  the table starts its copy again(`copy.storage_rewritten`). Each table's choice is logged as
+  `copy.storage_order`. The new sync setting `copy_order`(`auto`, the default; `key`, as before;
+  `storage`) chooses. A table already part-copied in key order that now qualifies starts again in
+  storage order, merging over the rows already copied. State store version 8; going back to an
+  earlier version copies a table part-copied in storage order again, in key order, which is safe.
+
 ## [0.8.1]
 
 - **Fixed: a sync read as failing for its whole initial copy after a failed start.**

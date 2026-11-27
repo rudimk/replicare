@@ -108,6 +108,11 @@ config:
       # https://replicare.rudimk.com/operations.html#the-targets-own-triggers
       # target_triggers:
       #   enabled: false
+      # The order the first copy reads each table in (Postgres): auto (the default) reads a
+      # large table whose rows aren't stored in key order in storage order, which is
+      # sequential on the source's disk; key reads every table in key order, as before. See
+      # https://replicare.rudimk.com/configuration.html#the-order-a-first-copy-reads-in-copy_order
+      # copy_order: auto
       include: ["*"]
       tuning:
         drain_interval: 1s

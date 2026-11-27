@@ -39,6 +39,9 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	// is wired either way, so indexes dropped by an earlier run are still put back after
 	// the setting is turned off.
 	syncer.DeferIndexes = d.cfg.DefersIndexes(sync, targetName)
+	// The order the initial copy reads each table in (one-way syncs only; a cluster edge
+	// keeps key order).
+	syncer.ChunkOpts.Order = engine.CopyOrder(sync.ReadOrder())
 	// The target's own triggers must not fire on replicare's writes (one-way syncs only;
 	// never a cluster edge, whose target is a live node).
 	syncer.GuardTriggers = d.cfg.GuardsTargetTriggers(sync, targetName)

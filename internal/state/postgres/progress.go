@@ -39,15 +39,20 @@ func (s *Store) SaveCopyProgress(ctx context.Context, sync string, p state.CopyP
 	}
 	_, err = s.pool.Exec(ctx, `
 		INSERT INTO replicare_state.copy_progress
-			(sync, target, schema_name, table_name, done, watermark, completed, skipped, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, now())
+			(sync, target, schema_name, table_name, done, watermark, completed, skipped,
+			 storage_order, block_watermark, rel_file, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8, $9, $10, $11, now())
 		ON CONFLICT (sync, target, schema_name, table_name) DO UPDATE SET
-			done       = EXCLUDED.done,
-			watermark  = EXCLUDED.watermark,
-			completed  = EXCLUDED.completed,
-			skipped    = EXCLUDED.skipped,
-			updated_at = now()`,
-		sync, string(p.Target), p.Table.Schema, p.Table.Name, p.Done, string(watermark), string(completed), p.Skipped)
+			done            = EXCLUDED.done,
+			watermark       = EXCLUDED.watermark,
+			completed       = EXCLUDED.completed,
+			skipped         = EXCLUDED.skipped,
+			storage_order   = EXCLUDED.storage_order,
+			block_watermark = EXCLUDED.block_watermark,
+			rel_file        = EXCLUDED.rel_file,
+			updated_at      = now()`,
+		sync, string(p.Target), p.Table.Schema, p.Table.Name, p.Done, string(watermark), string(completed), p.Skipped,
+		p.StorageOrder, p.BlockWatermark, p.RelFile)
 	if err != nil {
 		return fmt.Errorf("statepg: save copy progress for %s/%s/%s: %w", sync, p.Target, p.Table, err)
 	}
@@ -65,12 +70,16 @@ func (s *Store) LoadCopyProgress(ctx context.Context, sync string, target engine
 		skipped       bool
 		watermarkJSON []byte
 		completedJSON []byte
+		storageOrder  bool
+		blockMark     int64
+		relFile       int64
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT done, skipped, watermark, completed
+		SELECT done, skipped, watermark, completed, storage_order, block_watermark, rel_file
 		FROM replicare_state.copy_progress
 		WHERE sync = $1 AND target = $2 AND schema_name = $3 AND table_name = $4`,
-		sync, string(target), t.Schema, t.Name).Scan(&done, &skipped, &watermarkJSON, &completedJSON)
+		sync, string(target), t.Schema, t.Name).Scan(&done, &skipped, &watermarkJSON, &completedJSON,
+		&storageOrder, &blockMark, &relFile)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return state.CopyProgress{Target: target, Table: t}, nil
 	}
@@ -78,7 +87,8 @@ func (s *Store) LoadCopyProgress(ctx context.Context, sync string, target engine
 		return state.CopyProgress{}, fmt.Errorf("statepg: load copy progress for %s/%s/%s: %w", sync, target, t, err)
 	}
 
-	p := state.CopyProgress{Target: target, Table: t, Done: done, Skipped: skipped}
+	p := state.CopyProgress{Target: target, Table: t, Done: done, Skipped: skipped,
+		StorageOrder: storageOrder, BlockWatermark: blockMark, RelFile: relFile}
 	if p.Watermark, err = decodeKeyValues(watermarkJSON); err != nil {
 		return state.CopyProgress{}, fmt.Errorf("statepg: decode watermark: %w", err)
 	}

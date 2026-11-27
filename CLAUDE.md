@@ -369,6 +369,28 @@ only one enabled — the cutover/failback layout; both enabled is still refused.
 - **ctid / block-range fallback** (`ctid >= '(p,0)' AND ctid < '(q,0)'`, sized from
   `pg_class.relpages`): for pathological key distributions or very wide composite keys. ctid is
   unstable under concurrent writes — acceptable, since moved/missed rows are reconciled by deltas.
+- **Storage-order copy (decision, 0.8.2, from a production migration; Postgres 14+, `copy_order`
+  per sync, `auto` by default).** A keyset chunk reads its rows via the key index; when the heap is
+  not in key order every row is a random read (production: a 32 GB table with PK
+  `(underlying, snap_date, contract)`, `pg_stats.correlation` 0.07, copied at ~250 rows/s, ETA 2
+  weeks, the source's disk saturated and app queries waiting minutes). `auto` reads a table in
+  **block ranges** instead (`ctid >= '(a,0)' AND ctid < '(b,0)'` = TID Range Scan, PG14+; older →
+  key order, never a seq scan per chunk) when it is ordinary (relkind `r`), ≥ 1 GiB, and
+  `|correlation|` of the key's first column < 0.9 (no stats → key order); `storage` forces it on
+  every ordinary table, `key` turns it off; MySQL/Redis/cluster edges/cyclic components: key order.
+  Optional `engine.StorageOrderReader` (`StorageOrder`, `PlanStorageChunks`, `StorageFile`);
+  `copy.copyTableStorage`. Chunks are ≥ 1024 blocks (8 MiB), sized by rows/page; last unbounded.
+  Correctness: capture is on first, so a row that moves (UPDATE) was changed and is re-read by
+  streaming; a row seen twice fails the direct load on its key → the chunk is re-loaded with merge
+  (`copy.storage_chunk_retry`, 3 attempts, also covers a deadlock); a **rewrite** (VACUUM FULL,
+  CLUSTER, pg_repack, TRUNCATE) moves rows without triggers, so `StorageFile` (relfilenode) is
+  checked before every checkpoint and at the end — a change restarts the table from block 0 with
+  merge (`copy.storage_rewritten`, ≤5 times, then loud). Progress (state store v8):
+  `copy_progress.storage_order/block_watermark/rel_file`, **separate from the key `watermark`**,
+  so an older binary reads a storage-order copy as not started and re-copies in key order (safe);
+  every write sets all columns, so key-order and storage-order progress clear each other. A copy
+  started in storage order keeps it (stats changes never flip it midway); a key-order copy in
+  progress that now qualifies restarts in storage order (merge over the copied rows).
 - **Native declarative partitions** are copied per-partition as a free chunking win when present.
 
 **Wire format (decision: text/CSV default, binary opt-in).** Stream `COPY … TO STDOUT` (source)
@@ -1052,7 +1074,7 @@ invasive.
 | FK on target | **Dependency-ordered apply** within an FK component: **upserts parent→child, deletes child→parent** **+ retry fallback** for cycles/self-refs/cross-pass deps. **Unique-value reuse within a pass** (row deleted + new row with the same secondary-unique value; 23505 because deletes follow upserts) is a **transient unique clash** (`engine.TransientConstraintError{Unique:true}`, Postgres streaming upsert only): the table's **delete phase still runs** (staging via optional `engine.PresentStager`, no upsert), it is **not confirmed**, next pass retries; the single-txn path runs a separate deletes-only pass. A true swap of a unique value between two live rows in one pass cannot be applied row by row and stays a loud per-pass halt. |
 | Table grouping | Sync = user-configured selection; engine **auto-partitions into FK connected components** (over selected tables, from source catalogs). Components = units of ordering, **parallelism**, and consistency. **Auto by default; warn + override on giant component.** See §8.1. |
 | Per-component apply | **Per-table committed txns** are the default so a parent advances through its own delta queue even when a cross-batch child transiently can't apply — required for non-DEFERRABLE target FKs, where a single component txn would roll the parent back with the child and livelock under PK-change cascades (§8.1). **Acyclic** component: per table, two FK-ordered phases (all upserts parent→child, then all deletes child→parent). **Cyclic w/ nullable cycle FKs** (Postgres, the common case): per table, **NULL-then-fill** three phases (upsert cyclic cols NULL parent→child, delete child→parent, then fill cyclic cols) — converges under churn with **no `DEFERRABLE`** requirement (`NullFillCyclicSink`/`CyclicFiller`). **Single-component txn** kept only for **all-DEFERRABLE** cyclic (Postgres `SET CONSTRAINTS ALL DEFERRED`) and **MySQL** cyclic (`FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify). Confirm per table only after all its phases; transient FK → stays dirty, retried. End-of-pass consistent, bounded by churn/pass. Initial copy is chunked (not atomic). |
-| Copy chunking | **Keyset PK-range default** (balanced ranges via index-only boundary scan; composite/UUID/text keys OK), **ctid/block-range fallback**; native partitions copied per-partition. See §4.1. |
+| Copy chunking | **Keyset PK-range default** (balanced ranges via index-only boundary scan; composite/UUID/text keys OK), **ctid/block-range fallback**; native partitions copied per-partition. **Storage-order copy** (0.8.2, PG14+, `copy_order: auto` default): a ≥1 GiB table with key correlation < 0.9 is read in block ranges (TID range scan) instead; a duplicate re-loads the chunk merging, a rewrite (relfilenode change) restarts the table; block progress separate from the key watermark (state v8, rollback-safe). See §4.1. |
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target constraints / PK / unique indexes. |
 | Deferred target indexes | **Postgres, on by default** (`defer_indexes`, per sync): plain target indexes are saved to the state store (+ logged in full) and dropped just before each table's copy, then rebuilt `CONCURRENTLY` one at a time (link columns first, then `ANALYZE`) on dedicated connections once the whole sync streams. Owned tables only; never on a mesh member; restart-safe; reseeds too; `replicare indexes restore` as the way out. See §4.1. |
