@@ -15,6 +15,7 @@
 # Running `replicare`
 
 - [Operations](operations.md)
+- [Cutting over](cutover.md)
 - [Kubernetes with Helm](kubernetes.md)
   - [Helm chart reference](helm-chart.md)
 - [Grafana dashboard](grafana-dashboard.md)

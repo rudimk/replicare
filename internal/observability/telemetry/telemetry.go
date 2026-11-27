@@ -164,6 +164,19 @@ func (t *Telemetry) SetCopySkipped(sync string, target engine.TargetID, pending,
 	g.WithLabelValues(sync, string(target), "off").Set(float64(off))
 }
 
+// SetTablesToCheck publishes how many tables wait for an automatic check against the
+// source, by where it stands.
+func (t *Telemetry) SetTablesToCheck(sync string, target engine.TargetID, pending, repairing, ok, drift int) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	g := t.reg.Gauge(observability.MetricTablesToCheck)
+	g.WithLabelValues(sync, string(target), "pending").Set(float64(pending))
+	g.WithLabelValues(sync, string(target), "repairing").Set(float64(repairing))
+	g.WithLabelValues(sync, string(target), "ok").Set(float64(ok))
+	g.WithLabelValues(sync, string(target), "drift").Set(float64(drift))
+}
+
 // SetSyncStartFailed marks a sync target's start-up as failed and waiting to be retried
 // (true), or running (false).
 func (t *Telemetry) SetSyncStartFailed(sync, target string, failed bool) {

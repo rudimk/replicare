@@ -326,9 +326,13 @@ minute old, the daemon compares each skipped table with the source, exactly as
 connections of its own, with rows still on their way checked again before they're reported. It
 reads every row on both sides, so on a large database it can take hours; changes keep streaming
 meanwhile. Each table that matches is logged(`copy.skip_check_ok`) and counts as an ordinary
-finished copy from then on. A table that differs is logged at ERROR(`copy.skip_check_drift`)
-with how many rows are missing, extra or different and a few of their keys. Its changes still
-stream, but those rows stay wrong, so copy it properly with
+finished copy from then on. A table that differs is repaired: every row found missing, extra or
+different is queued on the source as a change, so streaming writes it again from the source's
+current value(or deletes it from the target), and the table is compared again a minute later,
+until it matches. Each round is logged as `copy.skip_check_repairing`, with how many rows differ
+and a few of their keys. Only a difference that stops shrinking over 3 rounds in a row(usually
+because the target refuses the rows, which the streaming logs then say) is logged at ERROR as
+`copy.skip_check_drift`; copy that table with
 [`replicare reseed`](operations.md#forcing-a-reseed). Until a table has passed,
 `replicare status` shows `skipped` in its `COPY` column, and the
 `replicare_copy_skipped_tables` metric counts tables by where their check stands. A restart
@@ -500,7 +504,7 @@ declared as a `clusters:` entry, which is exempt from the check.
 A paused sync(`enabled: false`) moves no data, so it doesn't count. That lets one config hold
 a sync and its way back, `A→B` and `B→A`, as long as only one of them runs at a time; switching
 over is a config change plus a restart, as with any pause. See
-[cutting over, with a way back](operations.md#cutting-over-with-a-way-back).
+[cutting over](cutover.md#on-the-day).
 
 ## Full example
 

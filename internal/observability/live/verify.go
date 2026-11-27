@@ -56,6 +56,10 @@ type VerifyTable struct {
 	Different int         `json:"different,omitempty"`
 	Keys      []VerifyKey `json:"keys,omitempty"`
 	Truncated bool        `json:"truncated,omitempty"`
+	// Differing is every key still differing after the re-check, in the engine's own
+	// form, when VerifyOptions.CollectKeys is set (up to the tracking limit; Truncated
+	// says there were more). For repairing them, never printed.
+	Differing []engine.KeyValues `json:"-"`
 }
 
 // VerifyKey is one row that differs: its key, and how ("missing", "extra" or
@@ -86,6 +90,9 @@ type VerifyOptions struct {
 	RecheckAfter time.Duration
 	// MaxKeys is how many differing keys to list per table (default 20).
 	MaxKeys int
+	// CollectKeys keeps every still-differing key in VerifyTable.Differing, for a
+	// caller that repairs them.
+	CollectKeys bool
 	// Progress, if set, is called after each key range with the rows checked so far.
 	Progress func(table string, rowsChecked int64)
 }

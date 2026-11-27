@@ -58,6 +58,9 @@ const (
 	// (skip_initial_copy), by where their check against the source stands: pending,
 	// ok, drift, or off (the check is turned off).
 	MetricCopySkippedTables = "replicare_copy_skipped_tables"
+	// MetricTablesToCheck counts tables waiting for an automatic check against the source
+	// (for example, copied while the target's own triggers fired), by where it stands.
+	MetricTablesToCheck = "replicare_tables_to_check"
 	// A sync target (or cluster edge) whose start-up failed and is waiting to try again:
 	// 1 while waiting, 0 once it is running. The counter counts the failures. One sync
 	// failing to start no longer stops the daemon's other syncs, so this is how it shows.
@@ -123,6 +126,7 @@ var Metrics = []Metric{
 	{MetricDeltaPurgeSeconds, Gauge, "How long the table's last delta purge on the source took, in seconds", []string{LabelSync, LabelTable}},
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
 	{MetricTrackLeftoversRemovedTotal, Counter, "Track rows left by versions before 0.7.0 that the background sweep removed", []string{LabelSync, LabelTarget, LabelTable}},
+	{MetricTablesToCheck, Gauge, "Tables waiting to be checked against the source and repaired if they differ (for example, copied while the target's own triggers fired), by state (pending, repairing, ok, drift)", []string{LabelSync, LabelTarget, "state"}},
 	{MetricCopySkippedTables, Gauge, "Tables marked copied without being copied (skip_initial_copy), by where their check against the source stands (pending, ok, drift, off)", []string{LabelSync, LabelTarget, "check"}},
 	{MetricSyncStartFailed, Gauge, "1 while a sync target is not running because its last attempt failed (starting up, or while streaming) and is waiting to be tried again; 0 once it streams", []string{LabelSync, LabelTarget}},
 	{MetricSyncStartFailuresTotal, Counter, "Failed attempts to run a sync target, starting up or while streaming (each is retried; the other syncs keep running)", []string{LabelSync, LabelTarget}},
@@ -244,4 +248,16 @@ const (
 	EventCopySkipCheckOK      = "copy.skip_check_ok"
 	EventCopySkipCheckDrift   = "copy.skip_check_drift"
 	EventCopySkipCheckFailed  = "copy.skip_check_failed"
+	// A difference a check found is being repaired: the rows that differ are queued on
+	// the source as changes, so streaming rewrites them, and the table is checked again.
+	EventCopySkipCheckRepairing = "copy.skip_check_repairing"
+	// Automatic checks of tables that may differ from the source for another reason
+	// (copied while the target's own triggers fired): planned, started, a table that
+	// matches, one being repaired, one that could not be repaired, one that could not run.
+	EventCheckPlanned   = "check.planned"
+	EventCheckStarted   = "check.started"
+	EventCheckOK        = "check.ok"
+	EventCheckRepairing = "check.repairing"
+	EventCheckDrift     = "check.drift"
+	EventCheckFailed    = "check.failed"
 )

@@ -39,6 +39,9 @@ type Report struct {
 	// they do not fire on its writes; they must be switched back on before the
 	// application writes to that target (pause the sync, or `replicare triggers restore`).
 	Triggers []TriggerStatus `json:"switched_off_triggers,omitempty"`
+	// Checks is, per target, the tables waiting to be compared with the source (and
+	// repaired if they differ) once the sync has caught up.
+	Checks []CheckStatus `json:"pending_checks,omitempty"`
 }
 
 // IndexStatus counts one target's deferred indexes. Pending lists the ones not yet
@@ -54,6 +57,13 @@ type IndexStatus struct {
 type TriggerStatus struct {
 	Target   string   `json:"target"`
 	Triggers []string `json:"triggers"`
+}
+
+// CheckStatus lists one target's tables waiting for an automatic check.
+type CheckStatus struct {
+	Target string   `json:"target"`
+	Tables []string `json:"tables"`
+	Reason string   `json:"reason"`
 }
 
 // TableStatus is one table's initial-copy state plus its per-target streaming
@@ -224,6 +234,23 @@ func (r *Reporter) Report(ctx context.Context, sync string) (Report, error) {
 				rep.Triggers = append(rep.Triggers, TriggerStatus{Target: tgt})
 			}
 			rep.Triggers[i].Triggers = append(rep.Triggers[i].Triggers, st.Trigger.Table.String()+": "+st.Trigger.Name)
+		}
+	}
+	if cs, ok := r.reader.(state.CheckStore); ok {
+		checks, err := cs.ListChecks(ctx, sync)
+		if err != nil {
+			return Report{}, err
+		}
+		at := map[string]int{}
+		for _, c := range checks {
+			tgt := string(c.Target)
+			i, ok := at[tgt]
+			if !ok {
+				i = len(rep.Checks)
+				at[tgt] = i
+				rep.Checks = append(rep.Checks, CheckStatus{Target: tgt, Reason: c.Reason})
+			}
+			rep.Checks[i].Tables = append(rep.Checks[i].Tables, c.Table.String())
 		}
 	}
 	return rep, nil

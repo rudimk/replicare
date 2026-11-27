@@ -614,6 +614,19 @@ of replica mode (as with PG's own replication): target FK checks and cascades do
 replicare's writes. Never on a mesh member. MySQL: no equivalent; triggers fire (documented). Copy
 errors now carry the PG DETAIL and CONTEXT lines (`withPgDetail`).
 
+**Checks repair what they find (decision, 0.7.6, from a production migration).** The after-catch-up
+check (`Syncer.startSkipCheck`/`runSkipCheck`, chunked verify via `daemon.skipCheck` with
+`VerifyOptions.CollectKeys`) no longer only reports drift: every still-differing key is queued on the
+source as a change (optional `engine.KeyRequeuer`, PG + MySQL: insert into the table's delta table
+as 'U'), so streaming re-reads and rewrites it (present → upsert, absent → delete), and the table is
+compared again after `repairWait` (1 min) until it matches; ERROR (`*.drift`) only when the
+difference fails to shrink for 3 rounds (the target refuses the rows) or nothing can requeue. It
+covers skip_initial_copy tables and **pending checks** (`replicare_state.pending_checks`, state store
+v7): the first start that holds a target's triggers back (`replicare_state.trigger_guard`, cleared when
+`target_triggers` is off) marks every table with copy progress, if any app trigger would have fired
+in an ordinary session (`pipeline.planTriggerChecks`). The check is wired on every one-way sync;
+`skip_initial_copy.verify: false` only drops skipped tables from it.
+
 **Pre-flight compatibility check (decision: block on incompatible, warn on risky).** At sync start,
 introspect and classify every source↔target column pair: **identical** / **safe-widening** (ok),
 **risky/lossy** (e.g. `int8→int4`, `varchar(50)→varchar(30)`, `timestamp→timestamptz`) → **warn**,
@@ -1043,6 +1056,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target constraints / PK / unique indexes. |
 | Deferred target indexes | **Postgres, on by default** (`defer_indexes`, per sync): plain target indexes are saved to the state store (+ logged in full) and dropped just before each table's copy, then rebuilt `CONCURRENTLY` one at a time (link columns first, then `ANALYZE`) on dedicated connections once the whole sync streams. Owned tables only; never on a mesh member; restart-safe; reseeds too; `replicare indexes restore` as the way out. See §4.1. |
+| Checks repair | The after-catch-up check (skip_initial_copy tables + tables copied while target triggers fired, marked on the first guarded start, state store v7) **queues every differing key on the source** (`engine.KeyRequeuer`) so streaming rewrites it, re-checks until it matches; ERROR only when 3 rounds don't shrink the difference. See §4.2. |
 | Target triggers | **The target's own triggers never fire on replicare's writes** (Postgres, on by default, `target_triggers`): ordinary ones skipped via **replica mode on replicare's connections** where permitted and the target isn't also a capture source; the rest **switched off** with modes saved (state store v6) and switched back on when the sync is paused or by `replicare triggers restore`; not owned → refuse the start. Never on a mesh member; MySQL unchanged. See §4.2. |
 | Skip initial copy | **`skip_initial_copy` (opt-in, PG + MySQL):** tables not yet started are marked copied (`Skipped`, state store v5) and the sync streams from the capture queue; **after catch-up each is verified row by row** against the source, drift → ERROR + stays marked until reseed; restart-safe. Only correct if capture went on while target == source (documented cutover order). The one-way cycle check **ignores paused syncs**, so a sync and its reverse can share a config with one paused. See §4. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
