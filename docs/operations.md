@@ -246,6 +246,53 @@ rows. A table linked in a loop is copied in two stages:
 
 When both stages are done for every table, the whole group switches to streaming at once.
 
+### Reading in storage order
+
+A table is normally copied in order of its key, a range of keys per chunk. When its rows aren't
+stored in key order on the source's disk, every row of a range is somewhere else, and the source
+reads them one at a time: the copy runs at a few hundred rows a second, and the source's disk is
+busy the whole time, slowing the application down too. Reading the table in the order its rows
+are stored, a run of blocks per chunk, avoids that: each chunk is one long read.
+
+With [`copy_order: auto`](configuration.md#the-order-a-first-copy-reads-in-copy_order)(the
+default), on a source running Postgres 14 or later, a table is read in storage order when it's 1 GiB
+or more and its rows are stored out of key order. That comes from the source's own statistics for
+the key's first column(`pg_stats.correlation`, between -1 and 1): below 0.9 either way counts as
+out of order. Every other table is read in key order. A table that has never been analysed, a
+partitioned table, and the tables of a loop of foreign keys are always read in key order.
+
+The choice is logged when the table's copy starts, with the reason:
+
+```text
+INFO rc.orders: read in storage order: 32.0 GiB, stored out of key order (correlation 0.07) event=copy.storage_order
+```
+
+What it changes along the way:
+
+- **There's no planning read first.** A table read in storage order starts copying at once, since
+  its chunks are block ranges worked out from its size.
+- **Chunks are at least 8 MiB of the table** and otherwise hold about as many rows as key-order
+  chunks.
+- **A restart carries on from the last finished block range**, as key order carries on from its
+  last finished key range. A table that started copying in key order before the upgrade to 0.8.2,
+  and now qualifies, starts again from the beginning in storage order, merging over the rows already
+  on the target; the log line says so.
+- **A row can be copied twice**, before and after it moves on disk(an update writes a new version
+  of the row elsewhere). The second chunk to hold it then fails on the duplicate key, and is loaded
+  again by merging: logged as `copy.storage_chunk_retry`, or as a dropped connection being retried
+  when the failure also closed the source connection. A row that moved and wasn't seen at all was
+  changed, so it's in the queue of changes, and streaming copies it.
+- **A rewrite of the whole table starts its copy again.** `VACUUM FULL`, `CLUSTER`, `pg_repack`
+  and `TRUNCATE` move every row without changing any, so nothing is queued for them. `replicare`
+  notices that the table's storage changed, logs `copy.storage_rewritten` at WARN, and copies the
+  table again from the first block. After five rewrites during one copy it stops with an error.
+
+A copy already running in storage order keeps it until it finishes, even if the statistics change
+meanwhile. [`copy_order: key`](configuration.md#the-order-a-first-copy-reads-in-copy_order)
+switches back to key order; a table part-copied in storage order then starts again in key order.
+Going back to a version before 0.8.2 does the same: it sees such a table as not started, and copies
+it again in key order, which is safe.
+
 ### Knowing when it's finished
 
 The copy is over when every table is streaming. Any of these shows it:
@@ -262,8 +309,9 @@ and on a big table it can take hours.
 ### What's normal along the way
 
 - **The copy rate drops to 0 for a while.** There are three usual reasons:
-  - Before copying a table, `replicare` reads through its key column on the source once to plan
-    the chunks. Nothing is copied during that read, and on a big table it can take many minutes.
+  - Before copying a table in key order, `replicare` reads through its key column on the source
+    once to plan the chunks. Nothing is copied during that read, and on a big table it can take
+    many minutes. A table [read in storage order](#reading-in-storage-order) skips it.
   - The link-filling pass writes `UPDATE`s, which don't count as copied rows.
   - Rows only count once their chunk is committed, so when chunks take longer than the panel's
     2-minute window, the rate reads 0 in between.
@@ -323,7 +371,7 @@ How to read them:
 | What shows up | What it means |
 |---|---|
 | `row_number() OVER` on the source | Planning the chunks of the table it names. Leave it running |
-| `COPY (SELECT …)` on the source, `COPY` on the target | Copying rows |
+| `COPY (SELECT …)` on the source, `COPY` on the target | Copying rows. `WHERE ctid >= …` means the table is [read in storage order](#reading-in-storage-order) |
 | `waiting_on` of `IO/DataFileRead` | Reading from disk. Normal on a big table, but a lot of it means the database is disk-bound |
 | `UPDATE … FROM "replicare_fill"` on the target | The link-filling pass |
 | `INSERT … "replicare_stg"` on the target | Loading a chunk that already had rows on the target, by merging |
@@ -763,6 +811,9 @@ During the initial copy, two more things apply:
 - An `ALTER TABLE`(or `VACUUM FULL` / `CLUSTER`) on a table being copied waits for that read to
   finish, and the application's queries on the table queue behind it. Pause heavy maintenance and
   schema migrations during the initial copy, or run them with a `lock_timeout`.
+- A `VACUUM FULL`, `CLUSTER`, `pg_repack` or `TRUNCATE` of a table being
+  [read in storage order](#reading-in-storage-order) starts that table's copy again from the
+  beginning, since every row has moved.
 
 Long-open transactions are the real vacuum problem. `replicare`'s change-tracking tables get
 constant inserts and deletes, and rely on autovacuum to reclaim the space. A transaction left open

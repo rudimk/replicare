@@ -512,6 +512,53 @@ type ChunkOptions struct {
 	// Lo, when non-nil, restricts planning to keys >= Lo — the resume lower
 	// bound (the copy-progress watermark). Keyset only (CLAUDE.md §4.1).
 	Lo KeyValues
+	// Order is the order the initial copy reads a table in (CLAUDE.md §4.1
+	// "storage-order copy"). Empty means key order, as before; the daemon sets it from
+	// the sync's copy_order for one-way syncs. Only the plain chunked copy reads it.
+	Order CopyOrder
+}
+
+// CopyOrder is the order a table's initial copy reads its rows in (CLAUDE.md §4.1).
+type CopyOrder string
+
+const (
+	// CopyOrderAuto lets the source choose per table: storage order for a large table
+	// whose rows are not stored in key order, key order otherwise.
+	CopyOrderAuto CopyOrder = "auto"
+	// CopyOrderKey reads every table in key order (key ranges). The default when unset.
+	CopyOrderKey CopyOrder = "key"
+	// CopyOrderStorage reads every table in storage order wherever the source can.
+	CopyOrderStorage CopyOrder = "storage"
+)
+
+// StorageOrderReader is an OPTIONAL Source capability: copying a table in the order
+// its rows are stored rather than in key order (CLAUDE.md §4.1 "storage-order copy").
+// A table whose rows are scattered relative to its key turns a key-order copy into one
+// random read per row; reading it in storage order is sequential. Chunks are block
+// ranges (ChunkCTID, bounds KeyValues{int block}). A row that moves while the copy
+// runs was changed, so capture queued it and streaming re-reads it; a row seen twice
+// is handled by the copy loading that chunk again with the merge load. A rewrite of
+// the whole table (which moves rows without changing them) is caught by StorageFile.
+// Postgres implements it.
+type StorageOrderReader interface {
+	// StorageOrder says whether to read t in storage order under pref (CopyOrderAuto
+	// or CopyOrderStorage), why, and the identity of t's storage now.
+	StorageOrder(ctx context.Context, t TableRef, pref CopyOrder) (StorageOrderChoice, error)
+	// PlanStorageChunks plans block-range chunks from block `from` to the end of t,
+	// each about targetRows rows (never under a minimum size); the last chunk is
+	// unbounded above, so it covers blocks added after planning.
+	PlanStorageChunks(ctx context.Context, t TableRef, from int64, targetRows int) ([]Chunk, error)
+	// StorageFile returns the identity of t's storage now. It changes when the table
+	// is rewritten (VACUUM FULL, CLUSTER, pg_repack, TRUNCATE, some ALTER TABLEs),
+	// after which block positions copied earlier mean nothing.
+	StorageFile(ctx context.Context, t TableRef) (int64, error)
+}
+
+// StorageOrderChoice is a StorageOrderReader's decision for one table.
+type StorageOrderChoice struct {
+	Use    bool   // read the table in storage order
+	Reason string // why, in plain words, for the log
+	File   int64  // the identity of the table's storage now (see StorageFile)
 }
 
 // KeyValues is one row's key column values, in key-column order.

@@ -193,7 +193,7 @@ func (s *Syncer) planTriggerChecks(ctx context.Context, cs state.CheckStore, app
 			if err != nil {
 				return fmt.Errorf("load copy progress of %s: %w", t, err)
 			}
-			if prog.Done || len(prog.Watermark) > 0 || len(prog.Completed) > 0 {
+			if prog.Started() {
 				copied = append(copied, t)
 			}
 		}

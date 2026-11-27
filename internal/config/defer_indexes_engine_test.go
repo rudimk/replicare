@@ -51,3 +51,28 @@ syncs:
 		t.Fatalf("enabled on a fake-engine sync: err = %v, want a refusal", err)
 	}
 }
+
+// TestCopyOrderStoragePostgresOnly: storage order exists only for Postgres; auto and
+// key are accepted on any engine (they change nothing there).
+func TestCopyOrderStoragePostgresOnly(t *testing.T) {
+	registerFake(t)
+	base := `
+sources:
+  s: { engine: fake, fake: {dsn: "x"} }
+targets:
+  t: { engine: fake, fake: {dsn: "y"} }
+syncs:
+  - name: only
+    source: s
+    targets: [t]
+`
+	for _, v := range []string{"auto", "key"} {
+		if _, err := Load(writeTemp(t, base+"    copy_order: "+v+"\n")); err != nil {
+			t.Errorf("copy_order: %s on a non-Postgres sync: %v", v, err)
+		}
+	}
+	_, err := Load(writeTemp(t, base+"    copy_order: storage\n"))
+	if err == nil || !strings.Contains(err.Error(), "only supported for postgres") {
+		t.Fatalf("copy_order: storage on a non-Postgres sync: err = %v, want a refusal", err)
+	}
+}

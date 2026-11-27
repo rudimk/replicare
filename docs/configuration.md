@@ -190,6 +190,7 @@ syncs:
       enabled: true
     skip_initial_copy:        # optional; Postgres and MySQL, off unless set true (see below)
       enabled: false
+    copy_order: auto          # optional; Postgres, auto unless set (see below)
     include: ["public.*"]     # selection globs (schema.table)
     exclude: ["*_audit"]      # excluded from the include set
     tuning: { ... }           # optional (see below)
@@ -245,6 +246,41 @@ serves live traffic: unset, it's simply off there, and `enabled: true` is refuse
 Setting `enabled: true` on a MySQL or Redis sync is refused too. How it runs, how to watch it, and
 how to put the indexes back by hand are in
 [operations](operations.md#target-indexes-during-the-first-copy).
+
+With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
+sync setting.
+
+### The order a first copy reads in: `copy_order`
+
+`replicare` normally reads each table in order of its key, a range of keys at a time. That's fast
+when the rows are stored on disk roughly in key order. When they aren't, for example in a table
+keyed on `(customer, day)` whose rows arrive day by day for every customer, each row in a key range
+sits somewhere else on disk, and the source has to fetch them one by one. On a large table that
+turns a copy of hours into one of weeks, and it keeps the source's disk busy for the application
+too.
+
+So on a Postgres source, `replicare` reads a table like that in the order its rows are stored
+instead, a run of disk blocks at a time, which the source reads in one go:
+
+```yaml
+syncs:
+  - name: app-to-warehouse
+    # ...
+    copy_order: auto      # default
+```
+
+| Value | Meaning |
+|---|---|
+| `auto` | The default. A table of 1 GiB or more whose rows are stored out of key order is read in storage order; every other table in key order. |
+| `key` | Every table is read in key order, as before version 0.8.2. |
+| `storage` | Every table that can be is read in storage order, whatever its size. |
+
+How `auto` decides, and what it logs, is in
+[operations](operations.md#reading-in-storage-order). Storage order needs Postgres 14 or later on
+the source, and is never used for a partitioned table or for a table in a loop of foreign keys,
+which are read in key order whatever is set. `storage` on a MySQL or Redis sync is refused at
+config load; `auto` and `key` change nothing there. An active-active cluster always reads in key
+order.
 
 With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
 sync setting.

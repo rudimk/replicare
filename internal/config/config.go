@@ -121,6 +121,28 @@ type Sync struct {
 	// that already holds the source's data (for example the old source, after a cutover,
 	// as the target of the sync running the other way). See SkipInitialCopy.
 	SkipInitialCopy SkipInitialCopy `yaml:"skip_initial_copy"`
+	// CopyOrder is the order the initial copy reads each table in (CLAUDE.md §4.1
+	// "storage-order copy"): "auto" (unset, the default) reads a large table whose rows
+	// are not stored in key order in storage order, which is sequential on the source's
+	// disk, and every other table in key order; "key" reads every table in key order,
+	// as before 0.8.2; "storage" reads every table it can in storage order. Postgres
+	// sources only act on it (14+); "storage" on another engine is refused at load.
+	CopyOrder string `yaml:"copy_order"`
+}
+
+// Copy orders accepted by Sync.CopyOrder.
+const (
+	CopyOrderAuto    = "auto"
+	CopyOrderKey     = "key"
+	CopyOrderStorage = "storage"
+)
+
+// ReadOrder returns the sync's copy order, auto when unset.
+func (s *Sync) ReadOrder() string {
+	if s.CopyOrder == "" {
+		return CopyOrderAuto
+	}
+	return s.CopyOrder
 }
 
 // SkipInitialCopy configures starting a sync without its initial copy. With it on, every
@@ -504,6 +526,16 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/failover.html#several-active)", s.Name, ref, id)
 				}
 			}
+		}
+
+		switch s.CopyOrder {
+		case "", CopyOrderAuto, CopyOrderKey:
+		case CopyOrderStorage:
+			if src.Engine != "postgres" {
+				return fmt.Errorf("sync %q: copy_order: storage is only supported for postgres syncs (this one is %q)", s.Name, src.Engine)
+			}
+		default:
+			return fmt.Errorf("sync %q: copy_order must be auto, key or storage (got %q)", s.Name, s.CopyOrder)
 		}
 
 		// Deferred target indexes: Postgres only, never on a live mesh node. Unset is

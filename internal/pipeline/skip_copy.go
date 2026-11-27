@@ -66,7 +66,7 @@ func (s *Syncer) skipCopies(ctx context.Context) error {
 			if prog.Done {
 				continue
 			}
-			if len(prog.Watermark) > 0 || len(prog.Completed) > 0 {
+			if prog.Started() {
 				started = append(started, t)
 				continue
 			}

@@ -480,11 +480,24 @@ func cyclicCopyBackoff(attempt int) time.Duration {
 func (s *Syncer) copyOptions() []copy.Option {
 	opts := []copy.Option{copy.WithProgress(func(t engine.TableRef, n int64) {
 		s.Tel.AddRowsCopied(s.Name, t, n)
-	})}
+	}), copy.WithEvents(s.copyEvent)}
 	if s.ClusterMode {
 		opts = append(opts, copy.WithLoadMode(engine.LoadMerge))
 	}
 	return opts
+}
+
+// copyEvent records an event the copy reports: in the state store's events and the
+// logs, except DEBUG ones and chunk retries, which only go to the logs.
+func (s *Syncer) copyEvent(ctx context.Context, level, event string, table engine.TableRef, msg string) {
+	e := state.Event{Sync: s.Name, Target: string(s.Target), Table: table, Level: level, Event: event, Message: msg}
+	if level == "DEBUG" || event == copy.EventStorageRetry {
+		if s.Tel != nil {
+			s.Tel.LogEvent(ctx, e)
+		}
+		return
+	}
+	s.recordEvent(ctx, e)
 }
 
 // recordEvent persists an operational event when a StateStore is present, logging

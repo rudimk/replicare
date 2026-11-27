@@ -48,6 +48,8 @@ type config struct {
 	// path (INSERT ... ON CONFLICT DO UPDATE) is idempotent against them and needs no
 	// DELETE-range resume.
 	loadMode engine.LoadMode
+	// event, if set, receives the copy's notable decisions as named events (WithEvents).
+	event func(ctx context.Context, level, event string, table engine.TableRef, msg string)
 }
 
 // WithLoadMode overrides the per-chunk target write strategy (default: direct COPY).
@@ -128,6 +130,13 @@ func copyTable(ctx context.Context, workers []Worker, store state.StateStore,
 	// REPLACES the old per-chunk DELETE-range, which deadlocked/erred on a populated
 	// FK target because copy is parents-first (deleting a still-referenced parent).
 	mode := resolveLoadMode(ctx, workers[0].Sink, ref, cfg.loadMode)
+
+	// A large table whose rows are not stored in key order is read in storage order
+	// instead (CLAUDE.md §4.1 "storage-order copy"): sequential reads rather than one
+	// random read per row.
+	if choice, ok := chooseStorageOrder(ctx, workers[0].Src, ref, opts.Order, prog, cfg); ok {
+		return copyTableStorage(ctx, workers, store, syncName, target, ref, opts, cfg, prog, choice, mode)
+	}
 
 	planOpts := opts
 	planOpts.Lo = prog.Watermark

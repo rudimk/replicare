@@ -34,6 +34,22 @@ type CopyProgress struct {
 	// it stays set while the check is pending, has found drift, or is turned off. Any
 	// ordinary progress write (a copy, a reseed's reset) clears it.
 	Skipped bool
+	// StorageOrder marks a copy that reads the table in the order its rows are stored,
+	// not in key order (CLAUDE.md §4.1 "storage-order copy"): every block below
+	// BlockWatermark is copied, and RelFile identifies the table's storage when the copy
+	// started (a rewrite such as VACUUM FULL or CLUSTER changes it, and the copy starts
+	// over). Kept apart from Watermark/Completed, which always mean key progress, so an
+	// older version that knows nothing of these simply sees a copy that has not started.
+	// Every progress write sets all of them, so a key-order write clears them.
+	StorageOrder   bool
+	BlockWatermark int64
+	RelFile        int64
+}
+
+// Started reports whether the table's copy has begun (or finished): any progress in
+// key order or storage order.
+func (p CopyProgress) Started() bool {
+	return p.Done || len(p.Watermark) > 0 || len(p.Completed) > 0 || p.StorageOrder
 }
 
 // CompletedRange is one finished chunk's half-open key range.

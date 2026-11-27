@@ -424,6 +424,8 @@ func (t *Telemetry) LogEvent(ctx context.Context, e state.Event) {
 		level = slog.LevelWarn
 	case "ERROR":
 		level = slog.LevelError
+	case "DEBUG":
+		level = slog.LevelDebug
 	}
 	attrs := []slog.Attr{slog.String("event", e.Event), slog.String(observability.AttrSync, e.Sync)}
 	if e.Target != "" {
