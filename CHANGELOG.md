@@ -4,8 +4,14 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.1]
 
+- **Fixed: a sync read as failing for its whole initial copy after a failed start.**
+  `replicare_sync_start_failed`(and the dashboard's "Syncs failing" panel) went to `1` when an
+  attempt failed, but only went back to `0` once the sync reached streaming. So a sync that started
+  on its next attempt still read as failing for as long as its initial copy took, often hours. It
+  now reads `0` as soon as the next attempt starts, and `1` only while the sync waits to be tried
+  again.
 - **Grafana dashboard: a "Syncs, triggers & checks" row**, below "Index rebuild": syncs failing
   to start(`replicare_sync_start_failed`), tables each sync replicates(`replicare_sync_tables`, red
   at 0), the target's own triggers skipped or switched off(`replicare_target_triggers`), and tables

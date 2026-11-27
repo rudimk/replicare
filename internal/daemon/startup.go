@@ -32,6 +32,10 @@ func (d *Daemon) runWithRetry(ctx context.Context, job, target string, run func(
 	wait := startRetryMin
 	for attempt := 1; ; attempt++ {
 		started := false
+		// A new attempt is under way, so the job is no longer waiting to be retried. Cleared
+		// here, not only once it streams: an attempt that gets past a failure spends its
+		// whole initial copy before streaming, and must not read as failing all that time.
+		d.tel.SetSyncStartFailed(job, target, false)
 		err := run(ctx, func() {
 			started = true
 			d.tel.SetSyncStartFailed(job, target, false)

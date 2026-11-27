@@ -190,3 +190,42 @@ func TestLogPreflightSaysWhyNothingReplicates(t *testing.T) {
 		}
 	}
 }
+
+// TestRunWithRetryClearsFailingWhileTryingAgain: replicare_sync_start_failed is 1 only
+// while a job waits to be retried. An attempt that gets past the failure is still in its
+// initial copy, long before it streams, and must not keep reading as failing.
+func TestRunWithRetryClearsFailingWhileTryingAgain(t *testing.T) {
+	fastRetries(t)
+	d, _, _ := testDaemon(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	const failing = `replicare_sync_start_failed{sync="s",target="dst"}`
+	gauge := func() string {
+		for _, line := range strings.Split(scrapeMetrics(t, d), "\n") {
+			if strings.HasPrefix(line, failing+" ") {
+				return strings.TrimPrefix(line, failing+" ")
+			}
+		}
+		return "absent"
+	}
+	copying := make(chan struct{})
+	var attempts atomic.Int32
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.runWithRetry(ctx, "s", "dst", func(ctx context.Context, _ func()) error {
+			if attempts.Add(1) == 1 {
+				return errors.New("pre-flight blocked")
+			}
+			close(copying) // the second attempt is copying: not streaming yet
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	<-copying
+	if v := gauge(); v != "0" {
+		t.Errorf("failing gauge while the next attempt copies = %s, want 0", v)
+	}
+	cancel()
+	<-done
+}
