@@ -55,11 +55,19 @@ const (
 	// (skip_initial_copy), by where their check against the source stands: pending,
 	// ok, drift, or off (the check is turned off).
 	MetricCopySkippedTables = "replicare_copy_skipped_tables"
-	MetricReseedTotal       = "replicare_reseed_total"
-	MetricTargetUp          = "replicare_target_up"
-	MetricSourceUp          = "replicare_source_up"
-	MetricSourceDBBytes     = "replicare_source_db_bytes"
-	MetricTargetDBBytes     = "replicare_target_db_bytes"
+	// A sync target (or cluster edge) whose start-up failed and is waiting to try again:
+	// 1 while waiting, 0 once it is running. The counter counts the failures. One sync
+	// failing to start no longer stops the daemon's other syncs, so this is how it shows.
+	MetricSyncStartFailed        = "replicare_sync_start_failed"
+	MetricSyncStartFailuresTotal = "replicare_sync_start_failures_total"
+	// MetricSyncTables is how many tables a sync target replicates (its selection, less
+	// the tables skipped for having no usable key): 0 means it replicates nothing.
+	MetricSyncTables    = "replicare_sync_tables"
+	MetricReseedTotal   = "replicare_reseed_total"
+	MetricTargetUp      = "replicare_target_up"
+	MetricSourceUp      = "replicare_source_up"
+	MetricSourceDBBytes = "replicare_source_db_bytes"
+	MetricTargetDBBytes = "replicare_target_db_bytes"
 	// Replicated-data size: just the sync's selected tables (heap+indexes+TOAST),
 	// as opposed to the whole-database *_db_bytes above. This is the
 	// apples-to-apples source↔target figure — it excludes replicare's own capture
@@ -110,6 +118,9 @@ var Metrics = []Metric{
 	{MetricDeltaPurgedTotal, Counter, "Delta rows purged", []string{LabelSync, LabelTable}},
 	{MetricTrackLeftoversRemovedTotal, Counter, "Track rows left by versions before 0.7.0 that the background sweep removed", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricCopySkippedTables, Gauge, "Tables marked copied without being copied (skip_initial_copy), by where their check against the source stands (pending, ok, drift, off)", []string{LabelSync, LabelTarget, "check"}},
+	{MetricSyncStartFailed, Gauge, "1 while a sync target is not running because its last attempt failed (starting up, or while streaming) and is waiting to be tried again; 0 once it streams", []string{LabelSync, LabelTarget}},
+	{MetricSyncStartFailuresTotal, Counter, "Failed attempts to run a sync target, starting up or while streaming (each is retried; the other syncs keep running)", []string{LabelSync, LabelTarget}},
+	{MetricSyncTables, Gauge, "Tables the sync target replicates (selected and with a usable key); 0 means nothing is replicated", []string{LabelSync, LabelTarget}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},
 	{MetricTargetUp, Gauge, "Target reachability (1=up, 0=down)", []string{LabelSync, LabelTarget}},
 	{MetricSourceUp, Gauge, "Source reachability (1=up, 0=down)", []string{LabelSync}},
@@ -203,6 +214,17 @@ const (
 	// the source starting once the target has caught up, a table that matches, a table
 	// that differs (ERROR: the target is missing data or holds data the source doesn't),
 	// and a check that could not run (tried again later).
+	// Start-up and progress, so the logs alone show what each sync is doing: a sync
+	// target's start-up failing (retried, the other syncs carry on), the tables it
+	// selected and skipped, each pre-flight finding, capture being installed table by
+	// table, and a progress line every minute during the initial copy and streaming.
+	EventSyncStartFailed      = "sync.start_failed"
+	EventSyncStarting         = "sync.starting"
+	EventSyncTables           = "sync.tables_selected"
+	EventPreflightFinding     = "preflight.finding"
+	EventCaptureInstalling    = "capture.installing"
+	EventCopyProgress         = "copy.progress"
+	EventStreamProgress       = "stream.progress"
 	EventCopySkipped          = "copy.skipped"
 	EventCopySkipCheckStarted = "copy.skip_check_started"
 	EventCopySkipCheckOK      = "copy.skip_check_ok"

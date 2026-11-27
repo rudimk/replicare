@@ -598,3 +598,11 @@ type DeltaBacklog struct {
 	OldestAge  time.Duration
 	HasBacklog bool
 }
+
+// CopySelectionHolder is implemented by a Source that filters its copy reads by the
+// sync's selection (Redis: a key-glob SCAN), so each copy connection must be given the
+// selection first by introspecting with it. HoldsCopySelection reports whether that is
+// needed; Sources that don't implement it never need it.
+type CopySelectionHolder interface {
+	HoldsCopySelection() bool
+}

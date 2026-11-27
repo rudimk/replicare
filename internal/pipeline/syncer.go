@@ -138,6 +138,9 @@ type Syncer struct {
 	// check is waiting.
 	caughtUp     chan struct{}
 	caughtUpOnce sync.Once
+
+	// progress accumulates streaming passes for the minute-by-minute progress line.
+	progress streamProgress
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
@@ -251,6 +254,7 @@ func (s *Syncer) publishCopyTargets(ctx context.Context) {
 // edge REQUIRES the source to implement OriginAwareCapturer — the config layer only
 // admits cluster engines that do, so a missing implementation is a build-time bug.
 func (s *Syncer) installCapture(ctx context.Context) error {
+	ctx = s.withCaptureProgress(ctx, len(s.Replicable))
 	if s.ClusterMode {
 		oc, ok := s.Source.(engine.OriginAwareCapturer)
 		if !ok {
@@ -495,6 +499,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 		defer close(done)
 		t := time.NewTicker(dbSizeInterval)
 		defer t.Stop()
+		lastLog := time.Now()
 		for {
 			select {
 			case <-quit:
@@ -505,6 +510,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 				s.measureDBSizes(ctx)
 				s.lastDBSize = time.Now()
 				s.Tel.RefreshETAs() // a copy that has stopped moving shows it
+				s.logCopyProgress(ctx, &lastLog)
 			}
 		}
 	}()

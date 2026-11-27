@@ -105,5 +105,9 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 	return introspect(ctx, s.db, s.cfg, sel)
 }
 
+// HoldsCopySelection implements engine.CopySelectionHolder: the copy SCAN filters keys by
+// the selection this Source was first introspected with, so every copy connection needs it.
+func (s *Source) HoldsCopySelection() bool { return true }
+
 // InstallCapture / RemoveCapture — see notify.go (RM7, the keyspace-notification accelerator).
 // ReadDirtyKeys, RereadCurrent, ConfirmConsumed, DeltaBacklog, Purge — see stream.go (RM5).

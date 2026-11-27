@@ -213,3 +213,88 @@ func TestInitialCopyCountsTheLinkFillPass(t *testing.T) {
 		t.Fatalf("progress when done = %v (%v), want 1", v, ok)
 	}
 }
+
+// TestInitialCopyETAKeepsMovingPastAStaleEstimate: the source's row estimate comes from
+// its statistics and is often low. A table that keeps copying past it is still work being
+// done; counting it as nothing made the measured rate fall and the ETA climb to years
+// while the copy ran at full speed. Table a: estimated 1,000 rows, 1 GB (it really holds
+// more). Table b: 10,000 rows, 9 GB.
+func TestInitialCopyETAKeepsMovingPastAStaleEstimate(t *testing.T) {
+	tel, reg, now := etaTel()
+	a, b := engine.TableRef{Schema: "public", Name: "a"}, engine.TableRef{Schema: "public", Name: "b"}
+	labels := map[string]string{"sync": "s"}
+	const gb = 1_000_000_000
+	for _, tb := range []engine.TableRef{a, b} {
+		tel.SetPhase("s", tb, "initial_copy")
+	}
+	tel.SetRowsCopiedTarget("s", a, 1_000)
+	tel.SetRowsCopiedTarget("s", b, 10_000)
+	tel.SetCopyTableBytes("s", a, 1*gb)
+	tel.SetCopyTableBytes("s", b, 9*gb)
+
+	// 1,000 rows of a every minute (1 GB/min at a's 1 MB a row), long past its estimate.
+	for range 12 {
+		*now = now.Add(time.Minute)
+		tel.AddRowsCopied("s", a, 1_000)
+	}
+	// Over the last 10 minutes: 10 GB in 600s. b's 9 GB left takes 540s.
+	if v, ok := gaugeValue(t, reg, observability.MetricInitialCopyETA, labels); !ok || math.Abs(v-540) > 1 {
+		t.Fatalf("ETA = %v (%v), want 540s: a table past its estimate is still moving", v, ok)
+	}
+	if v, ok := gaugeValue(t, reg, observability.MetricInitialCopyProgress, labels); !ok || math.Abs(v-0.1) > 0.001 {
+		t.Fatalf("progress = %v (%v), want 0.1: a counts no more than its own size", v, ok)
+	}
+}
+
+// TestInitialCopyETATableWithoutARowEstimate: a table the source has never analysed has no
+// row estimate. It is still work to do (weighed at the other tables' bytes per row), not a
+// table already done. Table a: 1,000 rows, 1 GB. Table b: no estimate, 1 GB.
+func TestInitialCopyETATableWithoutARowEstimate(t *testing.T) {
+	tel, reg, now := etaTel()
+	a, b := engine.TableRef{Schema: "public", Name: "a"}, engine.TableRef{Schema: "public", Name: "b"}
+	labels := map[string]string{"sync": "s"}
+	const gb = 1_000_000_000
+	for _, tb := range []engine.TableRef{a, b} {
+		tel.SetPhase("s", tb, "initial_copy")
+	}
+	tel.SetRowsCopiedTarget("s", a, 1_000)
+	tel.SetRowsCopiedTarget("s", b, -1)
+	tel.SetCopyTableBytes("s", a, 1*gb)
+	tel.SetCopyTableBytes("s", b, 1*gb)
+
+	*now = now.Add(30 * time.Second)
+	tel.AddRowsCopied("s", a, 250)
+	*now = now.Add(30 * time.Second)
+	tel.AddRowsCopied("s", a, 250)
+	// 0.5 GB in 60s; 0.5 GB of a and all 1 GB of b left: 180s.
+	if v, ok := gaugeValue(t, reg, observability.MetricInitialCopyETA, labels); !ok || math.Abs(v-180) > 1 {
+		t.Fatalf("ETA = %v (%v), want 180s with b still to copy", v, ok)
+	}
+	if v, ok := gaugeValue(t, reg, observability.MetricInitialCopyProgress, labels); !ok || math.Abs(v-0.25) > 0.001 {
+		t.Fatalf("progress = %v (%v), want 0.25", v, ok)
+	}
+	if st, ok := tel.CopyStatus("s"); !ok || st.RowsEstimate != 1_000 || st.Tables != 2 {
+		t.Fatalf("copy status = %+v (%v), want 2 tables and an estimate of 1,000 rows", st, ok)
+	}
+}
+
+// TestInitialCopyETAWaitsWhileTooEarlyToTell: under 1% done, the rate mostly reflects
+// per-table set-up on small tables, so no ETA is published for the first half hour.
+func TestInitialCopyETAWaitsWhileTooEarlyToTell(t *testing.T) {
+	tel, reg, now := etaTel()
+	a := engine.TableRef{Schema: "public", Name: "a"}
+	labels := map[string]string{"sync": "s"}
+	tel.SetPhase("s", a, "initial_copy")
+	tel.SetRowsCopiedTarget("s", a, 100_000_000)
+	for i := 1; i <= 31; i++ {
+		*now = now.Add(time.Minute)
+		tel.AddRowsCopied("s", a, 1_000)
+		_, ok := gaugeValue(t, reg, observability.MetricInitialCopyETA, labels)
+		if i < 30 && ok {
+			t.Fatalf("ETA published after %d minutes at well under 1%% done", i)
+		}
+		if i == 31 && !ok {
+			t.Fatal("no ETA after 31 minutes")
+		}
+	}
+}

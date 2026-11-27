@@ -31,6 +31,10 @@ const (
 	// up. Under steady writes the backlog never quite reaches 0 and stops shrinking,
 	// which is healthy, not "not catching up".
 	etaCaughtUp = time.Minute
+	// etaEarlyShare: below this share of the work done, a copy ETA needs a full window of
+	// history before it is published (see copyETA).
+	etaEarlyShare = 0.01
+	etaEarlyFor   = 30 * time.Minute
 )
 
 type etaSample struct {
@@ -85,61 +89,107 @@ type copyProgress struct {
 	bytes    map[string]int64 // table -> source data size; when known, the ETA is by size
 	fill     map[string]bool  // table will get a link-filling pass after its rows are in
 	filled   map[string]int64 // table -> rows whose links the pass has set
-	total    etaSeries        // work done (see work), all tables
+	total    etaSeries        // work moved (copyWork.moved), all tables
+	started  time.Time        // when the first sample was taken
 }
 
-// work returns how much of the copy is done and how much is left. When the tables' sizes
-// are known it is in bytes: each table's size times the share of its rows copied, so a
-// table of large rows weighs what it holds rather than its row count. Otherwise it is in
-// rows. A table with an estimate but no size (none came back for it) weighs nothing.
+// sample records the copy's work now, for the rate.
+func (c *copyProgress) sample(now time.Time) {
+	if c.started.IsZero() {
+		c.started = now
+	}
+	c.total.add(now, c.work().moved)
+}
+
+// copyWork is the copy's work measure at one moment.
+type copyWork struct {
+	// done and remaining are the work finished and still to do. A table counts no more
+	// than its own size towards done, so the progress ratio never runs ahead.
+	done, remaining float64
+	// moved is the work finished with nothing capped: a table copying past the source's
+	// estimate of its rows keeps adding to it. The rate is measured on this, so a stale
+	// estimate cannot make a copy that is moving look stopped.
+	moved   float64
+	copying bool
+}
+
+// work measures the copy. When the tables' sizes are known it is in bytes: each row
+// copied counts as its table's size divided by its estimated rows, so a table of large
+// rows weighs what it holds rather than its row count. A table whose source has no
+// estimate yet (never analysed) uses the average bytes per row of the others, so it
+// still counts as work to do instead of as finished. Without sizes it is in rows.
+// A table with an estimate but no size (none came back for it) weighs nothing.
 //
 // A table that gets a link-filling pass counts twice: once for its rows going in, once
 // for the pass that sets its links, which touches every row again. The pass is counted at
 // the same weight as the copy, an approximation (it rewrites each row but not its large
 // out-of-line values); the measured rate corrects for it as the pass runs.
-func (c *copyProgress) work() (done, remaining float64, copying bool) {
+func (c *copyProgress) work() (w copyWork) {
+	var avgRow float64 // bytes per row over the tables with both a size and an estimate
+	if len(c.bytes) > 0 {
+		var size, rows float64
+		for tbl, est := range c.estimate {
+			if b := c.bytes[tbl]; b > 0 && est > 0 {
+				size += float64(b)
+				rows += float64(est)
+			}
+		}
+		if rows > 0 {
+			avgRow = size / rows
+		}
+	}
 	stage := func(tbl string, est, n int64) {
 		if len(c.bytes) == 0 {
-			done += float64(n)
+			w.done += float64(n)
+			w.moved += float64(n)
 			if left := est - n; left > 0 && !c.finished[tbl] {
-				remaining += float64(left)
+				w.remaining += float64(left)
 			}
 			return
 		}
-		frac := 1.0
-		if est > 0 {
-			frac = min(float64(n)/float64(est), 1)
-		}
 		size := float64(c.bytes[tbl])
-		done += size * frac
+		perRow := avgRow
+		if est > 0 {
+			perRow = size / float64(est)
+		}
+		if perRow <= 0 {
+			// Nothing to weigh rows by (no table has both a size and an estimate): count
+			// the table as its size, done, as before sizes were known.
+			w.done += size
+			w.moved += size
+			return
+		}
+		got := float64(n) * perRow
+		w.moved += got
+		w.done += min(got, size)
 		if !c.finished[tbl] {
-			remaining += size * (1 - frac)
+			w.remaining += max(size-got, 0)
 		}
 	}
 	for tbl, est := range c.estimate {
 		if !c.finished[tbl] {
-			copying = true
+			w.copying = true
 		}
 		stage(tbl, est, c.copied[tbl])
 		if c.fill[tbl] {
 			stage(tbl, est, c.filled[tbl])
 		}
 	}
-	return done, remaining, copying
+	return w
 }
 
 // progress is the share of the copy done, 0 to 1, by the same measure as work. It stays
 // under 1 until every table has finished, so it never reads complete while a table is
 // still copying because the source under-estimated its rows.
 func (c *copyProgress) progress() (float64, bool) {
-	done, remaining, copying := c.work()
-	if !copying {
+	w := c.work()
+	if !w.copying {
 		return 1, true
 	}
-	if done+remaining <= 0 {
+	if w.done+w.remaining <= 0 {
 		return 0, false
 	}
-	return min(done/(done+remaining), 0.999), true
+	return min(w.done/(w.done+w.remaining), 0.999), true
 }
 
 type catchupProgress struct {
@@ -186,9 +236,17 @@ func (e *etaTracker) copyETA(sync string) (float64, bool) {
 	if c == nil || len(c.estimate) == 0 {
 		return 0, false // no row estimates (an engine without one): nothing to measure against
 	}
-	_, remaining, copying := c.work()
-	if !copying {
+	w := c.work()
+	if !w.copying {
 		return 0, true
+	}
+	remaining := w.remaining
+	// Too early to say: the first part of a copy is mostly per-table set-up on small
+	// tables, so the measured rate is tiny against the big tables still to come and the
+	// estimate reads absurdly long (years). Publish none until a meaningful share of the
+	// work is done, or the copy has run for etaEarlyFor.
+	if total := w.done + remaining; total > 0 && w.done/total < etaEarlyShare && e.now().Sub(c.started) < etaEarlyFor {
+		return 0, false
 	}
 	r, ok := c.total.rate(e.now())
 	switch {
@@ -268,8 +326,7 @@ func (t *Telemetry) etaRowsCopied(sync string, table engine.TableRef, n int64) {
 	defer t.eta.mu.Unlock()
 	c := t.eta.copyFor(sync)
 	c.copied[table.String()] += n
-	done, _, _ := c.work()
-	c.total.add(t.eta.now(), done)
+	c.sample(t.eta.now())
 	t.publishCopyETA(sync)
 }
 
@@ -279,7 +336,7 @@ func (t *Telemetry) etaCopyEstimate(sync string, table engine.TableRef, total in
 	c := t.eta.copyFor(sync)
 	c.estimate[table.String()] = total
 	if len(c.total.samples) == 0 {
-		c.total.add(t.eta.now(), 0) // the copy's starting point, so the first rate is honest
+		c.sample(t.eta.now()) // the copy's starting point, so the first rate is honest
 	}
 	t.publishCopyETA(sync)
 }
@@ -296,9 +353,8 @@ func (t *Telemetry) SetCopyTableBytes(sync string, table engine.TableRef, bytes 
 	defer t.eta.mu.Unlock()
 	c := t.eta.copyFor(sync)
 	c.bytes[table.String()] = bytes
-	done, _, _ := c.work()
 	c.total = etaSeries{}
-	c.total.add(t.eta.now(), done)
+	c.sample(t.eta.now())
 	t.publishCopyETA(sync)
 }
 
@@ -361,9 +417,8 @@ func (t *Telemetry) SetLinkFillPlanned(sync string, table engine.TableRef) {
 	if est, ok := c.estimate[tbl]; ok {
 		t.reg.Gauge(observability.MetricLinkFillRowsTarget).WithLabelValues(sync, tbl).Set(float64(est))
 	}
-	done, _, _ := c.work()
 	c.total = etaSeries{}
-	c.total.add(t.eta.now(), done)
+	c.sample(t.eta.now())
 	t.publishCopyETA(sync)
 }
 
@@ -377,7 +432,41 @@ func (t *Telemetry) AddRowsFilled(sync string, table engine.TableRef, n int64) {
 	defer t.eta.mu.Unlock()
 	c := t.eta.copyFor(sync)
 	c.filled[table.String()] += n
-	done, _, _ := c.work()
-	c.total.add(t.eta.now(), done)
+	c.sample(t.eta.now())
 	t.publishCopyETA(sync)
+}
+
+// CopyStatus is a snapshot of a sync's initial copy, for the progress line in the logs.
+type CopyStatus struct {
+	Tables, TablesDone       int   // tables with a row estimate, and how many finished
+	RowsCopied, RowsEstimate int64 // rows copied this run, and the source's estimate
+	Progress                 float64
+	HasProgress              bool
+	ETASeconds               float64 // -1: not moving
+	HasETA                   bool
+}
+
+// CopyStatus returns the current state of a sync's initial copy. ok is false when nothing
+// is being tracked for it (no copy this run, or an engine without row estimates).
+func (t *Telemetry) CopyStatus(sync string) (st CopyStatus, ok bool) {
+	if t == nil || t.eta == nil {
+		return st, false
+	}
+	t.eta.mu.Lock()
+	defer t.eta.mu.Unlock()
+	c := t.eta.copy[sync]
+	if c == nil || len(c.estimate) == 0 {
+		return st, false
+	}
+	for tbl, est := range c.estimate {
+		st.Tables++
+		if c.finished[tbl] {
+			st.TablesDone++
+		}
+		st.RowsEstimate += max(est, 0)
+		st.RowsCopied += c.copied[tbl]
+	}
+	st.Progress, st.HasProgress = c.progress()
+	st.ETASeconds, st.HasETA = t.eta.copyETA(sync)
+	return st, true
 }

@@ -58,7 +58,7 @@ func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, o
 	if err != nil {
 		return err
 	}
-	for _, ref := range tables {
+	for i, ref := range tables {
 		tbl, ok := introspected[ref]
 		if !ok {
 			return fmt.Errorf("postgres: install capture: table %s not found on source", ref)
@@ -71,6 +71,7 @@ func (s *Source) installCapture(ctx context.Context, tables []engine.TableRef, o
 		if err := s.installOneRetrying(ctx, ref, cols, origin, version); err != nil {
 			return fmt.Errorf("postgres: install capture on %s: %w", ref, err)
 		}
+		engine.ReportCaptureProgress(ctx, i+1, len(tables))
 	}
 	return nil
 }

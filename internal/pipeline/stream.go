@@ -48,6 +48,7 @@ func (s *Syncer) Stream(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			err := s.streamOnce(ctx)
+			s.logStreamProgress(ctx)
 			// Heartbeat on every completed iteration — success OR handled error —
 			// so a liveness probe distinguishes a cycling loop (healthy, even when
 			// the target is down and each pass errors) from a wedged one that never
@@ -133,6 +134,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// failure and retry next pass. The needs_reseed flag, if set, persists and
 		// is picked up once the target recovers.
 		s.Tel.IncError(s.Name, "drain")
+		s.notePass(consumed, nil, drainErr)
 		s.reportDrainFailure(ctx, drainErr)
 		// Distinguish a source-side failure in the up gauges: a bounded ping tells
 		// whether the source is reachable (reportDrainFailure already handles the
@@ -147,6 +149,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	}
 	if enforceErr != nil {
 		s.Tel.IncError(s.Name, "retention")
+		s.notePass(consumed, nil, enforceErr)
 		return enforceErr
 	}
 
@@ -172,6 +175,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	if allCaughtUp(backlogs, s.Replicable) {
 		s.noteCaughtUp()
 	}
+	s.notePass(consumed, backlogs, nil)
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
 	s.refreshDBSizes(ctx)

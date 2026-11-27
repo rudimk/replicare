@@ -47,29 +47,35 @@ func clusterEdges(clusters []*config.Cluster) []clusterEdge {
 	return edges
 }
 
-// runClusterEdge persists the edge's sync definition, then brings it up and streams
-// it, exactly like a one-way sync target but in cluster mode. A build/bringup failure
-// returns an error that cancels the daemon's errgroup (same contract as runSync).
+// runClusterEdge brings the edge up and streams it, exactly like a one-way sync target
+// but in cluster mode. Like a sync target it is isolated: a failure to start, or a stop,
+// is logged, counted and retried (runWithRetry) while the other edges and syncs keep
+// running. It returns when ctx ends.
 func (d *Daemon) runClusterEdge(ctx context.Context, e clusterEdge) error {
-	if err := d.store.PutSync(ctx, state.SyncDef{
-		Name:    e.name(),
-		Source:  e.srcNode,
-		Targets: []engine.TargetID{engine.TargetID(e.dstNode)},
-	}); err != nil {
-		return fmt.Errorf("daemon: persist cluster edge %q: %w", e.name(), err)
-	}
-
-	syncer, cleanup, err := d.buildClusterEdge(ctx, e)
-	if err != nil {
-		return fmt.Errorf("daemon: build cluster edge %q: %w", e.name(), err)
-	}
-	defer cleanup()
-	if err := syncer.Bringup(ctx); err != nil {
-		return fmt.Errorf("daemon: bringup cluster edge %q: %w", e.name(), err)
-	}
-	d.beat.Register(healthKey(e.name(), e.dstNode))
-	d.log.Info("cluster edge streaming",
-		slog.String("cluster", e.cluster.Name),
-		slog.String("src", e.srcNode), slog.String("dst", e.dstNode))
-	return syncer.Stream(ctx)
+	d.runWithRetry(ctx, e.name(), e.dstNode, func(ctx context.Context, started func()) error {
+		if err := d.store.PutSync(ctx, state.SyncDef{
+			Name:    e.name(),
+			Source:  e.srcNode,
+			Targets: []engine.TargetID{engine.TargetID(e.dstNode)},
+		}); err != nil {
+			return fmt.Errorf("persist cluster edge %q: %w", e.name(), err)
+		}
+		syncer, cleanup, err := d.buildClusterEdge(ctx, e)
+		if err != nil {
+			return fmt.Errorf("build cluster edge %q: %w", e.name(), err)
+		}
+		defer cleanup()
+		if err := syncer.Bringup(ctx); err != nil {
+			return fmt.Errorf("bringup cluster edge %q: %w", e.name(), err)
+		}
+		key := healthKey(e.name(), e.dstNode)
+		d.beat.Register(key)
+		defer d.beat.Unregister(key)
+		started()
+		d.log.Info("cluster edge streaming",
+			slog.String("cluster", e.cluster.Name),
+			slog.String("src", e.srcNode), slog.String("dst", e.dstNode))
+		return syncer.Stream(ctx)
+	})
+	return nil
 }

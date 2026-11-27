@@ -17,6 +17,31 @@ All notable changes to replicare are documented here. The format follows
   limit still bounds the queue, but a sync now only gives up on its own target, never another
   sync's, which may be mid-copy or paused. Only targets in the same config are counted: a database
   read by two separate `replicare` configs isn't covered.
+- **One sync failing no longer stops the others.** A sync(or one target of it, or one direction
+  of an active-active cluster) that couldn't start, or stopped while streaming, used to stop every
+  sync and exit the daemon, so under Kubernetes one broken sync kept restarting all the others and
+  their copies. Now it's logged at ERROR as `sync.start_failed` with the cause and started again
+  after a wait that doubles from 30 seconds up to 10 minutes, while everything else keeps running.
+  `replicare_sync_start_failed` and `replicare_sync_start_failures_total` show it. Only state store
+  problems still stop the daemon.
+- **Much more in the logs while a sync starts and runs.** Each start-up stage is logged with how long
+  it took(`sync.starting`), every pre-flight finding at its own level(`preflight.finding`), and how
+  many tables the sync replicates(`sync.tables_selected`): a WARN naming the tables skipped for
+  having no primary key or unique key, and an ERROR when it replicates nothing, saying whether the
+  selection matched no table or none had a key(`replicare_sync_tables` reads `0` then). Installing
+  capture logs its progress every 15 seconds(`capture.installing`), the initial copy logs tables
+  done, rows copied, share done and ETA every minute(`copy.progress`), and streaming logs rows
+  applied, the backlog and failed passes every minute(`stream.progress`). A blocked pre-flight now
+  lists every blocking finding in its error.
+- **Fixed: the initial copy ETA could read years.** Two causes. A table that kept copying past the
+  source's row estimate(statistics that are out of date) stopped counting towards the measured rate,
+  so on a copy running at full speed the ETA climbed as it went; and a table the source had never
+  analysed counted as already copied. Both now count: rows past the estimate add to the rate, and a
+  table with no estimate is weighed at the other tables' average row size. And while under 1% of the
+  work is done, no ETA is shown for the first 30 minutes, since the start of a copy is mostly set-up
+  on small tables and says little about how long the big ones will take.
+- **Faster start-up for a sync with many tables:** the copy connections no longer each read the
+  whole table list again before the copy starts.
 - **New page: [failover and high availability](https://replicare.rudimk.com/failover.html),**
   which replaces the active-active page. It covers three layouts(one active and one passive; one
   active and several passive, as a fan-out or a chain; several active), and for each: setting it

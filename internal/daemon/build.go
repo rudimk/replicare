@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/copy"
@@ -118,6 +119,8 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return nil, nil, err
 	}
 
+	stage := time.Now()
+	d.logStage(ctx, name, targetName, "connecting to the source and the target")
 	source, err := d.openSource(ctx, eng, srcEp, &closers)
 	if err != nil {
 		return fail(fmt.Errorf("connect source: %w", err))
@@ -139,6 +142,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 	// pairs (a Source/Sink is not concurrency-safe). Sized by the source cap,
 	// bounded to at least one and to the target cap.
 	poolN := workerCount(tuning.Pool)
+	d.logStage(ctx, name, targetName, fmt.Sprintf("connected (%s); opening %d copy connection pairs", since(stage), poolN))
 	workers := make([]copy.Worker, 0, poolN)
 	for i := 0; i < poolN; i++ {
 		ws, err := d.openSource(ctx, eng, srcEp, &closers)
@@ -161,21 +165,32 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 	}
 
 	// Pre-flight for the topo-ordered components; refuse to start if blocked.
+	stage = time.Now()
+	d.logStage(ctx, name, targetName, "reading the source's tables")
 	srcSchema, err := source.Introspect(ctx, sel)
 	if err != nil {
 		return fail(fmt.Errorf("introspect source: %w", err))
 	}
+	d.logStage(ctx, name, targetName, fmt.Sprintf("source: the selection matches %s (%s); reading the target's tables",
+		tablesWord(len(srcSchema.Tables)), since(stage)))
+	stage = time.Now()
 	tgtSchema, err := sink.Introspect(ctx, sel)
 	if err != nil {
 		return fail(fmt.Errorf("introspect target: %w", err))
 	}
-	// Prime every copy-worker source with the SYNC selection. Engines that filter
-	// by selection at copy-read time (Redis: key-glob SCAN) need each worker to hold
-	// the real selection before the copy layer's later per-table column probe
-	// introspects it with a table-ref selection (first-write-wins; otherwise a Redis
-	// worker would filter its SCAN by the unit ref and copy nothing). Harmless —
-	// a redundant read-only introspect — for capture-driven engines (Postgres/MySQL).
+	d.logStage(ctx, name, targetName, fmt.Sprintf("target: %s (%s); running pre-flight",
+		tablesWord(len(tgtSchema.Tables)), since(stage)))
+	// Prime every copy-worker source with the SYNC selection, for engines that filter
+	// by selection at copy-read time (Redis: key-glob SCAN): each worker must hold the
+	// real selection before the copy layer's later per-table column probe introspects it
+	// with a table-ref selection (first-write-wins; otherwise a Redis worker would filter
+	// its SCAN by the unit ref and copy nothing). Only those engines: for Postgres and
+	// MySQL it was a full re-read of the schema per copy connection, minutes of silent
+	// start-up on a large schema over a slow link, for nothing.
 	for _, w := range workers {
+		if h, ok := w.Src.(engine.CopySelectionHolder); !ok || !h.HoldsCopySelection() {
+			continue
+		}
 		if _, err := w.Src.Introspect(ctx, sel); err != nil {
 			return fail(fmt.Errorf("introspect copy source: %w", err))
 		}
@@ -203,8 +218,10 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 			}
 		}
 	}
+	d.logPreflight(ctx, name, targetName, len(srcSchema.Tables), sel, report)
 	if report.Blocked() {
-		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix the target schema before starting", blockingCount(report)))
+		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix them and it starts on its next attempt:%s",
+			blockingCount(report), blockedDetail(report)))
 	}
 
 	syncer := &pipeline.Syncer{

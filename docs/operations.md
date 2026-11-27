@@ -687,7 +687,7 @@ table exactly.
 | `replicare_deferred_indexes` / `replicare_deferred_indexes_built` | gauge | `sync`, `target` | Postgres. Plain target indexes taken down for the initial copy, and how many of them are built again. Unset when none were taken down. |
 | `replicare_index_build_info` | gauge | `sync`, `target`, `table`, `index`, `phase` | `1` for the index being built right now, with its table, name and build stage(`phase`, as Postgres reports it). No series when nothing is building. |
 | `replicare_index_build_phase_progress_ratio` | gauge | `sync`, `target` | How far the build in flight is through its current stage, from 0 to 1. Stages that report no progress(sorting, waiting) read `0`. |
-| `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the work still to do divided by how fast it got done over the last 10 minutes. Work is measured by size where the source reports table sizes(Postgres, MySQL): each table counts for its data size on the source, times the share of its estimated rows still to copy, so a table of large rows weighs what it holds, not its row count. Otherwise it's measured in rows. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate. |
+| `replicare_initial_copy_eta_seconds` | gauge | `sync` | Estimated seconds until the initial copy finishes: the work still to do divided by how fast it got done over the last 10 minutes. Work is measured by size where the source reports table sizes(Postgres, MySQL): each row copied counts for its table's data size divided by its estimated rows, so a table of large rows weighs what it holds, not its row count. A table that keeps copying past its row estimate(the source's statistics are often out of date) still counts towards the rate, and a table the source has never analysed counts as work to do, at the other tables' average row size. Otherwise it's measured in rows. `0` once nothing is left to copy, `-1` when no rows were copied in the last 10 minutes. No series until there's a minute of history, or when the engine gives no row estimate; and while under 1% of the work is done, none for the first 30 minutes, since the start of a copy is mostly set-up on small tables and the rate then says little about the big ones. |
 | `replicare_catchup_eta_seconds` | gauge | `sync`, `target` | Estimated seconds until the target's delta backlog is cleared, at the rate it shrank over the last 10 minutes. `0` when caught up(no backlog, or nothing waiting longer than a minute), `-1` when the backlog is flat or growing or the target is unreachable. No series until there's a minute of history. |
 | `replicare_throughput_rows_per_second` | gauge | `sync` | Current apply / copy throughput. `0` on an idle, caught-up pass. |
 | `replicare_replication_lag_seconds` | gauge | `sync`, `target`, `table`, `component` | Replication lag, the age of the oldest unconsumed delta(`0` when caught up). |
@@ -698,6 +698,9 @@ table exactly.
 | `replicare_delta_purge_seconds` | gauge | `sync`, `table` | How long the table's last purge on the source took, in seconds. It should stay well under a second; each purge statement gives up after 30 seconds and is retried on the next pass. |
 | `replicare_track_leftovers_removed_total` | counter | `sync`, `target`, `table` | Track rows left behind by versions before 0.7.0 that the background clean-up has removed. It only moves while a table still has leftovers. |
 | `replicare_copy_skipped_tables` | gauge | `sync`, `target`, `check` | Tables marked copied without being copied(`skip_initial_copy`), by where their check against the source stands: `pending`, `ok`, `drift`, or `off` when the check is turned off. Unset when no table skipped its copy. |
+| `replicare_sync_tables` | gauge | `sync`, `target` | How many tables the sync replicates: those its selection matches that have a primary key or unique key. `0` means it replicates nothing, which is also logged at ERROR with the reason. |
+| `replicare_sync_start_failed` | gauge | `sync`, `target` | `1` while the sync isn't running because its last attempt failed, while starting up or while streaming, and is waiting to be tried again; `0` once it streams. |
+| `replicare_sync_start_failures_total` | counter | `sync`, `target` | Failed attempts to run the sync, each logged as `sync.start_failed` and retried. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability(`1` = up, `0` = down). |
 | `replicare_source_up` | gauge | `sync` | Source reachability(`1` = up, `0` = down). |
@@ -750,6 +753,13 @@ field to grep / alert on:
 | Event | Level | Meaning |
 |---|---|---|
 | `capture.installed` / `capture.removed` | INFO | capture lifecycle |
+| `sync.starting` | INFO | a start-up stage of a sync: connecting, opening the copy connections, reading the source's and the target's tables(with how many and how long it took), running pre-flight |
+| `preflight.finding` | INFO, WARN or ERROR | one finding of the start-up compatibility check, at its own level |
+| `sync.tables_selected` | INFO, WARN or ERROR | how many tables the sync replicates; WARN naming the tables skipped for having no primary key or unique key; ERROR when it replicates nothing, saying whether the selection matched no table or none had a key |
+| `sync.start_failed` | ERROR | the sync failed to start, or stopped while streaming, with the cause; it starts again after a wait that doubles from 30 seconds up to 10 minutes, and the other syncs keep running |
+| `capture.installing` | INFO | capture is being installed, one table at a time, with how many are done every 15 seconds |
+| `copy.progress` | INFO | every minute during the initial copy: tables done, rows copied against the estimate, the share of the work done and the ETA |
+| `stream.progress` | INFO, or WARN when passes failed | every minute while streaming: rows applied, the backlog and its oldest change, and how many passes failed with the last error |
 | `copy.component_started` | INFO | the initial copy of a group of linked tables(a component) began; the message names its size and first table |
 | `copy.link_fill_started` / `copy.link_fill_done` | INFO | for a table linked in a loop, its rows are in and the pass filling in the links between them began / ended |
 | `copy.transient_retry` | WARN | a group's copy hit a row whose parent the target didn't have yet, and is being retried |
@@ -776,7 +786,9 @@ A degrading target shows up in metrics, traces *and* logs at once - never in jus
 
 Once every group has finished copying, the daemon logs `sync streaming`(with the `sync` and
 `target` fields): from then on the sync is replicating changes. A large initial copy logs the
-stage events above as it goes, so the logs alone show where it's up to.
+stage events above as it goes, plus a `copy.progress` line every minute, so the logs alone show
+where it's up to. Every stage of start-up is logged too(`sync.starting`), so a sync that seems to
+be doing nothing shows which stage it's in and how long the last one took.
 
 ## The status HTTP API
 
@@ -882,6 +894,14 @@ syncs:
 sync with row counts and delta backlog, and the Redis sync with key counts and a `-` backlog, since
 Redis has no source-side queue. `replicare verify config.yml` checks both, and any command can be
 scoped to one of them with `--sync pg-pipeline`.
+
+Each sync, and each target of a sync, runs on its own. One that can't start(an unreachable
+database, a pre-flight block) or that stops while streaming is logged at ERROR as
+`sync.start_failed` with the cause, and started again after a wait that doubles from 30 seconds up
+to 10 minutes. The other syncs carry on meanwhile, and the
+daemon keeps running, so one broken sync never restarts the others or their copies.
+`replicare_sync_start_failed` is `1` for a sync in that state. Only problems with the state store
+itself, which every sync needs, still stop the daemon.
 
 > ⚠️ The state store is always Postgres(the only backend in v1), even for a Redis to Redis pipeline
 > where no data touches Postgres. That's a documented requirement, not a bug; see
