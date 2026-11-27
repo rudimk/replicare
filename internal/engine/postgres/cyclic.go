@@ -231,7 +231,7 @@ func (s *Sink) nullFillComponent(ctx context.Context, conns []copyConn, members 
 				})
 			}
 			if err := withParentRetry(ctx, load, parents[ref], recopy); err != nil {
-				return fmt.Errorf("postgres: cyclic whole-load (%s): %w", ref, err)
+				return fmt.Errorf("postgres: cyclic whole-load (%s): %w", ref, withPgDetail(err))
 			}
 			continue
 		}
@@ -524,7 +524,7 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 			sql := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
 			n, err := countAttempt(ctx, func(ctx context.Context) error { return pipeCopy(ctx, src, ref, cols, sink, sql) })
 			if err != nil {
-				return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
+				return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, withPgDetail(err))
 			}
 			copied[ref] += n
 			continue
@@ -536,7 +536,7 @@ func LoadCyclicDeferred(ctx context.Context, src *Source, sink *Sink, tables []e
 			return stagedUpsertCopy(ctx, src, sink, ref, cols, stg, false)
 		})
 		if err != nil {
-			return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, err)
+			return fmt.Errorf("postgres: cyclic deferred: copy %s: %w", ref, withPgDetail(err))
 		}
 		copied[ref] += n
 	}
@@ -743,7 +743,7 @@ func stagedUpsertCopy(ctx context.Context, src *Source, sink *Sink, ref engine.T
 	}
 	copySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
 	if err := pipeCopy(ctx, src, ref, cols, sink, copySQL); err != nil {
-		return fmt.Errorf("postgres: staged upsert: copy %s: %w", ref, err)
+		return fmt.Errorf("postgres: staged upsert: copy %s: %w", ref, withPgDetail(err))
 	}
 	// Upsert from staging in bounded keyset chunks so no single INSERT statement ever
 	// processes the whole table — a whole-table INSERT ... ON CONFLICT cannot complete
@@ -996,7 +996,7 @@ func copyWhereOnce(ctx context.Context, src *Source, sink *Sink, ref engine.Tabl
 	if !occupied {
 		direct := fmt.Sprintf("COPY %s (%s) FROM STDIN", qualifyTable(ref), quotedColumnList(cols))
 		if err := pipeCopyWhere(ctx, src, ref, cols, pred, sink, direct); err != nil {
-			return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, err)
+			return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, withPgDetail(err))
 		}
 		if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 			return fmt.Errorf("postgres: cyclic copy range: commit: %w", err)
@@ -1011,14 +1011,14 @@ func copyWhereOnce(ctx context.Context, src *Source, sink *Sink, ref engine.Tabl
 	}
 	sinkCopySQL := fmt.Sprintf("COPY %s (%s) FROM STDIN", quoteIdentifier(stg), quotedColumnList(cols))
 	if err := pipeCopyWhere(ctx, src, ref, cols, pred, sink, sinkCopySQL); err != nil {
-		return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, err)
+		return fmt.Errorf("postgres: cyclic copy range %s: %w", ref, withPgDetail(err))
 	}
 	merge := mergeInsertSQL(ref, stg, cols, meta.pk, meta.pkSet, meta.identity)
 	if mode == loadMissingOnly {
 		merge = insertMissingSQL(ref, stg, cols, meta.pk, meta.identity)
 	}
 	if _, err := sink.conn.Exec(ctx, merge); err != nil {
-		return fmt.Errorf("postgres: cyclic copy range: upsert %s: %w", ref, err)
+		return fmt.Errorf("postgres: cyclic copy range: upsert %s: %w", ref, withPgDetail(err))
 	}
 	if _, err := sink.conn.Exec(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("postgres: cyclic copy range: commit: %w", err)
@@ -1621,7 +1621,7 @@ func (s *Source) copyColsWhere(ctx context.Context, ref engine.TableRef, cols []
 	}
 	sql := fmt.Sprintf("COPY (SELECT %s FROM %s WHERE %s) TO STDOUT", quotedColumnList(cols), qualifyTable(ref), where)
 	if _, err := s.conn.PgConn().CopyTo(ctx, w, sql); err != nil {
-		return fmt.Errorf("postgres: copy %s range: %w", ref, err)
+		return fmt.Errorf("postgres: copy %s range: %w", ref, withPgDetail(err))
 	}
 	return nil
 }

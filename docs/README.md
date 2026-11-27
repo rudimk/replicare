@@ -69,7 +69,7 @@ that engine's specifics:
 
 ### Active-active
 
-[Active-active replication](active-active.md) covers writes on any node, for Postgres, MySQL and
+[Active-active replication](failover.md#several-active) covers writes on any node, for Postgres, MySQL and
 Redis; it describes setting up a cluster, how conflicting changes are settled, and the two rules a
 multi-node setup has to follow.
 

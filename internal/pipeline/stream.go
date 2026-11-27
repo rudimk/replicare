@@ -48,6 +48,7 @@ func (s *Syncer) Stream(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			err := s.streamOnce(ctx)
+			s.logStreamProgress(ctx)
 			// Heartbeat on every completed iteration — success OR handled error —
 			// so a liveness probe distinguishes a cycling loop (healthy, even when
 			// the target is down and each pass errors) from a wedged one that never
@@ -109,8 +110,13 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// track, purge the unpinned deltas, flag it needs_reseed). This bounds source
 	// growth even during a target outage; the actual re-copy is deferred to a
 	// healthy pass below.
+	// The purge waits for every target reading each table from this source (PurgeTargets),
+	// but the retention caps may only give up on this syncer's own target: another
+	// sync's target may be mid-copy or paused, and only its own syncer can reseed it.
+	ret := s.Retention
+	ret.Sacrificable = []engine.TargetID{s.Target}
 	enf, enforceErr := reseed.Enforce(ctx, s.reseedDeps(), s.Name, s.Replicable,
-		[]engine.TargetID{s.Target}, s.Retention)
+		[]engine.TargetID{s.Target}, ret)
 	for tbl, n := range enf.Purged {
 		s.Tel.AddPurged(s.Name, tbl, n)
 	}
@@ -128,6 +134,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// failure and retry next pass. The needs_reseed flag, if set, persists and
 		// is picked up once the target recovers.
 		s.Tel.IncError(s.Name, "drain")
+		s.notePass(consumed, nil, drainErr)
 		s.reportDrainFailure(ctx, drainErr)
 		// Distinguish a source-side failure in the up gauges: a bounded ping tells
 		// whether the source is reachable (reportDrainFailure already handles the
@@ -142,6 +149,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	}
 	if enforceErr != nil {
 		s.Tel.IncError(s.Name, "retention")
+		s.notePass(consumed, nil, enforceErr)
 		return enforceErr
 	}
 
@@ -167,6 +175,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	if allCaughtUp(backlogs, s.Replicable) {
 		s.noteCaughtUp()
 	}
+	s.notePass(consumed, backlogs, nil)
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
 	s.refreshDBSizes(ctx)
@@ -357,6 +366,7 @@ func (s *Syncer) reportDrainFailure(ctx context.Context, cause error) {
 // reseedDeps builds the reseed orchestration dependencies from the Syncer.
 func (s *Syncer) reseedDeps() reseed.Deps {
 	return reseed.Deps{Src: s.Source, Sink: s.Sink, Workers: s.Workers, Store: s.Store,
+		TargetsFor: s.purgeTargets,
 		BeforeCopy: func(ctx context.Context, tables []engine.TableRef) {
 			s.deferIndexesWith(ctx, tables, s.Heartbeat)
 		},
@@ -508,4 +518,17 @@ func (s *Syncer) reconnectEndpoint(ctx context.Context, role string,
 		Sync: s.Name, Target: string(s.Target), Level: "WARN",
 		Event: "stream.reconnected", Message: role + " connection re-established after failure",
 	})
+}
+
+// purgeTargets returns the targets a table's queued changes must reach before they are
+// deleted: every consumer of the table on this source, always including this syncer's
+// own target.
+func (s *Syncer) purgeTargets(t engine.TableRef) []engine.TargetID {
+	ts := s.PurgeTargets[t]
+	for _, tg := range ts {
+		if tg == s.Target {
+			return ts
+		}
+	}
+	return append(append([]engine.TargetID{}, ts...), s.Target)
 }

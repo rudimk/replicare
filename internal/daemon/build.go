@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/rudimk/replicare/internal/config"
 	"github.com/rudimk/replicare/internal/copy"
@@ -28,10 +29,19 @@ func (d *Daemon) buildSyncer(ctx context.Context, sync *config.Sync, targetName 
 	if err != nil {
 		return nil, nil, err
 	}
+	// A queued change is deleted only once every target reading it from this source has
+	// it, not just this one (fan-out, other syncs from the same database).
+	if syncer.PurgeTargets, err = d.purgeTargets(ctx, syncer.Source, srcEp); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("consumers of source %q: %w", sync.Source, err)
+	}
 	// Deferred target indexes (one-way syncs only; never a cluster edge). The rebuilder
 	// is wired either way, so indexes dropped by an earlier run are still put back after
 	// the setting is turned off.
 	syncer.DeferIndexes = d.cfg.DefersIndexes(sync, targetName)
+	// The target's own triggers must not fire on replicare's writes (one-way syncs only;
+	// never a cluster edge, whose target is a live node).
+	syncer.GuardTriggers = d.cfg.GuardsTargetTriggers(sync, targetName)
 	syncer.IndexBuild = engine.IndexBuildOptions{
 		MaintenanceWorkMem: sync.DeferIndexes.MaintenanceWorkMem,
 		ParallelWorkers:    sync.DeferIndexes.ParallelWorkers,
@@ -76,7 +86,17 @@ func (d *Daemon) buildClusterEdge(ctx context.Context, e clusterEdge) (*pipeline
 	sel := engine.Selection{Include: e.cluster.Include, Exclude: e.cluster.Exclude}
 	// A cluster edge never syncs sequences (false): a mesh counter advance is silent data
 	// loss (.sisyphus/sequence-reseed-plan.md §5); the knob is one-way only.
-	return d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID, false)
+	syncer, cleanup, err := d.buildSyncerCore(ctx, e.name(), srcEp, tgtEp, sel, e.cluster.Tuning, e.dstNode, true, srcEp.NodeID, tgtEp.NodeID, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Every peer reads this node's changes, each on its own edge: a change is deleted
+	// only once all of them have it.
+	if syncer.PurgeTargets, err = d.purgeTargets(ctx, syncer.Source, srcEp); err != nil {
+		cleanup()
+		return nil, nil, fmt.Errorf("consumers of node %q: %w", e.srcNode, err)
+	}
+	return syncer, cleanup, nil
 }
 
 // buildSyncerCore is the shared build path for a one-way sync target and a cluster
@@ -102,6 +122,8 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		return nil, nil, err
 	}
 
+	stage := time.Now()
+	d.logStage(ctx, name, targetName, "connecting to the source and the target")
 	source, err := d.openSource(ctx, eng, srcEp, &closers)
 	if err != nil {
 		return fail(fmt.Errorf("connect source: %w", err))
@@ -123,6 +145,7 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 	// pairs (a Source/Sink is not concurrency-safe). Sized by the source cap,
 	// bounded to at least one and to the target cap.
 	poolN := workerCount(tuning.Pool)
+	d.logStage(ctx, name, targetName, fmt.Sprintf("connected (%s); opening %d copy connection pairs", since(stage), poolN))
 	workers := make([]copy.Worker, 0, poolN)
 	for i := 0; i < poolN; i++ {
 		ws, err := d.openSource(ctx, eng, srcEp, &closers)
@@ -145,21 +168,32 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 	}
 
 	// Pre-flight for the topo-ordered components; refuse to start if blocked.
+	stage = time.Now()
+	d.logStage(ctx, name, targetName, "reading the source's tables")
 	srcSchema, err := source.Introspect(ctx, sel)
 	if err != nil {
 		return fail(fmt.Errorf("introspect source: %w", err))
 	}
+	d.logStage(ctx, name, targetName, fmt.Sprintf("source: the selection matches %s (%s); reading the target's tables",
+		tablesWord(len(srcSchema.Tables)), since(stage)))
+	stage = time.Now()
 	tgtSchema, err := sink.Introspect(ctx, sel)
 	if err != nil {
 		return fail(fmt.Errorf("introspect target: %w", err))
 	}
-	// Prime every copy-worker source with the SYNC selection. Engines that filter
-	// by selection at copy-read time (Redis: key-glob SCAN) need each worker to hold
-	// the real selection before the copy layer's later per-table column probe
-	// introspects it with a table-ref selection (first-write-wins; otherwise a Redis
-	// worker would filter its SCAN by the unit ref and copy nothing). Harmless —
-	// a redundant read-only introspect — for capture-driven engines (Postgres/MySQL).
+	d.logStage(ctx, name, targetName, fmt.Sprintf("target: %s (%s); running pre-flight",
+		tablesWord(len(tgtSchema.Tables)), since(stage)))
+	// Prime every copy-worker source with the SYNC selection, for engines that filter
+	// by selection at copy-read time (Redis: key-glob SCAN): each worker must hold the
+	// real selection before the copy layer's later per-table column probe introspects it
+	// with a table-ref selection (first-write-wins; otherwise a Redis worker would filter
+	// its SCAN by the unit ref and copy nothing). Only those engines: for Postgres and
+	// MySQL it was a full re-read of the schema per copy connection, minutes of silent
+	// start-up on a large schema over a slow link, for nothing.
 	for _, w := range workers {
+		if h, ok := w.Src.(engine.CopySelectionHolder); !ok || !h.HoldsCopySelection() {
+			continue
+		}
 		if _, err := w.Src.Introspect(ctx, sel); err != nil {
 			return fail(fmt.Errorf("introspect copy source: %w", err))
 		}
@@ -183,12 +217,14 @@ func (d *Daemon) buildSyncerCore(ctx context.Context, name string, srcEp, tgtEp 
 		if mf := engine.MeshIDAllocationFindings(srcSchema); len(mf) > 0 {
 			report.Findings = append(report.Findings, mf...)
 			if detail := meshBlockDetail(mf); detail != "" {
-				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — see Rule 1 at https://replicare.rudimk.com/active-active.html):%s", name, detail))
+				return fail(fmt.Errorf("active-active pre-flight blocked for %q: replicated tables use a locally-allocated integer key, unsafe in a mesh (use UUID v7 / ULID — see Rule 1 at https://replicare.rudimk.com/failover.html#rule-1-use-globally-unique-ids):%s", name, detail))
 			}
 		}
 	}
+	d.logPreflight(ctx, name, targetName, len(srcSchema.Tables), sel, report)
 	if report.Blocked() {
-		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix the target schema before starting", blockingCount(report)))
+		return fail(fmt.Errorf("pre-flight blocked (%d blocking findings); fix them and it starts on its next attempt:%s",
+			blockingCount(report), blockedDetail(report)))
 	}
 
 	syncer := &pipeline.Syncer{

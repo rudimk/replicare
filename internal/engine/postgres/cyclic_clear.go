@@ -166,13 +166,25 @@ func isInsufficientPrivilege(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == "42501"
 }
 
-// withPgDetail appends a Postgres error's DETAIL line to the message. pgx's Error()
-// leaves it out, and it is the line that names the offending key, e.g. "Key (email,
-// parent)=(a@x, 51) already exists." The wrapped error stays matchable with errors.As.
+// withPgDetail appends a Postgres error's DETAIL and CONTEXT lines to the message.
+// pgx's Error() leaves both out. DETAIL names the offending key, e.g. "Key (email,
+// parent)=(a@x, 51) already exists."; CONTEXT says where it happened, e.g. which
+// trigger function wrote the row. The wrapped error stays matchable with errors.As.
 func withPgDetail(err error) error {
 	var pgErr *pgconn.PgError
-	if err == nil || !errors.As(err, &pgErr) || pgErr.Detail == "" || strings.Contains(err.Error(), pgErr.Detail) {
+	if err == nil || !errors.As(err, &pgErr) {
 		return err
 	}
-	return fmt.Errorf("%w; %s", err, pgErr.Detail)
+	msg := err.Error()
+	var extra []string
+	if pgErr.Detail != "" && !strings.Contains(msg, pgErr.Detail) {
+		extra = append(extra, pgErr.Detail)
+	}
+	if pgErr.Where != "" && !strings.Contains(msg, pgErr.Where) {
+		extra = append(extra, "context: "+strings.ReplaceAll(pgErr.Where, "\n", "; "))
+	}
+	if len(extra) == 0 {
+		return err
+	}
+	return fmt.Errorf("%w; %s", err, strings.Join(extra, "; "))
 }

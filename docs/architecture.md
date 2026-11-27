@@ -144,7 +144,7 @@ idempotent, the replays are harmless.
 Topology is always the user's choice. The default is a single source to a single target. Fan-out(one
 source to many targets) is supported for the relational engines, and active-active(writes on any
 node) is supported for Postgres, MySQL and Redis, as described in
-[Active-active replication](active-active.md). A sync is always single-engine.
+[Active-active replication](failover.md#several-active). A sync is always single-engine.
 
 > ⚠️ At the moment, there's no standby daemon that takes over automatically; it's on the roadmap.
 

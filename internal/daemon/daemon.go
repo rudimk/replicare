@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	stdsync "sync"
 	"time"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -97,6 +98,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 
+	// Paused syncs: switch back on any target triggers they had switched off (a pause is
+	// the cutover step). In the background, so a slow target never holds up the rest.
+	go d.restorePausedTriggers(ctx)
+
 	g, gctx := errgroup.WithContext(ctx)
 	owned := 0
 	for _, sync := range d.cfg.Syncs {
@@ -166,37 +171,46 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return nil
 }
 
-// runSync persists the sync definition, then runs each of its targets
-// concurrently through bring-up and streaming (fan-out = one Syncer per target
-// in v1). A per-target failure cancels the sync's targets via the errgroup.
+// runSync runs each of the sync's targets concurrently through bring-up and streaming
+// (fan-out = one Syncer per target in v1). Each target is isolated: one that fails to
+// start, or stops, is logged, counted and retried (runWithRetry) while the sync's other
+// targets and the daemon's other syncs keep running. It returns when ctx ends.
 func (d *Daemon) runSync(ctx context.Context, sync *config.Sync) error {
 	targets := make([]engine.TargetID, len(sync.Targets))
 	for i, t := range sync.Targets {
 		targets[i] = engine.TargetID(t)
 	}
-	if err := d.store.PutSync(ctx, state.SyncDef{Name: sync.Name, Source: sync.Source, Targets: targets}); err != nil {
-		return fmt.Errorf("daemon: persist sync %q: %w", sync.Name, err)
-	}
-
-	g, gctx := errgroup.WithContext(ctx)
+	var wg stdsync.WaitGroup
 	for _, target := range sync.Targets {
 		target := target
-		g.Go(func() error {
-			syncer, cleanup, err := d.buildSyncer(gctx, sync, target)
-			if err != nil {
-				return fmt.Errorf("daemon: build sync %q target %q: %w", sync.Name, target, err)
-			}
-			defer cleanup()
-			if err := syncer.Bringup(gctx); err != nil {
-				return fmt.Errorf("daemon: bringup %q/%q: %w", sync.Name, target, err)
-			}
-			// Register the liveness heartbeat only now that streaming begins — a long
-			// initial copy must never read as a wedge. buildSyncer wired Heartbeat to
-			// mark the same key each pass.
-			d.beat.Register(healthKey(sync.Name, target))
-			d.log.Info("sync streaming", slog.String("sync", sync.Name), slog.String("target", target))
-			return syncer.Stream(gctx)
-		})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d.runWithRetry(ctx, sync.Name, target, func(ctx context.Context, started func()) error {
+				if err := d.store.PutSync(ctx, state.SyncDef{Name: sync.Name, Source: sync.Source, Targets: targets}); err != nil {
+					return fmt.Errorf("persist sync %q: %w", sync.Name, err)
+				}
+				syncer, cleanup, err := d.buildSyncer(ctx, sync, target)
+				if err != nil {
+					return fmt.Errorf("build sync %q target %q: %w", sync.Name, target, err)
+				}
+				defer cleanup()
+				if err := syncer.Bringup(ctx); err != nil {
+					return fmt.Errorf("bringup %q/%q: %w", sync.Name, target, err)
+				}
+				// Register the liveness heartbeat only now that streaming begins — a long
+				// initial copy must never read as a wedge. buildSyncer wired Heartbeat to
+				// mark the same key each pass. Unregistered when streaming stops, so a
+				// sync waiting to be retried never fails the daemon's health check.
+				key := healthKey(sync.Name, target)
+				d.beat.Register(key)
+				defer d.beat.Unregister(key)
+				started()
+				d.log.Info("sync streaming", slog.String("sync", sync.Name), slog.String("target", target))
+				return syncer.Stream(ctx)
+			})
+		}()
 	}
-	return g.Wait()
+	wg.Wait()
+	return nil
 }

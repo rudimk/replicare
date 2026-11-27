@@ -168,6 +168,42 @@ func TestPurgeRetentionAgeForcesReseed(t *testing.T) {
 	}
 }
 
+// TestPurgeRetentionOnlySacrificesOwnTarget: with two targets over the age cap but only
+// one the caller may give up on (RetentionPolicy.Sacrificable), only that one is
+// reseeded, and the other target's unconsumed changes stay queued: a sync may never
+// give up on another sync's target, which may be mid-copy or paused.
+func TestPurgeRetentionOnlySacrificesOwnTarget(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src, "CREATE TABLE rc_it.orders (id int PRIMARY KEY)")
+	ref := engine.TableRef{Schema: "rc_it", Name: "orders"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	relID, _, _, _ := lookupCapture(ctx, src.conn, ref)
+	mustExec(t, ctx, src.conn, "INSERT INTO rc_it.orders VALUES (1),(2),(3)")
+	mustExec(t, ctx, src.conn,
+		"UPDATE "+qualifiedCapture(deltaTableName(relID))+" SET rc_at = now() - interval '48 hours'")
+
+	stats, err := src.Purge(ctx, ref, []engine.TargetID{"mine", "other"},
+		engine.RetentionPolicy{MaxAgeSeconds: 3600, Sacrificable: []engine.TargetID{"mine"}})
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if len(stats.TargetsReseeded) != 1 || stats.TargetsReseeded[0] != "mine" {
+		t.Fatalf("TargetsReseeded = %v, want [mine]", stats.TargetsReseeded)
+	}
+	// "other" never consumed them, so all three stay queued for it.
+	if got := deltaCount(t, ctx, src, relID); got != 3 {
+		t.Errorf("deltas = %d, want 3 still queued for the other target", got)
+	}
+	bl, err := src.DeltaBacklog(ctx, ref, "other")
+	if err != nil || bl.Rows != 3 {
+		t.Errorf("other target backlog = %+v (%v), want 3 rows", bl, err)
+	}
+}
+
 // TestPurgeRetentionHealthyTargetRetained: within the age cap, nothing is
 // sacrificed and only consumed deltas purge (retention does not fire early).
 func TestPurgeRetentionHealthyTargetRetained(t *testing.T) {

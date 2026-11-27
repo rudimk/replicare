@@ -164,6 +164,35 @@ func (t *Telemetry) SetCopySkipped(sync string, target engine.TargetID, pending,
 	g.WithLabelValues(sync, string(target), "off").Set(float64(off))
 }
 
+// SetSyncStartFailed marks a sync target's start-up as failed and waiting to be retried
+// (true), or running (false).
+func (t *Telemetry) SetSyncStartFailed(sync, target string, failed bool) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	v := 0.0
+	if failed {
+		v = 1
+	}
+	t.reg.Gauge(observability.MetricSyncStartFailed).WithLabelValues(sync, target).Set(v)
+}
+
+// IncSyncStartFailure counts one failed start-up attempt of a sync target.
+func (t *Telemetry) IncSyncStartFailure(sync, target string) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	t.reg.Counter(observability.MetricSyncStartFailuresTotal).WithLabelValues(sync, target).Inc()
+}
+
+// SetSyncTables publishes how many tables a sync target replicates.
+func (t *Telemetry) SetSyncTables(sync, target string, n int) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	t.reg.Gauge(observability.MetricSyncTables).WithLabelValues(sync, target).Set(float64(n))
+}
+
 // SetPurgeSeconds records how long a table's last delta purge took.
 func (t *Telemetry) SetPurgeSeconds(sync string, table engine.TableRef, seconds float64) {
 	if t.reg == nil {
@@ -373,6 +402,9 @@ func (t *Telemetry) RetentionApproaching(ctx context.Context, sync string, targe
 // LogEvent writes an operational event to the structured log at its level (INFO when
 // unset), so the events a syncer records in the state store show in the logs too.
 func (t *Telemetry) LogEvent(ctx context.Context, e state.Event) {
+	if t == nil || t.log == nil {
+		return
+	}
 	level := slog.LevelInfo
 	switch e.Level {
 	case "WARN":

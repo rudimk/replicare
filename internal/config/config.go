@@ -113,6 +113,10 @@ type Sync struct {
 	// and builds them again once the whole sync is streaming (CLAUDE.md §4.1 "deferred
 	// target indexes"). On by default for Postgres syncs; see DeferIndexes.
 	DeferIndexes DeferIndexes `yaml:"defer_indexes"`
+	// TargetTriggers keeps the target's own triggers from firing on replicare's writes
+	// (CLAUDE.md §4.2 "the target's own triggers"). On by default for Postgres syncs;
+	// see TargetTriggers.
+	TargetTriggers TargetTriggers `yaml:"target_triggers"`
 	// SkipInitialCopy starts the sync streaming without its initial copy, for a target
 	// that already holds the source's data (for example the old source, after a cutover,
 	// as the target of the sync running the other way). See SkipInitialCopy.
@@ -165,6 +169,38 @@ type DeferIndexes struct {
 	// ParallelWorkers is how many extra workers each build may use (Postgres
 	// max_parallel_maintenance_workers). 0 → the target server's own setting.
 	ParallelWorkers int `yaml:"parallel_workers"`
+}
+
+// TargetTriggers configures keeping a Postgres target's own triggers (a version or
+// audit row written on insert, an updated_at stamp, an append-only guard) from firing on
+// replicare's writes, where they would make the target differ from the source. Where the
+// target allows it, replicare's own connections run in replica mode, so ordinary
+// triggers stay on for everyone else and simply skip replicare's writes; triggers that
+// fire even then are switched off for as long as the sync runs and switched back on when
+// it is paused, or by `replicare triggers restore`.
+type TargetTriggers struct {
+	// Enabled: unset or true → on for a Postgres sync (the default); false → the target's
+	// triggers fire on replicare's writes, as before, and any replicare switched off are
+	// switched back on. Off, whatever is set, for a target that is also an active-active
+	// cluster member; setting it true there, or on a non-Postgres sync, is refused at load.
+	Enabled *bool `yaml:"enabled"`
+}
+
+// GuardsTargetTriggers reports whether this sync keeps the named target's own triggers
+// from firing on its writes: on by default for Postgres, never for a target that is also
+// an active-active cluster member.
+func (c *Config) GuardsTargetTriggers(s *Sync, target string) bool {
+	if s.TargetTriggers.Enabled != nil && !*s.TargetTriggers.Enabled {
+		return false
+	}
+	tgt := c.Targets[target]
+	if tgt == nil || tgt.Engine != "postgres" {
+		return false
+	}
+	if id := connIdentity(tgt); id != "" && c.clusterMemberIdentities()[id] {
+		return false
+	}
+	return true
 }
 
 // DefersIndexes reports whether this sync drops and rebuilds the plain indexes of
@@ -465,7 +501,7 @@ func (c *Config) Validate() error {
 			members := c.clusterMemberIdentities()
 			for _, ref := range s.Targets {
 				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
-					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/active-active.html)", s.Name, ref, id)
+					return fmt.Errorf("sync %q: sync_sequences cannot be enabled when target %q (%s) is also an active-active cluster member — advancing a mesh node's counter is silent data loss; use globally-unique keys (UUID v7 / ULID) for active-active id allocation (https://replicare.rudimk.com/failover.html#several-active)", s.Name, ref, id)
 				}
 			}
 		}
@@ -484,6 +520,20 @@ func (c *Config) Validate() error {
 			for _, ref := range s.Targets {
 				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
 					return fmt.Errorf("sync %q: defer_indexes cannot be enabled when target %q (%s) is also an active-active cluster member — that node serves live traffic and needs its indexes; leave it unset or set it to false", s.Name, ref, id)
+				}
+			}
+		}
+
+		// Target triggers: Postgres only, never on a live mesh node. Unset is resolved per
+		// target by GuardsTargetTriggers; only an explicit true is refused here.
+		if tt := s.TargetTriggers.Enabled; tt != nil && *tt {
+			if src.Engine != "postgres" {
+				return fmt.Errorf("sync %q: target_triggers is only supported for postgres syncs (this one is %q)", s.Name, src.Engine)
+			}
+			members := c.clusterMemberIdentities()
+			for _, ref := range s.Targets {
+				if id := connIdentity(c.Targets[ref]); id != "" && members[id] {
+					return fmt.Errorf("sync %q: target_triggers cannot be enabled when target %q (%s) is also an active-active cluster member — that node serves live traffic and needs its triggers; leave it unset or set it to false", s.Name, ref, id)
 				}
 			}
 		}
@@ -525,6 +575,11 @@ func (c *Config) Validate() error {
 // port + database ⇒ the same physical DB, regardless of the endpoint name, user, or
 // TLS mode it was reached through. This is what lets us catch A->B + B->A even when
 // the two directions name the same DB differently.
+// ConnIdentity is an endpoint's database identity (engine, host, port, database), the
+// same across the sources, targets and nodes maps: two endpoints with the same identity
+// are the same database, whatever they are called.
+func ConnIdentity(ep *Endpoint) string { return connIdentity(ep) }
+
 func connIdentity(ep *Endpoint) string {
 	if ep == nil || ep.Conn == nil {
 		return ""
@@ -610,7 +665,7 @@ func (c *Config) detectSyncCycles() error {
 	}
 	for n := range adj {
 		if color[n] == white && dfs(n) {
-			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (https://replicare.rudimk.com/active-active.html)",
+			return fmt.Errorf("replication cycle detected among one-way syncs (%s): this loops changes and corrupts data — declare an active-active topology as a `clusters:` entry instead (https://replicare.rudimk.com/failover.html#several-active)",
 				strings.Join(cycle, " -> "))
 		}
 	}
@@ -636,11 +691,11 @@ func (c *Config) validateCluster(i int, cl *Cluster, seen map[string]bool) error
 	// Reject engines that can't do active-active here, at config time, instead of
 	// failing later at capture install with an opaque error. See .sisyphus/multi-master-design.md.
 	if why, bad := clusterEngineUnsupported[cl.Engine]; bad {
-		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres, mysql and redis do — use a one-way `syncs:` entry for this engine instead (see https://replicare.rudimk.com/active-active.html)",
+		return fmt.Errorf("cluster %q: engine %q does not support active-active replication: %s. Only postgres, mysql and redis do — use a one-way `syncs:` entry for this engine instead (see https://replicare.rudimk.com/failover.html#several-active)",
 			cl.Name, cl.Engine, why)
 	}
 	if cl.Topology != topologyMesh {
-		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see https://replicare.rudimk.com/active-active.html)",
+		return fmt.Errorf("cluster %q: topology %q is not supported in v1 (only %q — full mesh; ring/partial are deferred, see https://replicare.rudimk.com/failover.html#several-active)",
 			cl.Name, cl.Topology, topologyMesh)
 	}
 	if len(cl.Members) < 2 {

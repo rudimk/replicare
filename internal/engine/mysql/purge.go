@@ -102,7 +102,7 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 	if ret.MaxAgeSeconds > 0 {
 		ageCap := time.Duration(ret.MaxAgeSeconds) * time.Second
 		for _, x := range backlogs {
-			if x.bl.HasBacklog && x.bl.OldestAge > ageCap {
+			if x.bl.HasBacklog && x.bl.OldestAge > ageCap && ret.MaySacrifice(x.target) {
 				over[x.target] = true
 			}
 		}
@@ -113,7 +113,9 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 			return nil, err
 		}
 		if totalBytes > ret.MaxBytes {
-			// Sacrifice the laggard: the target with the oldest unconsumed delta.
+			// Sacrifice the laggard: the target with the oldest unconsumed delta. If the
+			// laggard is not one this caller may give up on, nothing is: giving up on a
+			// caught-up target would free nothing.
 			var laggard engine.TargetID
 			var oldest time.Duration
 			found := false
@@ -122,7 +124,7 @@ func (s *Source) overCapTargets(ctx context.Context, relID int, targets []engine
 					laggard, oldest, found = x.target, x.bl.OldestAge, true
 				}
 			}
-			if found {
+			if found && ret.MaySacrifice(laggard) {
 				over[laggard] = true
 			}
 		}

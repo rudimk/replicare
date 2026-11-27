@@ -50,3 +50,14 @@ func (t *Telemetry) SetIndexBuild(sync string, target engine.TargetID, table eng
 	}
 	ratio.WithLabelValues(sync, string(target)).Set(r)
 }
+
+// SetTargetTriggers publishes how many of the target's own triggers are kept from firing
+// on replicare's writes: by replica mode, and switched off.
+func (t *Telemetry) SetTargetTriggers(sync string, target engine.TargetID, replicaMode, switchedOff int) {
+	if t == nil || t.reg == nil {
+		return
+	}
+	g := t.reg.Gauge(observability.MetricTargetTriggers)
+	g.WithLabelValues(sync, string(target), "replica_mode").Set(float64(replicaMode))
+	g.WithLabelValues(sync, string(target), "switched_off").Set(float64(switchedOff))
+}

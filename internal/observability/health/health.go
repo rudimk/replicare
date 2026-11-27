@@ -40,6 +40,14 @@ func (b *Beat) Register(key string) {
 	b.last[key] = b.now()
 }
 
+// Unregister stops tracking a key: its streaming loop has stopped (it failed and will be
+// retried), so it must not read as a wedge while it waits to start again.
+func (b *Beat) Unregister(key string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.last, key)
+}
+
 // Mark records that a key's streaming loop just made progress: a pass finished, or
 // work inside one completed. A key that is not registered yet is ignored, so progress
 // reported before streaming begins (during bring-up) can never start the clock on a

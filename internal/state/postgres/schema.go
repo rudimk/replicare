@@ -165,5 +165,25 @@ var schemaSet = migrate.Set{
 				`ALTER TABLE replicare_state.copy_progress ADD COLUMN skipped boolean NOT NULL DEFAULT false`,
 			},
 		},
+		{
+			Version: 6,
+			Name:    "disabled_triggers",
+			// Target triggers replicare switched off so they would not fire on its writes,
+			// with the mode each is switched back on in (CLAUDE.md §4.2 "the target's own
+			// triggers"). A row is written BEFORE its trigger is switched off, so the mode
+			// is never lost to a crash between the two. Additive: a new table.
+			Statements: []string{
+				`CREATE TABLE replicare_state.disabled_triggers (
+					sync         text NOT NULL REFERENCES replicare_state.syncs(name) ON DELETE CASCADE,
+					target       text NOT NULL,
+					schema_name  text NOT NULL,
+					table_name   text NOT NULL,
+					trigger_name text NOT NULL,
+					restore_mode text NOT NULL,
+					updated_at   timestamptz NOT NULL DEFAULT now(),
+					PRIMARY KEY (sync, target, schema_name, table_name, trigger_name)
+				)`,
+			},
+		},
 	},
 }

@@ -114,6 +114,25 @@ With `--set`, that's `--set 'config.syncs[0].defer_indexes.enabled=false'`, with
 about array indexes as above. The full behaviour is described under
 [Target indexes during the first copy](https://replicare.rudimk.com/operations.html#target-indexes-during-the-first-copy).
 
+### The target's own triggers
+
+On a Postgres sync, `replicare` keeps the target's own triggers(version or audit rows, stamps,
+append-only guards) from firing on the changes it writes, since the source's triggers already did
+that work. It's on by default. To let them fire, as before, set `target_triggers` on that sync's
+entry:
+
+```yaml
+config:
+  syncs:
+    - name: pg-pipeline
+      target_triggers:
+        enabled: false
+```
+
+Triggers `replicare` switched off come back on when the sync is paused and the pod restarts. The
+full behaviour, including the permission it needs, is described under
+[The target's own triggers](https://replicare.rudimk.com/operations.html#the-targets-own-triggers).
+
 ### Keeping secrets out of the config
 
 Secrets stay out of `config` through `${VAR}` placeholders(`replicare` expands env vars in

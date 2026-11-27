@@ -138,7 +138,7 @@ password step and the data stream collide; for that, set up `~/.pgpass` / `PGPAS
 stick with the two-step form above.
 
 For active-active, run this against every node before starting, and apply any later schema change
-to every node first(see [active-active replication](active-active.md)).
+to every node first(see [active-active replication](failover.md#several-active)).
 
 For a big first copy on Postgres, it's worth dropping the target's plain indexes at this point and
 rebuilding them once the copy is done; see

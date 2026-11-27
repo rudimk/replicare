@@ -118,6 +118,28 @@ type IndexStore interface {
 	MarkIndexBuilt(ctx context.Context, sync string, target engine.TargetID, t engine.TableRef, name string) error
 }
 
+// SavedTrigger is one target trigger replicare switched off so it would not fire on its
+// writes, kept so it can be switched back on (CLAUDE.md §4.2 "the target's own
+// triggers"). Trigger.Mode is the mode to restore it to.
+type SavedTrigger struct {
+	Target    engine.TargetID
+	Trigger   engine.TargetTrigger
+	UpdatedAt time.Time // read-only
+}
+
+// TriggerStore is the optional StateStore capability for target triggers replicare
+// switched off. The Postgres backend implements it.
+type TriggerStore interface {
+	// SaveTriggers records triggers about to be switched off, with the mode each is to
+	// get back. A trigger already recorded keeps its first recorded mode: the one it had
+	// before replicare touched it.
+	SaveTriggers(ctx context.Context, sync string, target engine.TargetID, t []engine.TargetTrigger) error
+	// ListTriggers returns every saved trigger of a sync, all targets.
+	ListTriggers(ctx context.Context, sync string) ([]SavedTrigger, error)
+	// ForgetTrigger removes a trigger's record once it is back on (or gone).
+	ForgetTrigger(ctx context.Context, sync string, target engine.TargetID, table engine.TableRef, name string) error
+}
+
 // StateStore persists daemon state and provides single-active ownership. The
 // Postgres implementation lands in M2; this is the contract.
 type StateStore interface {

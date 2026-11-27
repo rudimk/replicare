@@ -35,7 +35,7 @@ clusters:       [ ... ]   # active-active (multi-master) groups (optional)
 
 `nodes` and `clusters` are optional and purely additive; a config with neither of them behaves
 exactly like a one-way daemon. See [Active-active clusters](#active-active-clusters-nodes-and-clusters)
-and [Active-active replication](active-active.md).
+and [Active-active replication](failover.md#several-active).
 
 ## `logging`
 
@@ -170,7 +170,11 @@ across engines.
 
 A sync with several `targets`(fan-out) copies and streams to each target independently.
 Initial-copy progress is checkpointed per `(sync, target, table)`, so one slow or restarted
-target never disturbs another's watermark, and each target converges on its own. This is also
+target never disturbs another's watermark, and each target converges on its own. A change queued
+on the source is only cleared once every target reading that table from the same database has it:
+every target of the sync, the targets of other syncs reading the same database, and paused syncs
+that have run before. So a target that's slow, down or paused misses nothing. The retention limit
+still bounds the queue, but a sync only ever gives up on its own target. This is also
 the per-node building block of an active-active [cluster](#active-active-clusters-nodes-and-clusters).
 
 ```yaml
@@ -181,6 +185,8 @@ syncs:
     enabled: true             # optional; false PAUSES just this sync (see below)
     sync_sequences: false     # optional; true keeps DR counters warm (see below)
     defer_indexes:            # optional; Postgres only, on unless set false (see below)
+      enabled: true
+    target_triggers:          # optional; Postgres only, on unless set false (see below)
       enabled: true
     skip_initial_copy:        # optional; Postgres and MySQL, off unless set true (see below)
       enabled: false
@@ -239,6 +245,43 @@ serves live traffic: unset, it's simply off there, and `enabled: true` is refuse
 Setting `enabled: true` on a MySQL or Redis sync is refused too. How it runs, how to watch it, and
 how to put the indexes back by hand are in
 [operations](operations.md#target-indexes-during-the-first-copy).
+
+With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
+sync setting.
+
+### The target's own triggers: `target_triggers`
+
+On a Postgres sync, `replicare` keeps the target's own triggers from firing on the changes it
+writes. On the source those triggers have already done their work(a version row written, a column
+stamped), and `replicare` copies the result; firing them again on the target would write
+duplicates, change values, or refuse `replicare`'s writes outright. It's on by default:
+
+```yaml
+syncs:
+  - name: app-to-warehouse
+    # ...
+    target_triggers:
+      enabled: true               # default; false lets the target's triggers fire, as before
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | on | `false` lets the target's triggers fire on `replicare`'s writes. On the next start, any trigger `replicare` had switched off is switched back on. |
+
+Where the target allows it, ordinary triggers are skipped by running `replicare`'s own connections
+in Postgres' replica mode, which changes nothing on the target. Triggers that would still fire are
+switched off while the sync runs, their modes saved first, and switched back on when the sync is
+paused or by `replicare triggers restore`. Replica mode needs a superuser, a managed service's
+admin role(`rds_superuser` on Amazon RDS) or, on Postgres 15 and newer, a
+`GRANT SET ON PARAMETER session_replication_role` to the role `replicare` connects as; switching a
+trigger off needs ownership of its table. A target without triggers on its replicated tables runs
+exactly as before.
+
+It's never used on a target that is also a member of an active-active cluster, since the
+application writes there too: unset, it's simply off there, and `enabled: true` is refused at
+config load. Setting `enabled: true` on a MySQL or Redis sync is refused too. How it decides, how
+to watch it, and what to check at a cutover are in
+[operations](operations.md#the-targets-own-triggers).
 
 With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
 sync setting.
@@ -392,7 +435,7 @@ exactly like a one-way daemon.
 An active-active cluster keeps N peer databases in step, with writes accepted on *any* node.
 Conflicting changes are settled automatically: the later change wins, using a timestamp
 `replicare` keeps for each row, with no column to add and nothing to declare. See
-[Active-active replication](active-active.md) for how this works. Like a sync, a cluster sticks
+[Active-active replication](failover.md#several-active) for how this works. Like a sync, a cluster sticks
 to a single engine.
 
 > ⚠️ A `replicare` `clusters:` entry(a group of active-active peer databases) and a Redis

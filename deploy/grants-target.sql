@@ -29,6 +29,16 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA :"app_schema"
 -- (pass -v owner_role=<the role that owns the tables> and uncomment):
 -- GRANT :"owner_role" TO :"role";
 
+-- --- The target's own triggers (on by default) ---
+-- replicare keeps the target's own triggers from firing on its writes. With the right
+-- to run its sessions in replica mode, ordinary triggers are skipped and nothing on the
+-- target changes; that right comes with superuser or rds_superuser, or on Postgres 15+
+-- with this grant (uncomment):
+-- GRANT SET ON PARAMETER session_replication_role TO :"role";
+-- Triggers that fire even in replica mode (ENABLE ALWAYS), or all of them without it,
+-- are switched off while the sync runs instead, which needs ownership of their tables
+-- (the owner_role grant below). A target without triggers needs neither.
+
 -- --- Optional: StateStore on this database ---
 -- replicare's own operational state (sync progress, cursors, ownership lock)
 -- lives in a dedicated `replicare_state` schema it creates and owns. If you point

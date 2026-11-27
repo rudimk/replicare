@@ -283,6 +283,26 @@ and builds it again.
 The exit codes are `0` when every index is built(or there was nothing to build), `1` when some
 couldn't be built or a daemon owns the sync, and `2` for a usage or config error.
 
+## `triggers restore <config> [--sync <name>] [--target <name>]`
+
+```sh
+replicare triggers restore config.yml                          # every sync in the config
+replicare triggers restore config.yml --sync app-to-warehouse --target warehouse
+```
+
+This switches back on, straight away, every target trigger `replicare` switched off so that it
+wouldn't fire on `replicare`'s writes, each in the mode it had before(see
+[the target's own triggers](operations.md#the-targets-own-triggers)). It prints a line per
+trigger. A trigger dropped since then is reported and forgotten.
+
+The daemon does the same by itself when it starts with the sync paused(`enabled: false`), so the
+command is for doing it at a moment of our choosing, or for a sync that won't run again. It
+refuses a sync that a running daemon owns, since that daemon needs the triggers off while it
+writes; pause the sync, or stop the daemon(on Kubernetes, scale it to 0 replicas), first.
+
+The exit codes are `0` when every trigger is back on(or there was nothing to do), `1` when some
+couldn't be switched back on or a daemon owns the sync, and `2` for a usage or config error.
+
 ## `reseed-sequences <config> --sync <name> [--target <name>] [--dry-run]`
 
 ```sh
@@ -318,7 +338,7 @@ mesh target.
 > member of an active-active cluster. There, the same `max(id)+1` collapses every node onto one
 > counter and silently drops rows through last-write-wins. In active-active, allocating ids is a
 > schema concern, and the answer is globally-unique keys(UUID v7 / ULID); see
-> [active-active, Rule 1](active-active.md#rule-1-use-globally-unique-ids).
+> [active-active, Rule 1](failover.md#rule-1-use-globally-unique-ids).
 
 ## Signals
 

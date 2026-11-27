@@ -102,6 +102,12 @@ config:
       # skip_initial_copy:
       #   enabled: true
       #   verify: true      # default; false skips the check
+      # The target's own triggers (Postgres, on by default) don't fire on replicare's
+      # writes: skipped via replica mode where allowed, else switched off while the sync
+      # runs and switched back on when it is paused. false lets them fire, as before. See
+      # https://replicare.rudimk.com/operations.html#the-targets-own-triggers
+      # target_triggers:
+      #   enabled: false
       include: ["*"]
       tuning:
         drain_interval: 1s

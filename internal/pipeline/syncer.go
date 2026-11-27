@@ -72,6 +72,11 @@ type Syncer struct {
 	// Sink implementing engine.IndexDeferrer and a store implementing state.IndexStore;
 	// otherwise a no-op.
 	DeferIndexes bool
+	// GuardTriggers keeps the target's own triggers from firing on replicare's writes
+	// (see triggers.go). Off: any an earlier run switched off are switched back on.
+	// Needs a Sink implementing engine.TriggerGuard and a store implementing
+	// state.TriggerStore; otherwise nothing is done.
+	GuardTriggers bool
 	// IndexBuild tunes each index build's session (memory, parallel workers).
 	IndexBuild engine.IndexBuildOptions
 	// OpenSink opens a new connection to this target. The index rebuilder runs on two of
@@ -82,6 +87,14 @@ type Syncer struct {
 	// (engine.TrackSweeper) runs on one of its own, opened for each round and closed after,
 	// so it never shares the streaming connection or delays a pass. Nil disables it.
 	OpenSource func(ctx context.Context) (engine.Source, error)
+
+	// PurgeTargets lists, per table, every target that reads that table's changes from
+	// this source: the other targets of a fan-out sync, other syncs from the same
+	// database, and paused syncs that have started. A queued change is deleted only
+	// once all of them have it; deleting it once this syncer's own target had it lost
+	// changes for a target that was slower or down at the time. Nil, or a table not
+	// listed, means this syncer's own target only (a source with a single consumer).
+	PurgeTargets map[engine.TableRef][]engine.TargetID
 
 	// SkipInitialCopy marks every table that has not started copying as copied without
 	// copying it (the sync's skip_initial_copy), for a target that already holds the
@@ -130,6 +143,9 @@ type Syncer struct {
 	// check is waiting.
 	caughtUp     chan struct{}
 	caughtUpOnce sync.Once
+
+	// progress accumulates streaming passes for the minute-by-minute progress line.
+	progress streamProgress
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
@@ -142,6 +158,11 @@ type Syncer struct {
 func (s *Syncer) Bringup(ctx context.Context) error {
 	if len(s.Workers) == 0 {
 		return fmt.Errorf("syncer %s: no copy workers", s.Name)
+	}
+	// Before anything is written to the target: keep its own triggers from firing on
+	// replicare's writes (replica mode, or switched off and saved).
+	if err := s.guardTargetTriggers(ctx); err != nil {
+		return fmt.Errorf("syncer %s: target triggers: %w", s.Name, err)
 	}
 	// Capture-first: install over every replicable table before copying, so the
 	// delta queue is already capturing when the copy window opens. A cluster edge
@@ -243,6 +264,7 @@ func (s *Syncer) publishCopyTargets(ctx context.Context) {
 // edge REQUIRES the source to implement OriginAwareCapturer — the config layer only
 // admits cluster engines that do, so a missing implementation is a build-time bug.
 func (s *Syncer) installCapture(ctx context.Context) error {
+	ctx = s.withCaptureProgress(ctx, len(s.Replicable))
 	if s.ClusterMode {
 		oc, ok := s.Source.(engine.OriginAwareCapturer)
 		if !ok {
@@ -487,6 +509,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 		defer close(done)
 		t := time.NewTicker(dbSizeInterval)
 		defer t.Stop()
+		lastLog := time.Now()
 		for {
 			select {
 			case <-quit:
@@ -497,6 +520,7 @@ func (s *Syncer) measureSizesWhileCopying(ctx context.Context) (stop func()) {
 				s.measureDBSizes(ctx)
 				s.lastDBSize = time.Now()
 				s.Tel.RefreshETAs() // a copy that has stopped moving shows it
+				s.logCopyProgress(ctx, &lastLog)
 			}
 		}
 	}()
