@@ -128,7 +128,7 @@ var Metrics = []Metric{
 	{MetricTrackLeftoversRemovedTotal, Counter, "Track rows left by versions before 0.7.0 that the background sweep removed", []string{LabelSync, LabelTarget, LabelTable}},
 	{MetricTablesToCheck, Gauge, "Tables waiting to be checked against the source and repaired if they differ (for example, copied while the target's own triggers fired), by state (pending, repairing, ok, drift)", []string{LabelSync, LabelTarget, "state"}},
 	{MetricCopySkippedTables, Gauge, "Tables marked copied without being copied (skip_initial_copy), by where their check against the source stands (pending, ok, drift, off)", []string{LabelSync, LabelTarget, "check"}},
-	{MetricSyncStartFailed, Gauge, "1 while a sync target is not running because its last attempt failed (starting up, or while streaming) and is waiting to be tried again; 0 once it streams", []string{LabelSync, LabelTarget}},
+	{MetricSyncStartFailed, Gauge, "1 while a sync target is not running because its last attempt failed (starting up, or while streaming) and is waiting to be tried again; 0 from the moment the next attempt starts", []string{LabelSync, LabelTarget}},
 	{MetricSyncStartFailuresTotal, Counter, "Failed attempts to run a sync target, starting up or while streaming (each is retried; the other syncs keep running)", []string{LabelSync, LabelTarget}},
 	{MetricSyncTables, Gauge, "Tables the sync target replicates (selected and with a usable key); 0 means nothing is replicated", []string{LabelSync, LabelTarget}},
 	{MetricReseedTotal, Counter, "Forced reseeds triggered by retention cap", []string{LabelSync, LabelTarget}},

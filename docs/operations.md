@@ -847,7 +847,7 @@ table exactly.
 | `replicare_tables_to_check` | gauge | `sync`, `target`, `state` | Tables waiting to be checked against the source and repaired if they differ(for example, copied while the target's own triggers fired), by where they stand: `pending`, `repairing`, `ok` or `drift`. See [the target's own triggers](#tables-copied-while-the-triggers-fired). |
 | `replicare_copy_skipped_tables` | gauge | `sync`, `target`, `check` | Tables marked copied without being copied(`skip_initial_copy`), by where their check against the source stands: `pending`, `ok`, `drift`, or `off` when the check is turned off. Unset when no table skipped its copy. |
 | `replicare_sync_tables` | gauge | `sync`, `target` | How many tables the sync replicates: those its selection matches that have a primary key or unique key. `0` means it replicates nothing, which is also logged at ERROR with the reason. |
-| `replicare_sync_start_failed` | gauge | `sync`, `target` | `1` while the sync isn't running because its last attempt failed, while starting up or while streaming, and is waiting to be tried again; `0` once it streams. |
+| `replicare_sync_start_failed` | gauge | `sync`, `target` | `1` while the sync isn't running because its last attempt failed, while starting up or while streaming, and is waiting to be tried again; `0` as soon as the next attempt starts, including while that attempt is still on its initial copy. |
 | `replicare_sync_start_failures_total` | counter | `sync`, `target` | Failed attempts to run the sync, each logged as `sync.start_failed` and retried. |
 | `replicare_reseed_total` | counter | `sync`, `target` | Forced reseeds triggered by the retention cap. |
 | `replicare_target_up` | gauge | `sync`, `target` | Target reachability(`1` = up, `0` = down). |
