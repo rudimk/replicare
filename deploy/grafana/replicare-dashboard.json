@@ -152,7 +152,7 @@
   "timezone": "",
   "title": "replicare \u2014 replication overview",
   "uid": "replicare-overview",
-  "version": 1,
+  "version": 2,
   "weekStart": "",
   "panels": [
     {
@@ -968,13 +968,343 @@
     },
     {
       "type": "row",
-      "title": "Source",
+      "title": "Syncs, triggers & checks",
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
         "y": 25
+      },
+      "id": 47,
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Syncs failing",
+      "description": "Syncs that failed to start, or stopped while streaming, and are waiting to be started again. The other syncs keep running meanwhile. The cause is in the sync.start_failed log events. 0 is healthy.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 26
+      },
+      "id": 48,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_sync_start_failed{sync=~\"$sync\", target=~\"$target\"}) or vector(0)",
+          "legendFormat": "__auto",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tables replicated",
+      "description": "How many tables each sync replicates: those its selection matches that have a primary key or unique key. 0 (red) means the sync replicates nothing; the sync.tables_selected log event says whether its selection matched no table or none of them had a key.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 7,
+        "x": 5,
+        "y": 26
+      },
+      "id": 49,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "max by (sync, target) (replicare_sync_tables{sync=~\"$sync\", target=~\"$target\"})",
+          "legendFormat": "{{sync}} \u2192 {{target}}",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Target triggers held back",
+      "description": "The target's own triggers kept from firing on replicare's writes. Skipped: ordinary triggers that skip replicare's connections because they run in replica mode; nothing on the target was changed. Switched off: triggers replicare switched off while the sync runs; they come back on when the sync is paused, or with `replicare triggers restore`, and must be back on before the application writes to the target.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 12,
+        "y": 26
+      },
+      "id": 50,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_target_triggers{sync=~\"$sync\", target=~\"$target\", how=\"replica_mode\"}) or vector(0)",
+          "legendFormat": "Skipped",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_target_triggers{sync=~\"$sync\", target=~\"$target\", how=\"switched_off\"}) or vector(0)",
+          "legendFormat": "Switched off",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Tables to check",
+      "description": "Tables waiting to be compared with the source once the sync has caught up, for example because they were copied while the target's own triggers fired. Repairing: rows that differed are being written again from the source, and the table is compared again a minute later. Couldn't repair (red): the difference stopped shrinking; the check.drift log event and the streaming logs say why.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 26
+      },
+      "id": 51,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Couldn't repair"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "green",
+                      "value": null
+                    },
+                    {
+                      "color": "red",
+                      "value": 1
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_tables_to_check{sync=~\"$sync\", target=~\"$target\", state=\"pending\"}) or vector(0)",
+          "legendFormat": "Waiting",
+          "range": true,
+          "instant": false,
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_tables_to_check{sync=~\"$sync\", target=~\"$target\", state=\"repairing\"}) or vector(0)",
+          "legendFormat": "Repairing",
+          "range": true,
+          "instant": false,
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(replicare_tables_to_check{sync=~\"$sync\", target=~\"$target\", state=\"drift\"}) or vector(0)",
+          "legendFormat": "Couldn't repair",
+          "range": true,
+          "instant": false,
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Source",
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 31
       },
       "id": 1,
       "panels": []
@@ -991,7 +1321,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 26
+        "y": 32
       },
       "id": 2,
       "fieldConfig": {
@@ -1079,7 +1409,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 26
+        "y": 32
       },
       "id": 3,
       "fieldConfig": {
@@ -1141,7 +1471,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 26
+        "y": 32
       },
       "id": 4,
       "fieldConfig": {
@@ -1203,7 +1533,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 30
+        "y": 36
       },
       "id": 5,
       "fieldConfig": {
@@ -1272,7 +1602,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 38
+        "y": 44
       },
       "id": 6,
       "panels": []
@@ -1289,7 +1619,7 @@
         "h": 4,
         "w": 8,
         "x": 0,
-        "y": 39
+        "y": 45
       },
       "id": 7,
       "fieldConfig": {
@@ -1377,7 +1707,7 @@
         "h": 4,
         "w": 8,
         "x": 8,
-        "y": 39
+        "y": 45
       },
       "id": 8,
       "fieldConfig": {
@@ -1439,7 +1769,7 @@
         "h": 4,
         "w": 8,
         "x": 16,
-        "y": 39
+        "y": 45
       },
       "id": 9,
       "fieldConfig": {
@@ -1501,7 +1831,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 43
+        "y": 49
       },
       "id": 10,
       "fieldConfig": {
@@ -1570,7 +1900,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 51
+        "y": 57
       },
       "id": 11,
       "panels": []
@@ -1587,7 +1917,7 @@
         "h": 4,
         "w": 6,
         "x": 0,
-        "y": 52
+        "y": 58
       },
       "id": 12,
       "fieldConfig": {
@@ -1657,7 +1987,7 @@
         "h": 4,
         "w": 6,
         "x": 6,
-        "y": 52
+        "y": 58
       },
       "id": 13,
       "fieldConfig": {
@@ -1738,7 +2068,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 52
+        "y": 58
       },
       "id": 14,
       "fieldConfig": {
@@ -1809,7 +2139,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 60
+        "y": 66
       },
       "id": 15,
       "fieldConfig": {
@@ -1873,7 +2203,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 60
+        "y": 66
       },
       "id": 16,
       "fieldConfig": {
@@ -1930,7 +2260,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 68
+        "y": 74
       },
       "id": 17,
       "panels": []
@@ -1947,7 +2277,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 69
+        "y": 75
       },
       "id": 18,
       "fieldConfig": {
@@ -2011,7 +2341,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 69
+        "y": 75
       },
       "id": 19,
       "fieldConfig": {
@@ -2071,7 +2401,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 77
+        "y": 83
       },
       "id": 20,
       "panels": []
@@ -2088,7 +2418,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 78
+        "y": 84
       },
       "id": 21,
       "fieldConfig": {
@@ -2152,7 +2482,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 78
+        "y": 84
       },
       "id": 22,
       "fieldConfig": {
@@ -2216,7 +2546,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 86
+        "y": 92
       },
       "id": 23,
       "fieldConfig": {
@@ -2276,7 +2606,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 94
+        "y": 100
       },
       "id": 27,
       "panels": []
@@ -2293,7 +2623,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 95
+        "y": 101
       },
       "id": 28,
       "fieldConfig": {
@@ -2354,7 +2684,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 95
+        "y": 101
       },
       "id": 29,
       "fieldConfig": {
@@ -2411,7 +2741,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 103
+        "y": 109
       },
       "id": 30,
       "panels": []
@@ -2428,7 +2758,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 104
+        "y": 110
       },
       "id": 31,
       "fieldConfig": {
@@ -2489,7 +2819,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 104
+        "y": 110
       },
       "id": 32,
       "fieldConfig": {
@@ -2550,7 +2880,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 104
+        "y": 110
       },
       "id": 33,
       "fieldConfig": {
@@ -2616,7 +2946,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 112
+        "y": 118
       },
       "id": 45,
       "fieldConfig": {
@@ -2677,7 +3007,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 112
+        "y": 118
       },
       "id": 46,
       "fieldConfig": {
