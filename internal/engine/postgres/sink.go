@@ -32,6 +32,10 @@ type Sink struct {
 	// meshReady records tables whose target-side version register has been ensured,
 	// so the per-pass apply ensures it at most once per table.
 	meshReady map[engine.TableRef]bool
+	// replicaMode runs this Sink's session in replica mode, so the target's own
+	// ordinary triggers do not fire on replicare's writes (engine.TriggerGuard).
+	// Applied again by Connect after a reconnect.
+	replicaMode bool
 }
 
 // Compile-time assertion that *Sink satisfies the interface.
@@ -75,6 +79,12 @@ func (s *Sink) Connect(ctx context.Context) error {
 	conn, err := connect(ctx, s.cfg)
 	if err != nil {
 		return err
+	}
+	if s.replicaMode {
+		if err := applyReplicaMode(ctx, conn, true); err != nil {
+			_ = conn.Close(ctx)
+			return err
+		}
 	}
 	s.conn = conn
 	return nil
@@ -174,7 +184,7 @@ func (s *Sink) directLoad(ctx context.Context, t engine.TableRef, cols []string,
 	if !s.origin {
 		tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
 		if err != nil {
-			return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+			return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, withPgDetail(err))
 		}
 		return tag.RowsAffected(), nil
 	}
@@ -192,7 +202,7 @@ func (s *Sink) directLoad(ctx context.Context, t engine.TableRef, cols []string,
 	}
 	tag, err := s.conn.PgConn().CopyFrom(ctx, r, sql)
 	if err != nil {
-		return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, err)
+		return 0, fmt.Errorf("postgres: bulk load into %s: %w", t, withPgDetail(err))
 	}
 	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
 		return 0, fmt.Errorf("postgres: bulk load: commit: %w", err)
@@ -256,7 +266,7 @@ func (s *Sink) mergeLoad(ctx context.Context, t engine.TableRef, cols []string, 
 		return 0, fmt.Errorf("postgres: merge load: copy to staging: %w", err)
 	}
 	if _, err := s.conn.Exec(ctx, mergeInsertSQL(t, stg, cols, pk, colSetOf(pk), identity)); err != nil {
-		return 0, fmt.Errorf("postgres: merge load: upsert %s: %w", t, err)
+		return 0, fmt.Errorf("postgres: merge load: upsert %s: %w", t, withPgDetail(err))
 	}
 	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {
 		return 0, fmt.Errorf("postgres: merge load: commit: %w", err)

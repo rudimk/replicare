@@ -33,6 +33,9 @@ const (
 	LabelEngine    = "engine"
 	LabelComponent = "component"
 	LabelIndex     = "index"
+	// LabelHow says how a target trigger is kept from firing on replicare's writes:
+	// "replica_mode" (it skips them, nothing changed) or "switched_off".
+	LabelHow = "how"
 )
 
 // Metric names. Prefix everything with "replicare_".
@@ -99,7 +102,10 @@ const (
 	// Deferred target indexes: plain indexes taken down for the initial copy and built
 	// again once the sync streams. Total saved and how many are back, per target, and the
 	// build in flight: which index, its phase, and how far through that phase it is.
-	MetricIndexesDeferred      = "replicare_deferred_indexes"
+	MetricIndexesDeferred = "replicare_deferred_indexes"
+	// MetricTargetTriggers counts the target's own triggers kept from firing on
+	// replicare's writes, by how (LabelHow).
+	MetricTargetTriggers       = "replicare_target_triggers"
 	MetricIndexesBuilt         = "replicare_deferred_indexes_built"
 	MetricIndexBuildInfo       = "replicare_index_build_info"
 	MetricIndexBuildPhaseRatio = "replicare_index_build_phase_progress_ratio"
@@ -137,6 +143,7 @@ var Metrics = []Metric{
 	{MetricInitialCopyProgress, Gauge, "Share of the initial copy done, 0..1: size-weighted, counting the link-filling pass; under 1 until every table is done", []string{LabelSync}},
 	{MetricLinkFillRowsTotal, Counter, "Rows whose links the link-filling pass has set, for tables in a loop of foreign keys", []string{LabelSync, LabelTable}},
 	{MetricLinkFillRowsTarget, Gauge, "Rows the link-filling pass will touch (the table's row estimate)", []string{LabelSync, LabelTable}},
+	{MetricTargetTriggers, Gauge, "The target's own triggers kept from firing on replicare's writes, by how: replica_mode (they skip replicare's connections) or switched_off", []string{LabelSync, LabelTarget, LabelHow}},
 	{MetricIndexesDeferred, Gauge, "Plain target indexes taken down for the initial copy, to be built again once the sync streams", []string{LabelSync, LabelTarget}},
 	{MetricIndexesBuilt, Gauge, "Of those, how many have been built again and are usable", []string{LabelSync, LabelTarget}},
 	{MetricIndexBuildInfo, Gauge, "1 for the index being built right now, labelled with its table, name and build phase", []string{LabelSync, LabelTarget, LabelTable, LabelIndex, LabelPhase}},
@@ -200,7 +207,14 @@ const (
 	// carries its full CREATE statement, so it can always be rebuilt by hand), a table
 	// whose indexes are left in place and why, the rebuild starting, each index back,
 	// a build that failed (retried), and every index back.
-	EventIndexDropped        = "index.dropped"
+	EventIndexDropped = "index.dropped"
+	// The target's own triggers: kept from firing on replicare's writes by replica mode,
+	// one switched off (the message carries the statement that switches it back on), one
+	// switched back on, one that no longer exists when it was to be switched back on.
+	EventTriggerReplicaMode  = "trigger.replica_mode"
+	EventTriggerDisabled     = "trigger.switched_off"
+	EventTriggerRestored     = "trigger.switched_on"
+	EventTriggerGone         = "trigger.gone"
 	EventIndexKept           = "index.kept"
 	EventIndexRebuildStarted = "index.rebuild_started"
 	EventIndexBuilt          = "index.built"

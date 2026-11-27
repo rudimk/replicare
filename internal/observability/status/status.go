@@ -35,6 +35,10 @@ type Report struct {
 	// Indexes is, per target, the plain indexes taken down for the initial copy and
 	// how many are built again (empty when none were taken down).
 	Indexes []IndexStatus `json:"deferred_indexes,omitempty"`
+	// Triggers is, per target, the target's own triggers replicare has switched off so
+	// they do not fire on its writes; they must be switched back on before the
+	// application writes to that target (pause the sync, or `replicare triggers restore`).
+	Triggers []TriggerStatus `json:"switched_off_triggers,omitempty"`
 }
 
 // IndexStatus counts one target's deferred indexes. Pending lists the ones not yet
@@ -44,6 +48,12 @@ type IndexStatus struct {
 	Total   int      `json:"total"`
 	Built   int      `json:"built"`
 	Pending []string `json:"pending,omitempty"`
+}
+
+// TriggerStatus counts one target's triggers switched off by replicare.
+type TriggerStatus struct {
+	Target   string   `json:"target"`
+	Triggers []string `json:"triggers"`
 }
 
 // TableStatus is one table's initial-copy state plus its per-target streaming
@@ -198,6 +208,23 @@ func (r *Reporter) Report(ctx context.Context, sync string) (Report, error) {
 			return Report{}, err
 		}
 		rep.Indexes = indexStatuses(saved)
+	}
+	if ts, ok := r.reader.(state.TriggerStore); ok {
+		saved, err := ts.ListTriggers(ctx, sync)
+		if err != nil {
+			return Report{}, err
+		}
+		at := map[string]int{}
+		for _, st := range saved {
+			tgt := string(st.Target)
+			i, ok := at[tgt]
+			if !ok {
+				i = len(rep.Triggers)
+				at[tgt] = i
+				rep.Triggers = append(rep.Triggers, TriggerStatus{Target: tgt})
+			}
+			rep.Triggers[i].Triggers = append(rep.Triggers[i].Triggers, st.Trigger.Table.String()+": "+st.Trigger.Name)
+		}
 	}
 	return rep, nil
 }

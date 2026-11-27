@@ -219,6 +219,14 @@ holds when `replicare` connects as the same user that created the target's table
 doesn't own keeps its indexes and is copied more slowly, with a warning; nothing fails. See
 [Target indexes during the first copy](operations.md#target-indexes-during-the-first-copy).
 
+Keeping the target's own triggers from firing on `replicare`'s writes works best with the right
+to run `replicare`'s sessions in replica mode: a superuser, `rds_superuser` on Amazon RDS and
+Aurora, or on Postgres 15 and newer a `GRANT SET ON PARAMETER session_replication_role` to the
+target role. With it, ordinary triggers are skipped and nothing on the target changes. Triggers
+that fire even in replica mode, or all of them without it, are switched off instead, which needs
+ownership of their tables. A target without triggers on its replicated tables needs neither. See
+[the target's own triggers](operations.md#the-targets-own-triggers).
+
 ## Configuration
 
 A Postgres sync is the engine-neutral envelope, with a typed `postgres:` block for each endpoint.

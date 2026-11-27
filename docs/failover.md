@@ -65,6 +65,13 @@ has to write in more than one place at the same time.
   until the column is added. In a passive layout, every migration goes to the passive copies before
   the active database; in several active, to every node first. The application code that uses the
   change follows.
+- **Mind each copy's own triggers.** While a database is a copy, `replicare` keeps its own
+  triggers(version or audit rows, stamps, append-only guards) from firing on the changes it
+  writes, since the source's triggers already did that work. Most are simply skipped; some are
+  switched off, and come back on when the copy's sync is paused, which the failover and
+  switchover steps below already do. `replicare status` warns while any are off. See
+  [the target's own triggers](operations.md#the-targets-own-triggers), including the permission
+  it needs and why the middle copy of a chain has its triggers switched off rather than skipped.
 - **Keep each database in one config.** `replicare` keeps a queued change until every target
   reading it in the same config has it. A database read by two separate configs isn't covered:
   one config's syncs could clear changes the other's still need.
@@ -117,7 +124,9 @@ The active database is down:
    databases would take writes, and those can't be reconciled.
 2. **Pause `active-to-passive`**(`enabled: false`, then restart the daemon) before the old active
    database can come back. A sync still switched on would reconnect, re-read the changes stuck in
-   its queue from the old database, and write them over newer data on the new one.
+   its queue from the old database, and write them over newer data on the new one. Pausing also
+   switches the passive database's own triggers back on, if `replicare` had switched any off;
+   check that `replicare status` no longer warns about them before step 5.
 3. **Note what was missed:** the backlog for `active-to-passive` just before the failure, from the
    metrics above.
 4. **Check the counters.** With `sync_sequences` on, they're already ahead; to be sure, run

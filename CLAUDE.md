@@ -595,6 +595,25 @@ address* them, never about altering values):**
 - **Collation note:** differing text collations affect only read-side chunk ordering, not
   correctness (we apply by exact key).
 
+**The target's own triggers never fire on replicare's writes (decision, 0.7.5, from a production
+migration; Postgres, on by default, `target_triggers`).** A target trigger (version/audit row on
+insert, `updated_at` stamp, append-only guard) re-does on the target what the source's trigger
+already did and replicare copies — duplicate version rows (23505 on the copy), changed values, or
+refused writes — so it breaks faithful transport. Before anything is written, each bring-up
+(`pipeline.guardTargetTriggers`, optional `engine.TriggerGuard`): ordinary (`O`) triggers are
+skipped by **replica mode on replicare's own target connections** (`session_replication_role =
+replica`, re-applied on reconnect) when the role may (superuser / rds_superuser / PG15+ `GRANT SET
+ON PARAMETER`) and the target holds none of replicare's own capture triggers on those tables (a
+chain middle, whose capture must see the writes) — nothing on the target changes; triggers that
+still fire (`A`, `R` in replica mode, all without it) are **switched off**, mode saved first
+(`replicare_state.disabled_triggers`, state store v6), 2s lock wait + retry like capture install,
+`trigger.switched_off` logs the restore statement. Back on (in the saved mode): daemon start with the
+sync **paused** (unless another running sync in the config writes to that DB), `replicare triggers
+restore`, or the setting turned off. Not owned → refuse the start, listing statements. Side effect
+of replica mode (as with PG's own replication): target FK checks and cascades don't run for
+replicare's writes. Never on a mesh member. MySQL: no equivalent; triggers fire (documented). Copy
+errors now carry the PG DETAIL and CONTEXT lines (`withPgDetail`).
+
 **Pre-flight compatibility check (decision: block on incompatible, warn on risky).** At sync start,
 introspect and classify every source↔target column pair: **identical** / **safe-widening** (ok),
 **risky/lossy** (e.g. `int8→int4`, `varchar(50)→varchar(30)`, `timestamp→timestamptz`) → **warn**,
@@ -948,6 +967,10 @@ without changing the single-static-binary distribution.
 
 **Target (Postgres):**
 - `SELECT, INSERT, UPDATE, DELETE` on the (pre-existing) target tables.
+- **Optional, for the target's own triggers (on by default, §4.2):** the right to set
+  `session_replication_role` (superuser, rds_superuser, or PG15+ `GRANT SET ON PARAMETER`) so ordinary
+  triggers are skipped without changing anything; else (and for `ENABLE ALWAYS` ones) table
+  ownership to switch them off. Not needed on a target without triggers on its replicated tables.
 - **Optional, for deferred target indexes (on by default, §4.1):** ownership of each target table
   (or membership of the owning role) — true when replicare connects as the user that created the
   target schema. Without it those tables simply keep their indexes during the copy (warned).
@@ -1020,6 +1043,7 @@ invasive.
 | Copy wire format | **Text/CSV `COPY` default** (cross-version safe), **binary opt-in** for close versions. Streamed source→target via `io.Pipe`. |
 | Copy load path | **Empty-target direct COPY**, resume via **DELETE-range + re-COPY**; auto/opt-in **TEMP staging + upsert** when target non-empty. Never touch target constraints / PK / unique indexes. |
 | Deferred target indexes | **Postgres, on by default** (`defer_indexes`, per sync): plain target indexes are saved to the state store (+ logged in full) and dropped just before each table's copy, then rebuilt `CONCURRENTLY` one at a time (link columns first, then `ANALYZE`) on dedicated connections once the whole sync streams. Owned tables only; never on a mesh member; restart-safe; reseeds too; `replicare indexes restore` as the way out. See §4.1. |
+| Target triggers | **The target's own triggers never fire on replicare's writes** (Postgres, on by default, `target_triggers`): ordinary ones skipped via **replica mode on replicare's connections** where permitted and the target isn't also a capture source; the rest **switched off** with modes saved (state store v6) and switched back on when the sync is paused or by `replicare triggers restore`; not owned → refuse the start. Never on a mesh member; MySQL unchanged. See §4.2. |
 | Skip initial copy | **`skip_initial_copy` (opt-in, PG + MySQL):** tables not yet started are marked copied (`Skipped`, state store v5) and the sync streams from the capture queue; **after catch-up each is verified row by row** against the source, drift → ERROR + stays marked until reseed; restart-safe. Only correct if capture went on while target == source (documented cutover order). The one-way cycle check **ignores paused syncs**, so a sync and its reverse can share a config with one paused. See §4. |
 | Component copy order | **Parents-before-children, direct** within a component; chunks parallel per table; components parallel. |
 | Cyclic-FK initial copy | By case: **nullable → NULL-then-fill two-pass** (except a link column in a unique index where empty values collide — `NULLS NOT DISTINCT`, expression or filtered unique, detected from source+target indexes: a **self-reference** keeps it real and loads the table in **one statement**, existing rows first, and streaming keeps it real too; a **cross-table loop** is **blocked at pre-flight** → make it `DEFERRABLE`; never a schema change); **DEFERRABLE → `SET CONSTRAINTS DEFERRED` in one txn** (Postgres); **`NOT NULL` + non-deferrable → Postgres: pre-flight fails loud; MySQL: scoped `FOREIGN_KEY_CHECKS=0` + PRE-COMMIT orphan-verification → loud halt + rollback** (MySQL has no DEFERRABLE; §4.1 "MySQL exception"). Streaming: Postgres + acyclic MySQL use §3.3 retry; **cyclic `NOT NULL` MySQL streaming apply reuses the `FOREIGN_KEY_CHECKS=0` + whole-component pre-commit verify** (cyclic flag threaded into `BeginApply`; MM5b). See §4.1. |

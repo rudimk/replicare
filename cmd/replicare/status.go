@@ -230,6 +230,11 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 		for _, ix := range rep.Indexes {
 			fmt.Fprintf(w, "  %s\n", indexLine(ix))
 		}
+		for _, tr := range rep.Triggers {
+			fmt.Fprintf(w, "  WARNING: %d of the target's own triggers are switched off on %s while replicare writes to it; "+
+				"switch them back on before the application writes there (pause the sync, or run `replicare triggers restore`)\n",
+				len(tr.Triggers), tr.Target)
+		}
 		if n := skippedCount(rep.Tables); n == 1 {
 			fmt.Fprintln(w, "  WARNING: 1 table skipped its copy and is not yet confirmed to match the source (COPY = skipped; see the copy.skip_check_* events)")
 		} else if n > 1 {

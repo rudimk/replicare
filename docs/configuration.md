@@ -186,6 +186,8 @@ syncs:
     sync_sequences: false     # optional; true keeps DR counters warm (see below)
     defer_indexes:            # optional; Postgres only, on unless set false (see below)
       enabled: true
+    target_triggers:          # optional; Postgres only, on unless set false (see below)
+      enabled: true
     skip_initial_copy:        # optional; Postgres and MySQL, off unless set true (see below)
       enabled: false
     include: ["public.*"]     # selection globs (schema.table)
@@ -243,6 +245,43 @@ serves live traffic: unset, it's simply off there, and `enabled: true` is refuse
 Setting `enabled: true` on a MySQL or Redis sync is refused too. How it runs, how to watch it, and
 how to put the indexes back by hand are in
 [operations](operations.md#target-indexes-during-the-first-copy).
+
+With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
+sync setting.
+
+### The target's own triggers: `target_triggers`
+
+On a Postgres sync, `replicare` keeps the target's own triggers from firing on the changes it
+writes. On the source those triggers have already done their work(a version row written, a column
+stamped), and `replicare` copies the result; firing them again on the target would write
+duplicates, change values, or refuse `replicare`'s writes outright. It's on by default:
+
+```yaml
+syncs:
+  - name: app-to-warehouse
+    # ...
+    target_triggers:
+      enabled: true               # default; false lets the target's triggers fire, as before
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | on | `false` lets the target's triggers fire on `replicare`'s writes. On the next start, any trigger `replicare` had switched off is switched back on. |
+
+Where the target allows it, ordinary triggers are skipped by running `replicare`'s own connections
+in Postgres' replica mode, which changes nothing on the target. Triggers that would still fire are
+switched off while the sync runs, their modes saved first, and switched back on when the sync is
+paused or by `replicare triggers restore`. Replica mode needs a superuser, a managed service's
+admin role(`rds_superuser` on Amazon RDS) or, on Postgres 15 and newer, a
+`GRANT SET ON PARAMETER session_replication_role` to the role `replicare` connects as; switching a
+trigger off needs ownership of its table. A target without triggers on its replicated tables runs
+exactly as before.
+
+It's never used on a target that is also a member of an active-active cluster, since the
+application writes there too: unset, it's simply off there, and `enabled: true` is refused at
+config load. Setting `enabled: true` on a MySQL or Redis sync is refused too. How it decides, how
+to watch it, and what to check at a cutover are in
+[operations](operations.md#the-targets-own-triggers).
 
 With Helm, it's set in the sync's entry under `config.syncs` in the chart's values, like any other
 sync setting.

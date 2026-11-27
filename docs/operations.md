@@ -445,6 +445,127 @@ while a daemon owns the sync, since the daemon builds them itself. Without the s
 `index.dropped` log lines carry each index's `CREATE INDEX` statement; running each with
 `CREATE INDEX CONCURRENTLY` in place of `CREATE INDEX` rebuilds it without blocking writes.
 
+## The target's own triggers
+
+A target database often has triggers of its own: one that writes a version or audit row whenever
+a row changes, one that stamps an `updated_at` column, one that refuses any change to an
+append-only table. On the source they have already done their work, and `replicare` copies the
+result, the version rows included. If they fired again on the target for each row `replicare`
+writes, the target would stop matching the source:
+
+- a version trigger writes a second copy of each version row, with an id from the target's own
+  sequence, which clashes with the version rows `replicare` copies(`duplicate key value violates
+  unique constraint`);
+- a stamping trigger changes values on their way in;
+- an append-only guard refuses the updates and deletes `replicare` needs, to resume a half-done
+  chunk or to apply a change a second time.
+
+So on a Postgres sync, `replicare` keeps the target's own triggers from firing on its writes. It's
+on by default, and needs nothing from us in the usual case. `target_triggers: { enabled: false }`
+on the sync turns it off(see
+[the configuration reference](configuration.md#the-targets-own-triggers-target_triggers)). It only
+changes anything on a target whose replicated tables have triggers; on one without, the sync runs
+exactly as before. It's never used on a target that is also an active-active cluster member,
+since the application writes there too.
+
+### How it keeps them from firing
+
+Before anything is written to the target, each time the sync starts, `replicare` lists the
+triggers on the target's replicated tables. Postgres gives each trigger a mode that says when it
+fires: in ordinary sessions(the default), always, only in replica-mode sessions, or never. Two
+ways are used, together:
+
+1. **Replica mode, for ordinary triggers.** `replicare` runs its own connections to the target in
+   Postgres' replica mode(`session_replication_role = replica`), the mode Postgres' own
+   built-in replication uses. Ordinary triggers don't fire for those connections, but stay on for
+   everyone else, and nothing on the target is changed, so there's nothing to undo later. The log
+   says so with `trigger.replica_mode`.
+2. **Switching off, for the rest.** Triggers that would still fire are switched off for as long
+   as the sync runs:
+   - triggers set to fire always(`ENABLE ALWAYS`, such as an append-only guard);
+   - triggers set to fire only in replica mode, when replica mode is used;
+   - every ordinary trigger, when replica mode can't be used.
+
+   Each trigger's mode is saved in the state store before it's switched off, so a crash in
+   between loses nothing. Each switch waits at most 2 seconds for its lock, backs off and retries,
+   so it never holds the application up. Each is logged as `trigger.switched_off`, with the
+   statement that switches it back on in the message, so it can always be done by hand.
+
+Replica mode isn't used, and ordinary triggers are switched off instead, when:
+
+- the role `replicare` connects as isn't allowed to use it. That takes a superuser, a managed
+  service's admin role(on Amazon RDS and Aurora, `rds_superuser`), or, on Postgres 15 and newer,
+  a `GRANT SET ON PARAMETER session_replication_role` to that role;
+- the target also holds `replicare`'s own change capture on those tables, because another sync
+  reads from it(the middle database of a chain, for example). That capture must see
+  `replicare`'s writes, so the next database gets them, and replica mode would hide them from it.
+
+Switching a trigger off needs ownership of its table, or membership of the role that owns it.
+That holds when `replicare` connects as the same user that created the target's tables. When it
+doesn't own a table with a trigger that would fire, the sync doesn't start: it logs
+`sync.start_failed` naming each such trigger, with the statements that switch them off, and tries
+again with a growing wait. Nothing is switched off until every one can be.
+
+In replica mode, two more things don't happen for `replicare`'s connections, as with Postgres'
+own replication:
+
+- **The target's foreign keys aren't checked on `replicare`'s writes.** The source already
+  enforces them, and `replicare` applies parents before children within each pass.
+- **Cascades on the target don't run for `replicare`'s deletes.** The rows a cascade removes or
+  changes on the source are captured there as changes of their own, and arrive on the target that
+  way. Only a child table that isn't replicated misses out.
+
+Triggers added to the target while the sync runs are picked up the next time it starts.
+
+### Switching them back on
+
+Before the application writes to the target, every trigger `replicare` switched off must be back
+on, or the target won't do what the application expects of it(record versions, refuse edits).
+There are three ways:
+
+- **Pause the sync**(`enabled: false`) and roll the change out. When the daemon starts, it
+  switches back on every trigger a paused sync had switched off, each in the mode it had before,
+  and logs `trigger.switched_on` for each. Pausing the sync is already a step of a cutover, so this
+  is usually all it takes. If another running sync in the same config writes to that database, the
+  triggers stay off, since that sync still needs them off; the log says so.
+- **`replicare triggers restore <config>`** does the same straight away, for a sync that no
+  daemon is running(paused, or with the daemon stopped). It refuses while a daemon runs the sync,
+  which would only switch them off again. See
+  [the CLI reference](cli.md#triggers-restore-config---sync-name---target-name).
+- **Turn `target_triggers` off** for the sync: on its next start, it switches back on what it
+  switched off before, and from then on lets the triggers fire.
+
+A trigger dropped since it was switched off is logged as `trigger.gone` and forgotten.
+
+Triggers left in replica mode's care need nothing: they were never changed, and fire for the
+application as soon as it writes.
+
+### Watching it
+
+- **`replicare status`** shows a warning for each target with triggers switched off, until they're
+  back on.
+- **Metrics:** `replicare_target_triggers{how="switched_off"}` counts the triggers switched off on
+  each target, and `{how="replica_mode"}` the ones skipped by replica mode.
+- **Logs:** `trigger.replica_mode`, `trigger.switched_off`, `trigger.switched_on` and
+  `trigger.gone`.
+- **The target itself:** this read-only query lists every trigger on the target's tables in the
+  `public` schema, with its mode. `O` is ordinary, `A` always, `R` replica only, and `D` switched
+  off:
+
+  ```sql
+  SELECT c.relname AS table_name, t.tgname AS trigger_name, t.tgenabled AS mode
+  FROM pg_trigger t
+  JOIN pg_class c ON c.oid = t.tgrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE NOT t.tgisinternal AND n.nspname = 'public'
+  ORDER BY 1, 2;
+  ```
+
+The same applies on MySQL in principle, but MySQL has neither replica mode nor a way to switch a
+trigger off short of dropping it, so `replicare` leaves a MySQL target's triggers alone: they fire
+on its writes. A MySQL target should have its triggers dropped for the time it's a replica, and
+created again before the application writes to it.
+
 ## Tuning knobs, per sync under `tuning:`
 
 Each sync has its own `tuning:` block, with these knobs:
@@ -684,6 +805,7 @@ table exactly.
 | `replicare_initial_copy_rows_target` | gauge | `sync`, `table` | Estimated total rows to copy(the progress denominator), from the source's own statistics(Postgres `pg_class.reltuples`, MySQL `TABLE_ROWS`; no scan). Set at bring-up for tables this run still has to copy, and left unset for a table that's never been analysed. |
 | `replicare_initial_copy_progress_ratio` | gauge | `sync` | How much of the initial copy is done, from 0 to 1, by the same measure as the ETA: weighted by table size, and counting the link-filling pass of tables linked in a loop. It stays under 1 until every table has switched to streaming, so it never reads complete early. |
 | `replicare_link_fill_rows_total` / `replicare_link_fill_rows_target` | counter / gauge | `sync`, `table` | For a table linked in a loop: the rows whose links the link-filling pass has set, and the rows it will touch(the table's row estimate). |
+| `replicare_target_triggers` | gauge | `sync`, `target`, `how` | Postgres. The target's own triggers kept from firing on `replicare`'s writes: `how="replica_mode"` for those skipped by running `replicare`'s connections in replica mode, `how="switched_off"` for those switched off while the sync runs. See [the target's own triggers](#the-targets-own-triggers). |
 | `replicare_deferred_indexes` / `replicare_deferred_indexes_built` | gauge | `sync`, `target` | Postgres. Plain target indexes taken down for the initial copy, and how many of them are built again. Unset when none were taken down. |
 | `replicare_index_build_info` | gauge | `sync`, `target`, `table`, `index`, `phase` | `1` for the index being built right now, with its table, name and build stage(`phase`, as Postgres reports it). No series when nothing is building. |
 | `replicare_index_build_phase_progress_ratio` | gauge | `sync`, `target` | How far the build in flight is through its current stage, from 0 to 1. Stages that report no progress(sorting, waiting) read `0`. |
@@ -770,6 +892,10 @@ field to grep / alert on:
 | `copy.skip_check_failed` | WARN | the check couldn't run for a table(for example, a database was unreachable); it's tried again 5 minutes later |
 | `table.cutover_to_streaming` | INFO | a group of tables finished its initial copy and switched to streaming |
 | `stream.pass_error` | WARN | a streaming pass failed and will be retried |
+| `trigger.replica_mode` | INFO | the target's ordinary triggers skip `replicare`'s writes because its connections run in replica mode; or why replica mode isn't used |
+| `trigger.switched_off` | INFO | one of the target's own triggers was switched off so it won't fire on `replicare`'s writes; the message carries the statement that switches it back on |
+| `trigger.switched_on` | INFO | one of them was switched back on in its earlier mode(the sync is paused, `triggers restore`, or the setting was turned off) |
+| `trigger.gone` | WARN | a trigger switched off earlier no longer exists, so there was nothing to switch back on |
 | `index.dropped` | INFO | a plain target index was taken down for the initial copy; the message carries its full `CREATE INDEX` statement |
 | `index.kept` | WARN | a table keeps its indexes during the copy, and why(for example, the target role doesn't own it) |
 | `index.rebuild_started` / `index.rebuild_done` | INFO | the indexes taken down are being built again / are all back |
@@ -1031,7 +1157,9 @@ moved to; `forward` is the sync from old to new, and `back` the one from new to 
    `replicare verify <config> --sync forward`.
 2. Pause `forward`(`enabled: false`) and restart the daemon. This comes before the next step:
    running both directions at once would send every change round in a loop, which is why the
-   config refuses it.
+   config refuses it. Pausing `forward` also switches *new*'s own triggers back on, if
+   `replicare` had switched any off(see [the target's own triggers](#the-targets-own-triggers)):
+   check that `replicare status` no longer warns about them before the applications move.
 3. Install capture on *new* for `back`, before any application writes to it:
 
    ```sh
@@ -1060,7 +1188,7 @@ reports it as drift; that's why the order matters.
 ### Falling back
 
 The same steps the other way round: stop writes to *new*, wait for the `back` backlog to reach 0,
-pause `back`, and move the applications to *old*. If `forward` will run again, it needs its
+pause `back`(which switches *old*'s own triggers back on), and move the applications to *old*. If `forward` will run again, it needs its
 capture back on *old* first(step 3 the other way round), and the same order applies.
 
 ## Sequences & identity counters: DR / promotion

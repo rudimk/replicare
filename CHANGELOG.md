@@ -17,6 +17,33 @@ All notable changes to replicare are documented here. The format follows
   limit still bounds the queue, but a sync now only gives up on its own target, never another
   sync's, which may be mid-copy or paused. Only targets in the same config are counted: a database
   read by two separate `replicare` configs isn't covered.
+- **Fixed: the target's own triggers fired on `replicare`'s writes.** A trigger on a target
+  table(one that writes a version or audit row, stamps a column, or refuses changes to an
+  append-only table) fired on every row `replicare` copied or applied, although the source's own
+  trigger had already done that work and `replicare` copies its result. Version rows clashed with
+  the copied ones(`duplicate key value violates unique constraint`), stamped values changed, and
+  append-only guards refused `replicare`'s writes. Now, on a Postgres sync, `replicare` keeps them
+  from firing on its writes, before anything is written:
+  - ordinary triggers are skipped by running `replicare`'s own connections in Postgres' replica
+    mode, where the target allows it(superuser, `rds_superuser`, or on Postgres 15+ a
+    `GRANT SET ON PARAMETER session_replication_role`). Nothing on the target changes, and the
+    triggers fire as usual for everyone else;
+  - triggers that fire even then(`ENABLE ALWAYS`), or all of them without replica mode, are
+    switched off while the sync runs, their modes saved in the state store first(state store
+    version 6). They're switched back on, each in its earlier mode, when the daemon starts with the
+    sync paused, or with the new `replicare triggers restore <config>`. `replicare status` warns
+    while any are off;
+  - a trigger the role doesn't own, so can't switch off, stops the sync from starting, with the
+    statements to run.
+
+  It's on by default and changes nothing on a target without triggers.
+  `target_triggers: { enabled: false }` lets them fire, as before. Never used on an active-active
+  member. New metric `replicare_target_triggers`, and events `trigger.replica_mode`,
+  `trigger.switched_off`, `trigger.switched_on` and `trigger.gone`. MySQL targets are unchanged:
+  MySQL has no way to do this short of dropping the trigger. See
+  [the target's own triggers](https://replicare.rudimk.com/operations.html#the-targets-own-triggers).
+- **Copy errors from Postgres now carry the whole error**, including the line saying where it
+  happened(for example, which trigger function wrote the row), not just the first line.
 - **One sync failing no longer stops the others.** A sync(or one target of it, or one direction
   of an active-active cluster) that couldn't start, or stopped while streaming, used to stop every
   sync and exit the daemon, so under Kubernetes one broken sync kept restarting all the others and

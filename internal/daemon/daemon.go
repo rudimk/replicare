@@ -98,6 +98,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 		}()
 	}
 
+	// Paused syncs: switch back on any target triggers they had switched off (a pause is
+	// the cutover step). In the background, so a slow target never holds up the rest.
+	go d.restorePausedTriggers(ctx)
+
 	g, gctx := errgroup.WithContext(ctx)
 	owned := 0
 	for _, sync := range d.cfg.Syncs {

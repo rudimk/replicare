@@ -72,6 +72,11 @@ type Syncer struct {
 	// Sink implementing engine.IndexDeferrer and a store implementing state.IndexStore;
 	// otherwise a no-op.
 	DeferIndexes bool
+	// GuardTriggers keeps the target's own triggers from firing on replicare's writes
+	// (see triggers.go). Off: any an earlier run switched off are switched back on.
+	// Needs a Sink implementing engine.TriggerGuard and a store implementing
+	// state.TriggerStore; otherwise nothing is done.
+	GuardTriggers bool
 	// IndexBuild tunes each index build's session (memory, parallel workers).
 	IndexBuild engine.IndexBuildOptions
 	// OpenSink opens a new connection to this target. The index rebuilder runs on two of
@@ -153,6 +158,11 @@ type Syncer struct {
 func (s *Syncer) Bringup(ctx context.Context) error {
 	if len(s.Workers) == 0 {
 		return fmt.Errorf("syncer %s: no copy workers", s.Name)
+	}
+	// Before anything is written to the target: keep its own triggers from firing on
+	// replicare's writes (replica mode, or switched off and saved).
+	if err := s.guardTargetTriggers(ctx); err != nil {
+		return fmt.Errorf("syncer %s: target triggers: %w", s.Name, err)
 	}
 	// Capture-first: install over every replicable table before copying, so the
 	// delta queue is already capturing when the copy window opens. A cluster edge

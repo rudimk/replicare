@@ -41,6 +41,13 @@ func TestWithPgDetail(t *testing.T) {
 	if withPgDetail(nil) != nil {
 		t.Error("nil should stay nil")
 	}
+	// CONTEXT says where it happened, e.g. the trigger function that wrote the row.
+	tr := &pgconn.PgError{Code: "23505", Message: "dup", Detail: "Key (id)=(1) already exists.",
+		Where: "SQL statement \"INSERT INTO v VALUES (1)\"\nPL/pgSQL function append_version() line 3 at SQL statement"}
+	if got := withPgDetail(tr).Error(); !strings.Contains(got, "context: SQL statement") || !strings.Contains(got, "PL/pgSQL function append_version()") ||
+		strings.Contains(got, "\n") {
+		t.Errorf("context missing or not on one line: %q", got)
+	}
 	fk := &pgconn.PgError{Code: "23503", Message: "fk", Detail: "Key (a_id)=(9) is not present in table \"a\"."}
 	if c := classifyFKViolation(fk); !engine.IsTransientConstraint(c) || !strings.Contains(c.Error(), "is not present") {
 		t.Errorf("FK violation should stay transient and carry its detail: %v", c)
