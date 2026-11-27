@@ -614,7 +614,7 @@ of replica mode (as with PG's own replication): target FK checks and cascades do
 replicare's writes. Never on a mesh member. MySQL: no equivalent; triggers fire (documented). Copy
 errors now carry the PG DETAIL and CONTEXT lines (`withPgDetail`).
 
-**Checks repair what they find (decision, 0.7.6, from a production migration).** The after-catch-up
+**Checks repair what they find (decision, 0.8.0, from a production migration).** The after-catch-up
 check (`Syncer.startSkipCheck`/`runSkipCheck`, chunked verify via `daemon.skipCheck` with
 `VerifyOptions.CollectKeys`) no longer only reports drift: every still-differing key is queued on the
 source as a change (optional `engine.KeyRequeuer`, PG + MySQL: insert into the table's delta table
