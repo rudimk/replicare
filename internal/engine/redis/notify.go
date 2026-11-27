@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	goredis "github.com/redis/go-redis/v9"
 
@@ -28,6 +29,9 @@ import (
 type psuber interface {
 	PSubscribe(ctx context.Context, channels ...string) *goredis.PubSub
 }
+
+// subscribeConfirmTimeout bounds the wait for the server to confirm a subscription.
+const subscribeConfirmTimeout = 5 * time.Second
 
 // notifier holds the per-unit priority dirty-set fed by keyspace-notification
 // subscribers (one goroutine per master). All fields are mutex-guarded; the
@@ -159,6 +163,17 @@ func (s *Source) InstallCapture(ctx context.Context, _ []engine.TableRef) error 
 	n.cancel = cancel
 	for _, sub := range subs {
 		ps := sub.PSubscribe(nctx, pattern)
+		// PSubscribe does not wait for the server: until its confirmation arrives the
+		// subscription may not be active, and an event fired meanwhile is lost (Pub/Sub
+		// keeps nothing). Wait for it, briefly, so the accelerator covers every change
+		// from here on. A subscription that cannot be confirmed is still consumed: its
+		// channel closing marks a gap, which forces a full reconciliation as before.
+		wctx, wcancel := context.WithTimeout(ctx, subscribeConfirmTimeout)
+		if _, err := ps.Receive(wctx); err != nil {
+			slog.Warn("redis: keyspace-notification subscription not confirmed; changes are still found by the reconciliation scan",
+				slog.String("event", "redis.notify_subscribe"), slog.Any("error", err))
+		}
+		wcancel()
 		n.subs = append(n.subs, ps)
 		n.wg.Add(1)
 		go n.consume(nctx, ps)

@@ -140,6 +140,34 @@ type TriggerStore interface {
 	ForgetTrigger(ctx context.Context, sync string, target engine.TargetID, table engine.TableRef, name string) error
 }
 
+// PendingCheck is a table waiting to be compared with the source once its sync has
+// caught up, and repaired if it differs (for example because it was copied while the
+// target's own triggers fired on replicare's writes).
+type PendingCheck struct {
+	Target    engine.TargetID
+	Table     engine.TableRef
+	Reason    string
+	CreatedAt time.Time // read-only
+}
+
+// CheckStore is the optional StateStore capability behind automatic checks. The Postgres
+// backend implements it.
+type CheckStore interface {
+	// TriggerGuardStarted reports whether replicare has kept this target's own triggers
+	// from firing on its writes since an earlier start (so tables copied since then were
+	// copied with them held back).
+	TriggerGuardStarted(ctx context.Context, sync string, target engine.TargetID) (bool, error)
+	// SetTriggerGuardStarted records (on) or forgets (off) that it has.
+	SetTriggerGuardStarted(ctx context.Context, sync string, target engine.TargetID, on bool) error
+	// MarkForCheck records tables to check against the source; a table already waiting
+	// keeps its first reason.
+	MarkForCheck(ctx context.Context, sync string, target engine.TargetID, tables []engine.TableRef, reason string) error
+	// ListChecks returns every table of a sync waiting to be checked, all targets.
+	ListChecks(ctx context.Context, sync string) ([]PendingCheck, error)
+	// ClearCheck removes a table's pending check once it matches the source.
+	ClearCheck(ctx context.Context, sync string, target engine.TargetID, table engine.TableRef) error
+}
+
 // StateStore persists daemon state and provides single-active ownership. The
 // Postgres implementation lands in M2; this is the contract.
 type StateStore interface {

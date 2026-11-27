@@ -63,3 +63,13 @@ type TriggerGuard interface {
 	// for the logs, so it can always be done by hand.
 	RestoreStatement(t TargetTrigger) string
 }
+
+// KeyRequeuer is an optional Source capability: queue the given keys of a table as
+// changed, exactly as the capture trigger would, so the next streaming passes re-read
+// each from the source and write it to every target (present → upsert, absent →
+// delete). It is how a difference found by a check is repaired without a re-copy: the
+// rows that differ are simply sent again through the normal change path. Postgres and
+// MySQL implement it.
+type KeyRequeuer interface {
+	RequeueKeys(ctx context.Context, t TableRef, keys []KeyValues) error
+}

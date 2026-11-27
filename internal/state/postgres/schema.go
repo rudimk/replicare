@@ -185,5 +185,31 @@ var schemaSet = migrate.Set{
 				)`,
 			},
 		},
+		{
+			Version: 7,
+			Name:    "pending_checks",
+			// Automatic checks against the source. trigger_guard records, per (sync,
+			// target), since when replicare has kept the target's own triggers from firing
+			// on its writes: the first start that does so marks every table already copied
+			// (with them firing) in pending_checks, and the check compares each with the
+			// source once caught up, repairing what differs. Additive: two new tables.
+			Statements: []string{
+				`CREATE TABLE replicare_state.trigger_guard (
+					sync    text NOT NULL REFERENCES replicare_state.syncs(name) ON DELETE CASCADE,
+					target  text NOT NULL,
+					since   timestamptz NOT NULL DEFAULT now(),
+					PRIMARY KEY (sync, target)
+				)`,
+				`CREATE TABLE replicare_state.pending_checks (
+					sync        text NOT NULL REFERENCES replicare_state.syncs(name) ON DELETE CASCADE,
+					target      text NOT NULL,
+					schema_name text NOT NULL,
+					table_name  text NOT NULL,
+					reason      text NOT NULL,
+					created_at  timestamptz NOT NULL DEFAULT now(),
+					PRIMARY KEY (sync, target, schema_name, table_name)
+				)`,
+			},
+		},
 	},
 }

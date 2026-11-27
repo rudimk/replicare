@@ -293,6 +293,9 @@ func (e *Enricher) recheck(ctx context.Context, src, tgt engine.ChunkVerifier, r
 			if len(st.row.Keys) < opts.MaxKeys {
 				st.row.Keys = append(st.row.Keys, VerifyKey{Key: n, Problem: problem})
 			}
+			if opts.CollectKeys {
+				st.row.Differing = append(st.row.Differing, st.suspects[n])
+			}
 		}
 	}
 	return nil

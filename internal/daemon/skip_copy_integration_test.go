@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,18 +17,19 @@ import (
 // hand while the two sides match, the source keeps changing, then a sync with
 // skip_initial_copy starts. It copies nothing (a target-side trigger counts every row
 // written), streams both the changes queued before it started and those made after, and
-// once caught up checks each table: the ones that match are cleared, the one missing a
-// row on the target is reported as drift and stays marked. A restart copies nothing and
-// checks only the drifted table again.
+// once caught up checks each table: the ones that match are cleared, and the one missing
+// a row on the target is repaired (the missing row is queued on the source and streamed)
+// and then matches. A restart copies nothing and checks nothing.
 func TestSkipInitialCopyIntegration(t *testing.T) {
 	if !integration(t) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
 	defer cancel()
-	old := skipCheckOptions
+	old, oldWait := skipCheckOptions, checkRepairWait
 	skipCheckOptions = live.VerifyOptions{ChunkRows: 100, Pause: -1, RecheckAfter: time.Second}
-	t.Cleanup(func() { skipCheckOptions = old })
+	checkRepairWait = time.Second
+	t.Cleanup(func() { skipCheckOptions, checkRepairWait = old, oldWait })
 
 	src := dial(t, ctx, envd("RC_SRC_HOST", "127.0.0.1"), envd("RC_SRC_PORT", "5440"), envd("RC_SRC_DB", "replicare_src"))
 	defer src.Close(context.Background())
@@ -74,6 +76,7 @@ syncs:
     include: ["rc_sk.*"]
     tuning: { drain_interval: 100ms }
     skip_initial_copy: { enabled: true }
+    target_triggers: { enabled: false }   # the audit trigger must count every write
 `)))
 	if err != nil {
 		t.Fatalf("load config: %v", err)
@@ -155,43 +158,43 @@ syncs:
 		t.Fatal("changes queued before the start or made after it did not stream")
 	}
 
-	// Once caught up: customers and orders match and are cleared; drifty is reported.
+	// Once caught up: customers and orders match and are cleared; drifty is repaired,
+	// then matches too.
 	if !pollUntil(t, convergeTimeout, func() bool {
-		return count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_ok'") == 2 &&
-			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_drift'") == 1
+		return count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_ok'") == 3
 	}) {
-		t.Fatalf("check results: ok=%d drift=%d",
+		t.Fatalf("check results: ok=%d repairing=%d drift=%d",
 			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_ok'"),
+			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_repairing'"),
 			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_drift'"))
 	}
-	var drifted, msg string
+	var repaired, msg string
 	if err := tgt.QueryRow(ctx, `SELECT table_name, message FROM replicare_state.events
-		WHERE sync = 'sk' AND event = 'copy.skip_check_drift'`).Scan(&drifted, &msg); err != nil {
-		t.Fatal(err)
+		WHERE sync = 'sk' AND event = 'copy.skip_check_repairing' LIMIT 1`).Scan(&repaired, &msg); err != nil {
+		t.Fatalf("no repair event: %v", err)
 	}
-	if drifted != "drifty" {
-		t.Errorf("drift reported for %q, want drifty (%s)", drifted, msg)
+	if repaired != "drifty" || !strings.Contains(msg, "1 row missing on the target") {
+		t.Errorf("repair reported for %q (%s), want drifty missing 1 row", repaired, msg)
 	}
-	if n := count(t, ctx, tgt, "replicare_state.copy_progress WHERE sync = 'sk' AND skipped"); n != 1 {
-		t.Errorf("tables still marked skipped = %d, want 1 (drifty)", n)
+	if n := count(t, ctx, tgt, "rc_sk.drifty WHERE id = 7"); n != 1 {
+		t.Errorf("drifty row 7 is still missing on the target after the repair")
+	}
+	if n := count(t, ctx, tgt, "replicare_state.copy_progress WHERE sync = 'sk' AND skipped"); n != 0 {
+		t.Errorf("tables still marked skipped = %d, want 0", n)
+	}
+	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_drift'"); n != 0 {
+		t.Errorf("copy.skip_check_drift events = %d, want 0 (repaired, not reported)", n)
 	}
 	stop()
 
-	// A restart copies nothing either, and checks drifty again.
+	// A restart copies nothing and checks nothing: every table matched.
 	stop = run()
-	if !pollUntil(t, convergeTimeout, func() bool {
-		return count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_drift'") == 2
-	}) {
-		t.Fatal("drifty was not checked again after a restart")
-	}
+	time.Sleep(2 * time.Second)
 	stop()
-	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_ok'"); n != 2 {
-		t.Errorf("copy.skip_check_ok events after the restart = %d, want 2 (matched tables are not checked again)", n)
+	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'sk' AND event = 'copy.skip_check_ok'"); n != 3 {
+		t.Errorf("copy.skip_check_ok events after the restart = %d, want 3 (matched tables are not checked again)", n)
 	}
-	if n := count(t, ctx, tgt, "rc_sk_audit.writes"); n > 10 {
-		t.Errorf("%d rows written to the target, want only the streamed changes: the copy was not skipped", n)
-	}
-	if n := count(t, ctx, tgt, "rc_sk.drifty WHERE id = 7"); n != 0 {
-		t.Errorf("drifty row 7 is on the target: nothing should have repaired it")
+	if n := count(t, ctx, tgt, "rc_sk_audit.writes"); n > 12 {
+		t.Errorf("%d rows written to the target, want only the streamed changes and the repair: the copy was not skipped", n)
 	}
 }

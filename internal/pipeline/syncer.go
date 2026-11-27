@@ -104,6 +104,13 @@ type Syncer struct {
 	// row by row, once the target has caught up. Nil turns the check off
 	// (skip_initial_copy.verify: false); the tables then stay marked as unchecked.
 	SkipCheck func(ctx context.Context, tables []engine.TableRef) ([]SkipCheckResult, error)
+	// VerifySkipped: tables that skipped their copy are checked too (the sync's
+	// skip_initial_copy.verify). Tables waiting for an automatic check are checked
+	// whenever SkipCheck is set.
+	VerifySkipped bool
+	// CheckRepairWait is how long the check waits after queueing rows that differ before
+	// comparing again (0 = a minute).
+	CheckRepairWait time.Duration
 
 	// Heartbeat, if set, is called whenever streaming makes progress — after each pass
 	// (success or handled error), and inside a pass as work completes (a table's apply

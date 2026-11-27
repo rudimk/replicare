@@ -517,6 +517,31 @@ own replication:
 
 Triggers added to the target while the sync runs are picked up the next time it starts.
 
+### Tables copied while the triggers fired
+
+A table copied before `replicare` held the target's triggers back(by an earlier version, or with
+`target_triggers` off) may differ from the source: a stamping trigger may have changed its values,
+or a version trigger written extra rows. `replicare` deals with this by itself. The first time it
+holds a target's triggers back, if any of them would have fired on its writes, it marks every
+table already copied to that target(wholly or in part) for a check, and logs `check.planned` at
+WARN with how many.
+
+Once the sync has caught up, each marked table is compared with the source row by row, exactly as
+[`replicare verify`](cli.md#verify-config-options) does. A table that matches is logged as
+`check.ok` and isn't checked again. In a table that differs, every row found missing, extra or
+different is queued on the source as a change, so streaming writes it again from the source's
+current value, with the triggers held back this time, or deletes it from the target. The table is
+compared again a minute later, and so on until it matches; each round is logged as
+`check.repairing`. Only a difference that stops shrinking over 3 rounds in a row is logged at ERROR
+as `check.drift`; that usually means the target refuses the rows, and the streaming logs say why.
+
+While any tables are waiting, `replicare status` shows a warning for each target, and the
+`replicare_tables_to_check` metric counts them by where they stand. A restart carries on with the
+ones that haven't matched yet. The check reads every row of every marked table on both sides, one
+key range at a time with a pause in between, so on a large database it takes a while, and streaming
+carries on meanwhile. A new sync whose first copy runs with the triggers held back has nothing to
+check.
+
 ### Switching them back on
 
 Before the application writes to the target, every trigger `replicare` switched off must be back
@@ -819,6 +844,7 @@ table exactly.
 | `replicare_delta_purged_total` | counter | `sync`, `table` | Delta rows purged after consumption. |
 | `replicare_delta_purge_seconds` | gauge | `sync`, `table` | How long the table's last purge on the source took, in seconds. It should stay well under a second; each purge statement gives up after 30 seconds and is retried on the next pass. |
 | `replicare_track_leftovers_removed_total` | counter | `sync`, `target`, `table` | Track rows left behind by versions before 0.7.0 that the background clean-up has removed. It only moves while a table still has leftovers. |
+| `replicare_tables_to_check` | gauge | `sync`, `target`, `state` | Tables waiting to be checked against the source and repaired if they differ(for example, copied while the target's own triggers fired), by where they stand: `pending`, `repairing`, `ok` or `drift`. See [the target's own triggers](#tables-copied-while-the-triggers-fired). |
 | `replicare_copy_skipped_tables` | gauge | `sync`, `target`, `check` | Tables marked copied without being copied(`skip_initial_copy`), by where their check against the source stands: `pending`, `ok`, `drift`, or `off` when the check is turned off. Unset when no table skipped its copy. |
 | `replicare_sync_tables` | gauge | `sync`, `target` | How many tables the sync replicates: those its selection matches that have a primary key or unique key. `0` means it replicates nothing, which is also logged at ERROR with the reason. |
 | `replicare_sync_start_failed` | gauge | `sync`, `target` | `1` while the sync isn't running because its last attempt failed, while starting up or while streaming, and is waiting to be tried again; `0` once it streams. |
@@ -888,8 +914,14 @@ field to grep / alert on:
 | `copy.skipped` | INFO, or WARN with the check off | `skip_initial_copy` marked tables copied without copying them, with how many |
 | `copy.skip_check_started` | INFO | the check of those tables against the source began, once the target caught up |
 | `copy.skip_check_ok` | INFO | one of them matches the source |
-| `copy.skip_check_drift` | ERROR | one of them differs from the source, with how many rows are missing, extra or different and some of their keys; copy it with `replicare reseed` |
+| `copy.skip_check_repairing` | WARN | one of them differs from the source, with how many rows are missing, extra or different and some of their keys; those rows are queued to be written again from the source, and the table is checked again a minute later |
+| `copy.skip_check_drift` | ERROR | one of them still differs after 3 rounds of repair that didn't shrink the difference(the target is refusing the rows; the streaming logs say why); copy it with `replicare reseed` |
 | `copy.skip_check_failed` | WARN | the check couldn't run for a table(for example, a database was unreachable); it's tried again 5 minutes later |
+| `check.planned` | WARN | tables already copied while the target's own triggers fired on `replicare`'s writes are marked to be checked against the source, with how many |
+| `check.started` / `check.ok` | INFO | the check of those tables began, once the sync caught up / one of them matches the source |
+| `check.repairing` | WARN | one of them differs from the source; the rows that differ are queued to be written again from the source, and it's checked again a minute later |
+| `check.drift` | ERROR | one of them still differs after 3 rounds of repair that didn't shrink the difference; copy it with `replicare reseed` |
+| `check.failed` | WARN | the check couldn't run for a table; it's tried again 5 minutes later |
 | `table.cutover_to_streaming` | INFO | a group of tables finished its initial copy and switched to streaming |
 | `stream.pass_error` | WARN | a streaming pass failed and will be retried |
 | `trigger.replica_mode` | INFO | the target's ordinary triggers skip `replicare`'s writes because its connections run in replica mode; or why replica mode isn't used |
@@ -1134,62 +1166,9 @@ that already holds rows is merged into rather than duplicated.
 
 ## Cutting over, with a way back
 
-A migration ends with a cutover: writes stop on the old database, the last changes reach the new
-one, and the applications move across. To keep the old database usable as a fallback, a second
-sync runs the other way, from the new database back to the old one. Since at the moment of the
-cutover the two hold the same data, that sync doesn't need to copy anything; it only has to carry
-the changes made after it. Below, *old* is the database being moved off and *new* the one being
-moved to; `forward` is the sync from old to new, and `back` the one from new to old.
-
-### Before the day
-
-1. Add the `back` sync to the config: source *new*, target *old*, the same `include` and
-   `exclude` as `forward`, `enabled: false` for now, and
-   [`skip_initial_copy`](configuration.md#starting-without-a-copy-skip_initial_copy) turned on.
-   One config may hold both directions as long as only one runs at a time(see
-   [cycle safety](configuration.md#cycle-safety-for-one-way-syncs)).
-2. Run `replicare validate <config>`. It checks *new*'s tables against *old*'s for `back`, which
-   matters most when *old* runs an older version.
-
-### On the day
-
-1. Stop writes to *old*. Wait until the `forward` backlog is 0 and stays there, and optionally run
-   `replicare verify <config> --sync forward`.
-2. Pause `forward`(`enabled: false`) and restart the daemon. This comes before the next step:
-   running both directions at once would send every change round in a loop, which is why the
-   config refuses it. Pausing `forward` also switches *new*'s own triggers back on, if
-   `replicare` had switched any off(see [the target's own triggers](#the-targets-own-triggers)):
-   check that `replicare status` no longer warns about them before the applications move.
-3. Install capture on *new* for `back`, before any application writes to it:
-
-   ```sh
-   replicare capture install <config> --sync back
-   ```
-
-   Every change on *new* is queued for *old* from here on, even before `back` runs.
-4. Move the applications to *new*.
-5. Remove `forward`'s capture from *old*:
-
-   ```sh
-   replicare capture remove <config> --sync forward
-   ```
-
-   This works with `forward` paused. Without it, *old*'s triggers would record every write `back`
-   makes, in queue tables nothing reads; and if `forward` ran again later, it would send all of
-   them to *new* for nothing.
-6. Turn `back` on(`enabled: true`) and restart the daemon. It streams the queued changes straight
-   away, and checks every table against *new* once it has caught up. Watch for
-   `copy.skip_check_ok` per table in the logs; `replicare status` shows `skipped` against each
-   table until then.
-
-Anything written to *new* before step 3 never reaches *old*, deletes included, and the check
-reports it as drift; that's why the order matters.
-
-### Falling back
-
-The same steps the other way round: stop writes to *new*, wait for the `back` backlog to reach 0,
-pause `back`(which switches *old*'s own triggers back on), and move the applications to *old*. If `forward` will run again, it needs its
-capture back on *old* first(step 3 the other way round), and the same order applies.
+How a cutover works, what to check before the day, the steps on the day, keeping the old database
+as a way back, and what most often goes wrong are all on their own page:
+[cutting over](cutover.md).
 
 ## Sequences & identity counters: DR / promotion
 

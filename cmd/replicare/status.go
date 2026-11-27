@@ -235,6 +235,11 @@ func renderReports(w io.Writer, reports []status.Report, live bool, now time.Tim
 				"switch them back on before the application writes there (pause the sync, or run `replicare triggers restore`)\n",
 				len(tr.Triggers), tr.Target)
 		}
+		for _, c := range rep.Checks {
+			fmt.Fprintf(w, "  WARNING: %d tables on %s are waiting to be checked against the source (%s); "+
+				"they're checked once the sync has caught up, and any row that differs is written again from the source "+
+				"(see the check.* events)\n", len(c.Tables), c.Target, c.Reason)
+		}
 		if n := skippedCount(rep.Tables); n == 1 {
 			fmt.Fprintln(w, "  WARNING: 1 table skipped its copy and is not yet confirmed to match the source (COPY = skipped; see the copy.skip_check_* events)")
 		} else if n > 1 {

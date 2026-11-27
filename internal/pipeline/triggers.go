@@ -38,8 +38,16 @@ func (s *Syncer) guardTargetTriggers(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
+	cs, _ := s.Store.(state.CheckStore)
 	if !s.GuardTriggers {
-		// Turned off (or never on): put back anything an earlier run switched off.
+		// Turned off (or never on): the triggers fire on replicare's writes from here on,
+		// so a later start that holds them back again must check what was copied meanwhile.
+		if cs != nil {
+			if err := cs.SetTriggerGuardStarted(ctx, s.Name, s.Target, false); err != nil {
+				return err
+			}
+		}
+		// Put back anything an earlier run switched off.
 		n, err := RestoreTargetTriggers(ctx, ts, g, s.Name, s.Target, s.recordEvent)
 		if err != nil {
 			return fmt.Errorf("switch target triggers back on: %w", err)
@@ -137,6 +145,9 @@ func (s *Syncer) guardTargetTriggers(ctx context.Context) error {
 					t.Name, g.RestoreStatement(t))})
 		}
 	}
+	if err := s.planTriggerChecks(ctx, cs, app); err != nil {
+		return err
+	}
 	saved, err := ts.ListTriggers(ctx, s.Name)
 	if err != nil {
 		return fmt.Errorf("list switched-off target triggers: %w", err)
@@ -153,6 +164,51 @@ func (s *Syncer) guardTargetTriggers(ctx context.Context) error {
 	}
 	s.Tel.SetTargetTriggers(s.Name, s.Target, skipped, switchedOff)
 	return nil
+}
+
+// planTriggerChecks runs once the target's triggers are held back. The first time that
+// happens for this target (a new sync, an upgrade from a version that let them fire, or
+// the setting turned back on), any table already copied, wholly or in part, was copied
+// with the triggers that fire in ordinary sessions firing on replicare's writes, and may
+// differ from the source: each is marked for the automatic check, which compares it with
+// the source once the sync has caught up and repairs what differs.
+func (s *Syncer) planTriggerChecks(ctx context.Context, cs state.CheckStore, app []engine.TargetTrigger) error {
+	if cs == nil {
+		return nil
+	}
+	started, err := cs.TriggerGuardStarted(ctx, s.Name, s.Target)
+	if err != nil || started {
+		return err
+	}
+	fired := 0
+	for _, t := range app {
+		if t.Fires(false) {
+			fired++
+		}
+	}
+	if fired > 0 {
+		var copied []engine.TableRef
+		for _, t := range s.Replicable {
+			prog, err := s.Store.LoadCopyProgress(ctx, s.Name, s.Target, t)
+			if err != nil {
+				return fmt.Errorf("load copy progress of %s: %w", t, err)
+			}
+			if prog.Done || len(prog.Watermark) > 0 || len(prog.Completed) > 0 {
+				copied = append(copied, t)
+			}
+		}
+		if len(copied) > 0 {
+			if err := cs.MarkForCheck(ctx, s.Name, s.Target, copied, "copied while the target's own triggers fired on replicare's writes"); err != nil {
+				return err
+			}
+			s.recordEvent(ctx, state.Event{Sync: s.Name, Target: string(s.Target), Level: "WARN",
+				Event: observability.EventCheckPlanned,
+				Message: fmt.Sprintf("%s copied before now, while %s fired on replicare's writes, so they may differ "+
+					"from the source. Each is compared with the source once the sync has caught up, and any row "+
+					"that differs is written again from the source", tablesWord(len(copied)), triggersWord(fired))})
+		}
+	}
+	return cs.SetTriggerGuardStarted(ctx, s.Name, s.Target, true)
 }
 
 // RestoreTargetTriggers switches back on every trigger saved for (sync, target), in the

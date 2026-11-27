@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rudimk/replicare/internal/config"
+	"github.com/rudimk/replicare/internal/observability/live"
 )
 
 // triggerTestDBs builds the production case on both sides: a table whose own trigger
@@ -248,4 +249,83 @@ func startDaemonFromYAML(t *testing.T, ctx context.Context, syncs string) runnin
 			t.Error("daemon did not stop within 15s of cancellation")
 		}
 	}}
+}
+
+// TestDaemonChecksAndRepairsTablesCopiedWhileTriggersFired: a copy made while the
+// target's own triggers fired (an earlier version, or the setting off) left wrong values
+// on the target. The first start that holds the triggers back marks every table already
+// copied for a check; once caught up, each is compared with the source and every row
+// that differs is written again from the source, with nothing for the operator to do.
+func TestDaemonChecksAndRepairsTablesCopiedWhileTriggersFired(t *testing.T) {
+	if !integration(t) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), daemonTestBudget)
+	defer cancel()
+	old, oldWait := skipCheckOptions, checkRepairWait
+	skipCheckOptions = live.VerifyOptions{ChunkRows: 7, Pause: -1, RecheckAfter: time.Second}
+	checkRepairWait = time.Second
+	t.Cleanup(func() { skipCheckOptions, checkRepairWait = old, oldWait })
+
+	src, tgt := triggerTestDBs(t, ctx)
+	// Only the stamping trigger: it changes every value on its way in, silently.
+	mustExec(t, ctx, tgt, "DROP TRIGGER items_versions_append ON rc_tt.items")
+	mustExec(t, ctx, tgt, "DROP TRIGGER item_versions_append_only ON rc_tt.item_versions")
+	const items = "SELECT id, name FROM rc_tt.items"
+	sync := func(extra string) string {
+		return `
+syncs:
+  - name: tt
+    source: src
+    targets: [dst]
+    include: ["rc_tt.*"]
+    tuning: { drain_interval: 100ms }
+` + extra
+	}
+
+	// The earlier run: the triggers fire on replicare's writes.
+	d := startDaemonFromYAML(t, ctx, sync("    target_triggers: { enabled: false }\n"))
+	if !pollUntil(t, copyTimeout, func() bool { return count(t, ctx, tgt, "rc_tt.items") == 20 }) {
+		t.Fatal("copy did not converge")
+	}
+	d.stop()
+	if n := count(t, ctx, tgt, "rc_tt.items WHERE name LIKE '%!!'"); n != 20 {
+		t.Fatalf("%d rows stamped twice by the first run, want 20 (the broken state to repair)", n)
+	}
+
+	// Now with the triggers held back: the copied tables are checked and repaired.
+	d = startDaemonFromYAML(t, ctx, sync(""))
+	defer d.stop()
+	if !pollUntil(t, convergeTimeout, func() bool {
+		return count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.ok' AND table_name = 'items'") == 1
+	}) {
+		t.Fatalf("items not repaired: planned=%d repairing=%d drift=%d, %d rows still wrong",
+			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.planned'"),
+			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.repairing'"),
+			count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.drift'"),
+			count(t, ctx, tgt, "rc_tt.items WHERE name LIKE '%!!'"))
+	}
+	if !sameRows(t, ctx, src, tgt, items) {
+		t.Fatal("target still differs from the source after the repair")
+	}
+	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.planned'"); n != 1 {
+		t.Errorf("check.planned events = %d, want 1", n)
+	}
+	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.repairing' AND table_name = 'items'"); n < 1 {
+		t.Error("no check.repairing event for items")
+	}
+	if !pollUntil(t, convergeTimeout, func() bool {
+		return count(t, ctx, tgt, "replicare_state.pending_checks WHERE sync = 'tt'") == 0
+	}) {
+		t.Errorf("%d checks still pending, want 0", count(t, ctx, tgt, "replicare_state.pending_checks WHERE sync = 'tt'"))
+	}
+	d.stop()
+
+	// A later start does not plan the check again.
+	d = startDaemonFromYAML(t, ctx, sync(""))
+	time.Sleep(2 * time.Second)
+	d.stop()
+	if n := count(t, ctx, tgt, "replicare_state.events WHERE sync = 'tt' AND event = 'check.planned'"); n != 1 {
+		t.Errorf("check.planned events after another start = %d, want still 1", n)
+	}
 }

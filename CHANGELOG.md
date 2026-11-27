@@ -4,6 +4,32 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.0]
+
+- **Tables copied while the target's own triggers fired are checked and repaired by themselves.**
+  The first time `replicare` holds a target's triggers back, any table already copied with them
+  firing(by an earlier version, or with `target_triggers` off) may differ from the source. Each
+  one is now marked(`check.planned`) and, once the sync has caught up, compared with the source
+  row by row; every row that differs is written again from the source, and the table is compared
+  again until it matches(`check.repairing`, then `check.ok`). Nothing to run by hand.
+  `replicare status` warns while any are waiting, and `replicare_tables_to_check` counts them.
+  State store version 7.
+- **The check after `skip_initial_copy` repairs what it finds** instead of only reporting it. Each
+  row found missing, extra or different is queued on the source as a change, so streaming writes it
+  again from the source's current value(or deletes it from the target), and the table is checked
+  again a minute later(`copy.skip_check_repairing`). Only a difference that stops shrinking over 3
+  rounds is still logged at ERROR(`copy.skip_check_drift`). This also covers the passive layouts in
+  the failover guide, where a copy that was behind no longer needs copying again from scratch.
+- **Fixed: Redis keyspace notifications could miss the first changes.** The subscription was
+  started without waiting for Redis to confirm it, so a change made in the first moments after
+  start-up could fire no event. Notifications only speed up delivery and the reconciliation scan
+  still found the change, so nothing was lost; it now waits for the confirmation(up to 5 seconds).
+- **New page: [cutting over](https://replicare.rudimk.com/cutover.html).** How a cutover works,
+  what to check before the day(indexes rebuilt, checks done, tables without a key, data that isn't
+  replicated, counters, every writer known), the steps on the day with a way back, falling back,
+  and a table of what most often goes wrong. The steps that were on the operations page now live
+  there.
+
 ## [0.7.5]
 
 - **Fixed: a target could silently miss changes when several targets read the same database.**

@@ -24,7 +24,12 @@ const maxSkipCheckKeys = 5
 // between them, a 30s wait before re-checking rows that differed). Tests shorten it.
 var skipCheckOptions = live.VerifyOptions{}
 
-// skipCheck returns the check of a sync's skipped tables against the source for one
+// checkRepairWait is how long the check waits after queueing rows that differ before
+// comparing again (0 = the pipeline's default). Tests shorten it.
+var checkRepairWait time.Duration
+
+// skipCheck returns the check of a sync's skipped tables (and tables waiting for an
+// automatic check) against the source for one
 // target: the same row-by-row comparison as `replicare verify`, on connections of its
 // own, limited to the given tables and this target.
 func (d *Daemon) skipCheck(syncName, targetName string) func(context.Context, []engine.TableRef) ([]pipeline.SkipCheckResult, error) {
@@ -34,6 +39,7 @@ func (d *Daemon) skipCheck(syncName, targetName string) func(context.Context, []
 			names[i] = t.String()
 		}
 		opts := skipCheckOptions
+		opts.CollectKeys = true // a difference is repaired by sending these rows again
 		opts.Tables = names
 		opts.Targets = []string{targetName}
 		rep := live.New(d.cfg, skipCheckTimeout).VerifyWith(ctx, syncName, opts)
@@ -70,7 +76,8 @@ func skipCheckResults(rep live.VerifyReport, targetName string, tables []engine.
 		case vt.Converged && vt.Mode != "sampled":
 			out = append(out, pipeline.SkipCheckResult{Table: t, Match: true})
 		default:
-			out = append(out, pipeline.SkipCheckResult{Table: t, Detail: driftDetail(vt)})
+			out = append(out, pipeline.SkipCheckResult{Table: t, Detail: driftDetail(vt),
+				Keys: vt.Differing, Differing: vt.Missing + vt.Extra + vt.Different, Partial: vt.Truncated})
 		}
 	}
 	return out, nil

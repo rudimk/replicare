@@ -238,7 +238,7 @@ selected tables. `run` installs capture automatically, so this command is for pr
 or for manual teardown. It works on a paused sync too. Installing capture ahead of time is what
 lets a sync start later without a copy: see
 [`skip_initial_copy`](configuration.md#starting-without-a-copy-skip_initial_copy) and
-[cutting over, with a way back](operations.md#cutting-over-with-a-way-back).
+[cutting over](cutover.md#on-the-day).
 
 > ⚠️ `install` only needs `TRIGGER`(plus `SELECT`/`USAGE` and schema creation), but `remove`
 > also needs table ownership to drop the triggers. If the `replicare` role doesn't own the

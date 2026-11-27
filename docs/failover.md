@@ -111,7 +111,7 @@ shows the same from the command line, and the
 For maintenance on the active database, or to move the active role on purpose, with nothing lost:
 
 1. Stop writes to the active database, and wait until the sync's backlog is 0 and stays there.
-2. Follow [cutting over, with a way back](operations.md#cutting-over-with-a-way-back). It moves
+2. Follow [cutting over](cutover.md). It moves
    the active role and sets up the sync running the other way without copying anything, so the
    old active database becomes the new passive copy straight away.
 
@@ -282,7 +282,7 @@ for `passive-2`. Apply schema changes from the end of the chain backwards: `pass
 lose; the later hops show how far behind the further copies are.
 
 **Planned switchover.** Stop writes to the active database, wait until `active-to-p1`'s backlog
-is 0, then follow [cutting over, with a way back](operations.md#cutting-over-with-a-way-back)
+is 0, then follow [cutting over](cutover.md)
 for that one hop. `p1-to-p2` and `p2-to-p3` carry on untouched, and the old active database becomes
 a copy feeding nothing.
 
@@ -298,10 +298,11 @@ hop before it. One in the middle leaves the copies after it without changes. For
 2. Add a sync from the active database to `passive-2`, with
    [`skip_initial_copy: { enabled: true }`](configuration.md#starting-without-a-copy-skip_initial_copy),
    so it streams from the active database's queue straight away.
-3. Wait for its check against the active database. Expect it to report differences: `passive-2`
+3. Wait for its check against the active database. Expect it to find differences: `passive-2`
    is missing whatever `passive-1` received but hadn't passed on, and the active database has
-   already cleared those changes. Copy `passive-2` again with
-   [`replicare reseed`](operations.md#forcing-a-reseed) if any table differs.
+   already cleared those changes. The check repairs them by itself, sending each row that differs
+   again from the active database, then checks again until every table matches(`copy.skip_check_ok`
+   for each in the logs).
 
 **The old active database comes back.** The steps under
 [when the old active database comes back](#when-the-old-active-database-comes-back), but add it
@@ -357,7 +358,8 @@ re-pointing the others; with every copy caught up, nothing needs copying again.
    [`replicare capture install <config> --sync <name>`](cli.md#capture-installremove-config---sync-name),
    so nothing written there is missed.
 3. Wait for its check. The copies each stopped at a slightly different point, so expect some
-   tables to differ; copy those targets again with [`replicare reseed`](operations.md#forcing-a-reseed).
+   tables to differ. The check repairs them by itself, sending each row that differs again from
+   `passive-1`, until every table matches.
 
 **A copy fails.** Nothing else is affected, as for a [single passive copy](#when-the-passive-copy-fails).
 

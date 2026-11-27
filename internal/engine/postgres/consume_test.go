@@ -194,3 +194,32 @@ func TestReadDirtyKeysCompositeKey(t *testing.T) {
 		t.Errorf("sku = %v, want abc", keys[0].Key[1])
 	}
 }
+
+// TestRequeueKeys: requeued keys (in verify's text form, composite included) land in the
+// table's delta queue as changes for every target.
+func TestRequeueKeys(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	src := captureSource(t, ctx)
+	setupSourceTables(t, ctx, src,
+		"CREATE TABLE rc_it.items (order_id bigint, sku text, qty int, PRIMARY KEY (order_id, sku))")
+	ref := engine.TableRef{Schema: "rc_it", Name: "items"}
+	if err := src.InstallCapture(ctx, []engine.TableRef{ref}); err != nil {
+		t.Fatalf("install: %v", err)
+	}
+	if err := src.RequeueKeys(ctx, ref, []engine.KeyValues{{"10", "a'b"}, {"11", "c"}}); err != nil {
+		t.Fatalf("RequeueKeys: %v", err)
+	}
+	for _, target := range []engine.TargetID{"dst", "other"} {
+		keys, err := src.ReadDirtyKeys(ctx, ref, target, 0)
+		if err != nil {
+			t.Fatalf("ReadDirtyKeys: %v", err)
+		}
+		if len(keys) != 2 {
+			t.Fatalf("%s: %d dirty keys, want 2", target, len(keys))
+		}
+		if a, b := keys[0].Key[0], keys[0].Key[1]; a != "10" || b != "a'b" {
+			t.Errorf("%s: first key = %v,%v, want 10,a'b", target, a, b)
+		}
+	}
+}
