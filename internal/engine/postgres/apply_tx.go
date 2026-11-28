@@ -139,15 +139,18 @@ func (tx *pgApplyTx) DeleteAbsent(ctx context.Context, t engine.TableRef, dirtyK
 	if len(dirtyKeys) == 0 {
 		return nil
 	}
-	inPred, err := keysetInPredicate(info.keyCols, dirtyKeys)
-	if err != nil {
-		return err
-	}
 	keyTuple := "(" + quotedKeyList(info.keyCols) + ")"
-	del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
-		qualifyTable(t), inPred, keyTuple, quotedKeyList(info.keyCols), quoteIdentifier(info.name))
-	if _, err := tx.sink.conn.Exec(ctx, del); err != nil {
-		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
+	// In pieces, like the re-read (engine.MaxKeysPerStatement), inside the one transaction.
+	for _, piece := range engine.Pieces(dirtyKeys, engine.MaxKeysPerStatement) {
+		inPred, err := keysetInPredicate(info.keyCols, piece)
+		if err != nil {
+			return err
+		}
+		del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
+			qualifyTable(t), inPred, keyTuple, quotedKeyList(info.keyCols), quoteIdentifier(info.name))
+		if _, err := tx.sink.conn.Exec(ctx, del); err != nil {
+			return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
+		}
 	}
 	return nil
 }

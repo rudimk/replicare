@@ -102,15 +102,26 @@ func (s *Syncer) notePass(consumed int, backlogs map[engine.TableRef]engine.Delt
 	}
 	p.passes++
 	p.applied += int64(consumed)
-	if err != nil {
-		p.failed++
-		p.lastErr = err.Error()
-		return
-	}
 	if backlogs != nil {
 		p.backlog = backlogs
 		p.lastSeen = time.Now()
 	}
+	if err != nil {
+		p.failed++
+		p.lastErr = err.Error()
+	}
+}
+
+// noteBacklogs records the latest backlogs for the progress line without counting a pass.
+func (s *Syncer) noteBacklogs(backlogs map[engine.TableRef]engine.DeltaBacklog) {
+	p := &s.progress
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.since.IsZero() {
+		p.since = time.Now()
+	}
+	p.backlog = backlogs
+	p.lastSeen = time.Now()
 }
 
 // logStreamProgress logs what streaming did since the last line, at most every

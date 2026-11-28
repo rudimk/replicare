@@ -449,7 +449,7 @@ specific value types.
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `drain_interval` | duration(`1s`, `500ms`) | `1s` | the time between streaming drain passes; a longer interval coalesces more(less source load) but raises lag |
-| `drain_batch` | int | `1000` | the most dirty deltas applied per table, per pass. Together with `drain_interval` this sets the per-table streaming ceiling(roughly `drain_batch/drain_interval` rows/s). Raise it for a high-volume table that lags |
+| `drain_batch` | int | `1000` | the most dirty deltas applied per table, per pass. Together with `drain_interval` this sets the per-table streaming ceiling(roughly `drain_batch/drain_interval` rows/s). Raise it for a high-volume table that lags; any value is safe, since the rows are read and deleted at most 500 keys per statement |
 | `apply_concurrency` | int(at least 1) | `1` | how many of a component's tables apply concurrently during streaming. `1` is strictly sequential; a higher value fans the per-table apply across the copy-worker pool(bounded by `pool.max_*_connections`). It helps when *several* tables are backlogged at once |
 | `retention.max_age` | duration(`24h`, `0` = off) | `24h` | the oldest unconsumed delta allowed before a lagging target is reseeded |
 | `retention.max_bytes` | size(`512MB`, `0` = off) | off | the delta table's on-disk size allowed before a reseed |

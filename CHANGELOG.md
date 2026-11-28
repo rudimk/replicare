@@ -4,6 +4,34 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.3]
+
+- **Fixed: a large `drain_batch` broke streaming.** To apply a batch of changes, `replicare`
+  read the changed rows from the source, and deleted the removed ones on the target, with one
+  statement listing every key of the batch. With a few thousand keys made of several columns that
+  statement got too big for the database: Postgres refused it with `stack depth limit exceeded`
+  (around 10,000 three-column keys) and MySQL with `Prepared statement contains too many
+  placeholders`, so every pass failed on that table. Every statement over a list of keys or tables
+  now lists at most 500, on both engines (re-reads, target deletes, the record of applied changes,
+  `verify`'s look-ups, size and row estimates), so any `drain_batch` is safe. Tested with
+  batches of 40,000 changes on a three-column key.
+- **Faster deletes on MySQL with large batches.** Deleting the rows the source had removed
+  compared each one with the whole batch, so the time grew with the square of the batch: 30,000
+  changes took 94 seconds. The staging table now has an index on the key, and the same batch takes
+  2 seconds.
+- **One failing group of tables no longer holds up the others.** When a group failed, for a
+  value the target refused or a statement the server couldn't run, the pass stopped there and every
+  group after it waited too. With both databases up, the other groups now carry on, and the pass's
+  `stream.pass_error` names the groups that failed. A database that's down still stops the pass at
+  once, as before.
+- **The replication lag shows from the start, and while passes fail.** The backlog and lag were
+  only published after a pass succeeded, so after a restart the dashboard was blank until the first
+  pass finished, and a sync whose passes all failed showed no lag at all. They're now published
+  when streaming starts and after every pass, failed or not.
+- **Quieter start-up.** Every restart logged a `table.cutover_to_streaming` line for every group
+  already streaming, hundreds of identical lines on a large sync. Only a group that actually
+  switches is logged now, and the line names it.
+
 ## [0.8.2]
 
 - **Large tables whose rows aren't stored in key order are copied in storage order.** A first copy

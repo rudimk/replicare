@@ -334,10 +334,14 @@ func (s *Syncer) componentCopied(ctx context.Context, comp engine.Component) boo
 
 // cutover flips each of the component's tables to streaming for this target.
 func (s *Syncer) cutover(ctx context.Context, comp engine.Component) error {
+	switched := false
 	for _, t := range comp.Order {
 		cur, err := s.Store.LoadCursor(ctx, s.Name, s.Target, t)
 		if err != nil {
 			return fmt.Errorf("syncer %s: load cursor %s: %w", s.Name, t, err)
+		}
+		if cur.Phase != state.PhaseStreaming {
+			switched = true
 		}
 		cur.Phase = state.PhaseStreaming
 		if err := s.Store.SaveCursor(ctx, s.Name, cur); err != nil {
@@ -347,10 +351,15 @@ func (s *Syncer) cutover(ctx context.Context, comp engine.Component) error {
 		// copy is done and streaming starts, so the copy ETA stops counting it.
 		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
 	}
-	s.recordEvent(ctx, state.Event{
-		Sync: s.Name, Target: string(s.Target), Level: "INFO", Event: observability.EventCutover,
-		Message: fmt.Sprintf("component of %d tables cut over to streaming", len(comp.Order)),
-	})
+	// Only a component that actually switches is logged: on every start each component
+	// already streaming passes through here too, and logging those buried the start-up
+	// in hundreds of identical lines (decision, 0.8.3).
+	if switched {
+		s.recordEvent(ctx, state.Event{
+			Sync: s.Name, Target: string(s.Target), Level: "INFO", Event: observability.EventCutover,
+			Message: fmt.Sprintf("component of %d tables (from %s) cut over to streaming", len(comp.Order), comp.Order[0]),
+		})
+	}
 	return nil
 }
 

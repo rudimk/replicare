@@ -51,10 +51,6 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 		stgCols[i] = quoteIdentifier(c) + " " + typeByName[c]
 	}
 
-	inPred, err := keysetInPredicate(keyCols, dirtyKeys)
-	if err != nil {
-		return err
-	}
 	keyTuple := "(" + quotedKeyList(keyCols) + ")"
 
 	if _, err := s.conn.Exec(ctx, "BEGIN"); err != nil {
@@ -92,10 +88,17 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 	// Dirty keys that are absent from the staging were deleted at the source. An FK
 	// violation on delete is likewise transient (a parent deleted before its child
 	// on a target without ON DELETE CASCADE) and resolves once the child is deleted.
-	del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
-		qualifyTable(t), inPred, keyTuple, quotedKeyList(keyCols), quoteIdentifier(stg))
-	if _, err := s.conn.Exec(ctx, del); err != nil {
-		return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
+	// In pieces, like the re-read (engine.MaxKeysPerStatement), inside the one transaction.
+	for _, piece := range engine.Pieces(dirtyKeys, engine.MaxKeysPerStatement) {
+		inPred, err := keysetInPredicate(keyCols, piece)
+		if err != nil {
+			return err
+		}
+		del := fmt.Sprintf("DELETE FROM %s WHERE %s AND %s NOT IN (SELECT %s FROM %s)",
+			qualifyTable(t), inPred, keyTuple, quotedKeyList(keyCols), quoteIdentifier(stg))
+		if _, err := s.conn.Exec(ctx, del); err != nil {
+			return fmt.Errorf("postgres: apply: delete absent %s: %w", t, classifyFKViolation(err))
+		}
 	}
 
 	if _, err := s.conn.Exec(ctx, "COMMIT"); err != nil {

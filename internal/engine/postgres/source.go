@@ -102,23 +102,32 @@ func (s *Source) ReplicatedSize(ctx context.Context, tables []engine.TableRef) (
 // absent at this endpoint simply contributes nothing (no regclass cast that could
 // error on a missing relation). An empty list returns 0.
 func replicatedSize(ctx context.Context, conn *pgx.Conn, tables []engine.TableRef) (int64, error) {
-	if len(tables) == 0 {
-		return 0, nil
+	var total int64
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		pairs, args := tablePairs(piece)
+		q := fmt.Sprintf(`SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)
+FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE (n.nspname, c.relname) IN (%s)`, pairs)
+		var b int64
+		if err := conn.QueryRow(ctx, q, args...).Scan(&b); err != nil {
+			return 0, fmt.Errorf("postgres: replicated size: %w", err)
+		}
+		total += b
 	}
+	return total, nil
+}
+
+// tablePairs renders a piece of tables as a (schema, name) IN list of bind
+// parameters. Callers split the tables into pieces first (engine.MaxKeysPerStatement):
+// a statement is limited to 65,535 parameters, and a long row-value list plans slowly.
+func tablePairs(tables []engine.TableRef) (string, []any) {
 	pairs := make([]string, len(tables))
 	args := make([]any, 0, len(tables)*2)
 	for i, t := range tables {
 		pairs[i] = fmt.Sprintf("($%d,$%d)", 2*i+1, 2*i+2)
 		args = append(args, t.Schema, t.Name)
 	}
-	q := fmt.Sprintf(`SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0)
-FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
-	var b int64
-	if err := conn.QueryRow(ctx, q, args...).Scan(&b); err != nil {
-		return 0, fmt.Errorf("postgres: replicated size: %w", err)
-	}
-	return b, nil
+	return strings.Join(pairs, ", "), args
 }
 
 // EstimateRows implements engine.RowEstimator from planner statistics
@@ -129,38 +138,39 @@ func (s *Source) EstimateRows(ctx context.Context, tables []engine.TableRef) (ma
 		return nil, errNotConnected("source")
 	}
 	out := make(map[engine.TableRef]int64, len(tables))
-	if len(tables) == 0 {
-		return out, nil
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		if err := s.estimateRowsPiece(ctx, piece, out); err != nil {
+			return nil, err
+		}
 	}
-	pairs := make([]string, len(tables))
-	args := make([]any, 0, len(tables)*2)
-	for i, t := range tables {
-		pairs[i] = fmt.Sprintf("($%d,$%d)", 2*i+1, 2*i+2)
-		args = append(args, t.Schema, t.Name)
-	}
+	return out, nil
+}
+
+func (s *Source) estimateRowsPiece(ctx context.Context, tables []engine.TableRef, out map[engine.TableRef]int64) error {
+	pairs, args := tablePairs(tables)
 	q := fmt.Sprintf(`SELECT n.nspname, c.relname,
        CASE WHEN c.relkind = 'p'
             THEN COALESCE((SELECT SUM(GREATEST(k.reltuples, 0)) FROM pg_inherits i
                            JOIN pg_class k ON k.oid = i.inhrelid WHERE i.inhparent = c.oid), 0)
             ELSE c.reltuples END::bigint
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
+WHERE (n.nspname, c.relname) IN (%s)`, pairs)
 	rows, err := s.conn.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: estimate rows: %w", err)
+		return fmt.Errorf("postgres: estimate rows: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var schema, name string
 		var n int64
 		if err := rows.Scan(&schema, &name, &n); err != nil {
-			return nil, fmt.Errorf("postgres: estimate rows: %w", err)
+			return fmt.Errorf("postgres: estimate rows: %w", err)
 		}
 		if n > 0 {
 			out[engine.TableRef{Schema: schema, Name: name}] = n
 		}
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 var _ engine.RowEstimator = (*Source)(nil)
@@ -173,15 +183,16 @@ func (s *Source) EstimateTableBytes(ctx context.Context, tables []engine.TableRe
 		return nil, errNotConnected("source")
 	}
 	out := make(map[engine.TableRef]int64, len(tables))
-	if len(tables) == 0 {
-		return out, nil
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		if err := s.estimateBytesPiece(ctx, piece, out); err != nil {
+			return nil, err
+		}
 	}
-	pairs := make([]string, len(tables))
-	args := make([]any, 0, len(tables)*2)
-	for i, t := range tables {
-		pairs[i] = fmt.Sprintf("($%d,$%d)", 2*i+1, 2*i+2)
-		args = append(args, t.Schema, t.Name)
-	}
+	return out, nil
+}
+
+func (s *Source) estimateBytesPiece(ctx context.Context, tables []engine.TableRef, out map[engine.TableRef]int64) error {
+	pairs, args := tablePairs(tables)
 	q := fmt.Sprintf(`SELECT n.nspname, c.relname,
        (SELECT COALESCE(SUM(pg_relation_size(r.oid)
                             + CASE WHEN r.reltoastrelid <> 0 THEN pg_relation_size(r.reltoastrelid) ELSE 0 END), 0)
@@ -189,23 +200,23 @@ func (s *Source) EstimateTableBytes(ctx context.Context, tables []engine.TableRe
          WHERE r.oid = c.oid
             OR r.oid IN (SELECT i.inhrelid FROM pg_inherits i WHERE i.inhparent = c.oid))::bigint
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE (n.nspname, c.relname) IN (%s)`, strings.Join(pairs, ", "))
+WHERE (n.nspname, c.relname) IN (%s)`, pairs)
 	rows, err := s.conn.Query(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("postgres: estimate table bytes: %w", err)
+		return fmt.Errorf("postgres: estimate table bytes: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var schema, name string
 		var n int64
 		if err := rows.Scan(&schema, &name, &n); err != nil {
-			return nil, fmt.Errorf("postgres: estimate table bytes: %w", err)
+			return fmt.Errorf("postgres: estimate table bytes: %w", err)
 		}
 		if n > 0 {
 			out[engine.TableRef{Schema: schema, Name: name}] = n
 		}
 	}
-	return out, rows.Err()
+	return rows.Err()
 }
 
 var _ engine.TableSizeEstimator = (*Source)(nil)

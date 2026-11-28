@@ -658,9 +658,13 @@ The defaults favour low source pressure. For more throughput, raise the pool cap
 ### A single high-volume table that lags
 
 Streaming applies at most `drain_batch` deltas per table, per pass, so a single table's ceiling is
-roughly `drain_batch / drain_interval` rows a second(for example `1000 / 1s`, which is about 1000
-rows/s). When one big table(say a high-churn `events`) falls behind while the rest stay at zero
-backlog, that's the ceiling being hit. There are two levers, to be tried in this order:
+`drain_batch` rows per pass. On a small sync a pass takes about `drain_interval`, so that's roughly
+`drain_batch / drain_interval` rows a second(for example `1000 / 1s`, which is about 1000 rows/s).
+A pass goes through every table of the sync, though, so on a sync of hundreds of tables, or with
+many of them backlogged, one pass can take far longer than `drain_interval`, and the ceiling is
+lower. The "Apply batch latency (p95)" panel shows how long a pass takes. When one big table(say a
+high-churn `events`) falls behind while the rest stay at zero backlog, that's the ceiling being
+hit. There are two levers, to be tried in this order:
 
 1. Shorten `drain_interval`(`1s`, then `200ms`, then `100ms`). More passes a second means
    linearly more throughput, at the cost of more frequent re-read `SELECT`s on the source. It's
@@ -669,8 +673,11 @@ backlog, that's the ceiling being hit. There are two levers, to be tried in this
 2. Raise `drain_batch`(`1000`, then `5000` or more). That means more rows per pass. For a
    genuinely large table it's more efficient than a tiny interval - one COPY-to-staging and upsert
    of 5000 rows amortises round-trips far better than five of 1000 - and it's the right lever when
-   apply latency is near or above the interval(the drain is apply-bound). The cost is a larger
-   re-read and apply on each pass, so more source and target work in one go.
+   apply latency is near or above the interval(the drain is apply-bound), and on a sync of many
+   tables, where each pass is long anyway. The cost is a larger re-read and apply on each pass, so
+   more source and target work in one go. Any value is safe: `replicare` reads and deletes the
+   rows of a batch at most 500 keys per statement, so a large batch never makes a statement too
+   big for the database.
 
 Watch `- rate(replicare_delta_backlog_rows[5m])` per table; a positive value means the backlog is
 shrinking, so the table is catching up.
@@ -1301,6 +1308,13 @@ If the target rejects a value(a type or constraint error), `replicare` halts the
 component loudly(logs and telemetry) rather than skipping or guessing. The offending row stays
 dirty, and re-applies automatically once the cause is fixed(e.g. a missing target type /
 extension, or a schema mismatch).
+
+Only that group of linked tables stops. Every other group carries on applying its changes in the
+same pass, since groups don't depend on each other; each failing pass is logged as
+`stream.pass_error`, naming the groups that failed. The exception is a database that's down:
+every group would fail, so the pass stops at the first, and the next pass tries again. The backlog
+and the replication lag are measured on the source, so they stay up to date in the metrics and the
+dashboard while passes fail, and from the moment streaming starts after a restart.
 
 ## Restarts & ownership
 

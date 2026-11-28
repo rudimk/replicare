@@ -233,6 +233,23 @@ correctness mechanism** — only a lag/observability signal.
   syncer can reseed it. Consumers in a different config/daemon are not seen (documented).
 - **`bigserial`/seq column:** kept for **lag metrics and ordering hints only**, never as the
   resume cursor.
+- **Key lists in pieces (decision, 0.8.3, from a production stall).** Every statement over a list
+  of keys or tables (re-read on the source, delete-absent on the target, MySQL track insert,
+  verify's by-key look-up, size/row-estimate catalog look-ups; PG + MySQL) lists at most
+  `engine.MaxKeysPerStatement` (500), via `engine.Pieces`. One statement per batch grew with
+  `drain_batch`: PG failed to plan a row-value `IN` of ~10k three-column keys (54001 "stack depth
+  limit exceeded"), MySQL caps a statement at 65,535 placeholders (1390), and every pass failed on
+  that table. Statements in a piece run inside the same transaction where the old one did, so
+  semantics are unchanged. MySQL apply staging gets an `INDEX rc_key` on the key columns
+  (`stagingKeyIndex`, in the `CREATE TEMPORARY TABLE` since an `ALTER` would commit; skipped for
+  TEXT/BLOB keys): the delete-absent `NOT IN (SELECT … FROM stg)` was O(n²) without it (30k
+  changes: 94s → 2s). Tests drive 40k-key batches (and a 100k `drain_batch`) on a three-column key (`TestBigBatch*`).
+- **A failing group doesn't stop the pass (decision, 0.8.3).** `streamOnce` used to `break` on the
+  first component error, so one table's failure held up every component after it. Components are
+  FK-independent, so with both endpoints up (`endpointsUp`) the pass carries on and the error names
+  every failed group; a down endpoint still breaks at once (every group would fail). Backlog/lag
+  gauges (`publishBacklogs`) are published when `Stream` starts and after a failed pass (source
+  reachable), not only after a healthy one. `cutover` logs only a component whose phase changed.
 
 **Foreign keys on the target — dependency-ordered apply (decision):** since we apply coalesced,
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply

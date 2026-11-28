@@ -59,7 +59,7 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 	if _, err := tx.ExecContext(ctx, "DROP TEMPORARY TABLE IF EXISTS "+bq(stg)); err != nil {
 		return fmt.Errorf("mysql: apply: drop stale staging: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s) ENGINE=InnoDB", bq(stg), typeDDL)); err != nil {
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s (%s%s) ENGINE=InnoDB", bq(stg), typeDDL, stagingKeyIndex(tbl, cols))); err != nil {
 		return fmt.Errorf("mysql: apply: staging: %w", err)
 	}
 	if _, err := runLoad(ctx, tx, bq(stg), cols, reread, charset, s.localInfile); err != nil {
@@ -95,12 +95,15 @@ func (s *Sink) ApplyPass(ctx context.Context, t engine.TableRef, cols []string, 
 	for i, c := range keyCols {
 		keyNames[i] = bq(c.Name)
 	}
-	inPred, args := keyInPredicate(keyCols, dirtyKeys)
 	keyTuple := strings.Join(keyNames, ", ")
-	del := fmt.Sprintf("DELETE FROM %s WHERE (%s) AND (%s) NOT IN (SELECT %s FROM %s)",
-		qualify(t.Schema, t.Name), inPred, keyTuple, keyTuple, bq(stg))
-	if _, err := tx.ExecContext(ctx, del, args...); err != nil {
-		return fmt.Errorf("mysql: apply: delete-absent %s: %w", t, err)
+	// In pieces (engine.MaxKeysPerStatement), inside the one transaction.
+	for _, piece := range engine.Pieces(dirtyKeys, engine.MaxKeysPerStatement) {
+		inPred, args := keyInPredicate(keyCols, piece)
+		del := fmt.Sprintf("DELETE FROM %s WHERE (%s) AND (%s) NOT IN (SELECT %s FROM %s)",
+			qualify(t.Schema, t.Name), inPred, keyTuple, keyTuple, bq(stg))
+		if _, err := tx.ExecContext(ctx, del, args...); err != nil {
+			return fmt.Errorf("mysql: apply: delete-absent %s: %w", t, err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {

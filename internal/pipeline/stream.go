@@ -3,7 +3,9 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/rudimk/replicare/internal/apply"
@@ -41,6 +43,11 @@ func (s *Syncer) Stream(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+
+	// Publish the backlog and lag at once, so they show from the start of streaming
+	// rather than only after the first pass completes, which can take minutes on a
+	// large backlog (decision, 0.8.3).
+	s.noteBacklogs(s.publishBacklogs(ctx))
 
 	for {
 		select {
@@ -87,14 +94,34 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	var consumed int
 	drainStart := time.Now()
 	pool := s.applyPool()
+	var failedGroups []string
 	for _, comp := range s.Components {
 		n, err := apply.DrainComponentRetryingPool(ctx, pool, len(pool),
 			comp.Order, s.Target, s.DrainBatch, comp.HasCycle(), apply.DefaultRetryPolicy)
 		consumed += n
-		if err != nil {
+		if err == nil {
+			continue
+		}
+		if drainErr == nil {
 			drainErr = err
+		}
+		failedGroups = append(failedGroups, comp.Order[0].String())
+		// A database that is down fails every group, so the pass stops there, as before.
+		// With both up, the failure is this group's own (a value the target refuses, a
+		// statement the server cannot run): the other groups are independent of it
+		// (CLAUDE.md §8.1), so they carry on rather than wait behind it (decision, 0.8.3,
+		// from a production stall: one table's failure held up every table after it).
+		if ctx.Err() != nil || !s.endpointsUp(ctx) {
 			break
 		}
+	}
+	if len(failedGroups) > 1 {
+		shown := failedGroups
+		if len(shown) > 5 {
+			shown = shown[:5]
+		}
+		drainErr = fmt.Errorf("%d groups of tables failed this pass (from %s); the first: %w",
+			len(failedGroups), strings.Join(shown, ", "), drainErr)
 	}
 	// Apply-batch latency + throughput (only meaningful when a pass did work).
 	if drainErr == nil {
@@ -134,7 +161,14 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// failure and retry next pass. The needs_reseed flag, if set, persists and
 		// is picked up once the target recovers.
 		s.Tel.IncError(s.Name, "drain")
-		s.notePass(consumed, nil, drainErr)
+		// The backlog and lag are source-side, so they stay visible while passes fail
+		// (decision, 0.8.3: they were only published after a pass succeeded, so a sync
+		// whose passes all failed showed no lag at all).
+		var backlogs map[engine.TableRef]engine.DeltaBacklog
+		if s.sourceReachable(ctx) {
+			backlogs = s.publishBacklogs(ctx)
+		}
+		s.notePass(consumed, backlogs, drainErr)
 		s.reportDrainFailure(ctx, drainErr)
 		// Distinguish a source-side failure in the up gauges: a bounded ping tells
 		// whether the source is reachable (reportDrainFailure already handles the
@@ -157,21 +191,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// the escalating retention log once the backlog is actually approaching the cap
 	// (half or more) — logging it at proximity 0 every tick is just noise. Refresh
 	// the cursor so its age reflects liveness (not a stale cutover timestamp).
-	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
-	for _, t := range s.Replicable {
-		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
-		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
-		if err != nil {
-			continue
-		}
-		backlogs[t] = bl
-		comp := s.componentOf(t)
-		s.Tel.SetBacklog(s.Name, s.Target, t, comp, bl)
-		s.Tel.SetReplicationLag(s.Name, s.Target, t, comp, bl.OldestAge.Seconds())
-		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
-			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
-		}
-	}
+	backlogs := s.publishBacklogs(ctx)
 	if allCaughtUp(backlogs, s.Replicable) {
 		s.noteCaughtUp()
 	}
@@ -531,4 +551,39 @@ func (s *Syncer) purgeTargets(t engine.TableRef) []engine.TargetID {
 		}
 	}
 	return append(append([]engine.TargetID{}, ts...), s.Target)
+}
+
+// publishBacklogs reads every table's delta backlog for this target from the source and
+// publishes the backlog and lag gauges (and the escalating retention warning once a
+// backlog nears the cap). Source-side only, so it runs before the first pass and after
+// a failed one as well as after a healthy one. A table whose backlog can't be read is
+// left out of the result.
+func (s *Syncer) publishBacklogs(ctx context.Context) map[engine.TableRef]engine.DeltaBacklog {
+	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
+	for _, t := range s.Replicable {
+		if ctx.Err() != nil {
+			break
+		}
+		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
+		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
+		if err != nil {
+			continue
+		}
+		backlogs[t] = bl
+		comp := s.componentOf(t)
+		s.Tel.SetBacklog(s.Name, s.Target, t, comp, bl)
+		s.Tel.SetReplicationLag(s.Name, s.Target, t, comp, bl.OldestAge.Seconds())
+		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
+			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
+		}
+	}
+	return backlogs
+}
+
+// endpointsUp reports whether both the source and the target answer a bounded
+// health-check on the primary pair.
+func (s *Syncer) endpointsUp(ctx context.Context) bool {
+	hctx, cancel := context.WithTimeout(ctx, healthTimeout)
+	defer cancel()
+	return s.Source.HealthCheck(hctx) == nil && s.Sink.HealthCheck(hctx) == nil
 }
