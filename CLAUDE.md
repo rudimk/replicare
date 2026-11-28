@@ -265,6 +265,18 @@ correctness mechanism** — only a lag/observability signal.
   dead pair stops scheduling, running ones finish; (4) no client-side context deadline on queries on
   streaming connections (pgx closes the conn on expiry): PG size/estimate reads use
   `inBoundedRead` (`SET LOCAL statement_timeout 30s`); `reconnectIfDown` before the first pass.
+- **Skip empty queues; monitor rounds never cut short (decision, 0.8.5, from the same catch-up).**
+  Every pass purged all 820 tables one at a time (lookup, retention check, begin/set/delete/commit:
+  ~7 round trips each), and the drain and the monitor read every queue too: 3–4 min of each ~5 min
+  pass went on empty queues, mostly network. Optional `engine.ChangePresence` (PG + MySQL:
+  registry read + one flat `SELECT EXISTS(…), …` per 200 tables, never a deep UNION) says which
+  queues hold a row; `reseed.Enforce` skips empty tables, `drainComponents` skips groups whose
+  tables are all empty, `publishBacklogsFrom` reports zero for them. Equivalent by construction
+  (nothing to apply/purge, zero backlog, can't be over a cap); a check that fails → everything
+  runs. The monitor round has **no client deadline** (a 5-min one cut the first round short, the
+  partial backlog was taken as whole, and pgx closed the conn); a cut round returns an error and
+  `Telemetry.BacklogRound` samples the catch-up ETA once per **complete** round only;
+  catch-up ETA window 30 min (passes apply in lumps longer than 10).
 
 **Foreign keys on the target — dependency-ordered apply (decision):** since we apply coalesced,
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply
