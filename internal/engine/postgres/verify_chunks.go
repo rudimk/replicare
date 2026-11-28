@@ -341,20 +341,26 @@ func rowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []cap
 	if err := requireKey(t, key); err != nil {
 		return nil, err
 	}
-	if len(keys) == 0 {
-		return nil, nil
-	}
-	tuples := make([]string, len(keys))
-	for i, k := range keys {
-		vt, err := valueTuple(key, k)
+	var out []engine.RowHash
+	// In pieces (engine.MaxKeysPerStatement): the keys to look up again can be many.
+	for _, piece := range engine.Pieces(keys, engine.MaxKeysPerStatement) {
+		tuples := make([]string, len(piece))
+		for i, k := range piece {
+			vt, err := valueTuple(key, k)
+			if err != nil {
+				return nil, err
+			}
+			tuples[i] = vt
+		}
+		q := fmt.Sprintf(`SELECT %s, (%s)::text FROM %s WHERE (%s) IN (%s)`,
+			quotedKeyListAsText(key), rowHashExpr(cols), qualifyTable(t), quotedKeyList(key), strings.Join(tuples, ", "))
+		got, err := scanRowHashes(ctx, conn, t, q, len(key))
 		if err != nil {
 			return nil, err
 		}
-		tuples[i] = vt
+		out = append(out, got...)
 	}
-	q := fmt.Sprintf(`SELECT %s, (%s)::text FROM %s WHERE (%s) IN (%s)`,
-		quotedKeyListAsText(key), rowHashExpr(cols), qualifyTable(t), quotedKeyList(key), strings.Join(tuples, ", "))
-	return scanRowHashes(ctx, conn, t, q, len(key))
+	return out, nil
 }
 
 func scanRowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, q string, nKey int, args ...any) ([]engine.RowHash, error) {

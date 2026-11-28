@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -25,22 +26,34 @@ func (s *Source) RereadCurrent(ctx context.Context, t engine.TableRef, keys []en
 	}
 	cols := transportCols(tbl)
 	keyCols := captureColsFor(tbl)
-	pred, args := keyInPredicate(keyCols, keys)
-
-	q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", quotedCols(cols), qualify(t.Schema, t.Name), pred)
 	nScan := len(cols)
 	if s.cluster {
-		q, args = s.versionedRereadQuery(t, cols, keyCols, keys)
 		nScan = len(cols) + 4
 	}
 
+	bw := newRowWriter(w)
+	// In pieces: one statement over a whole drain batch would grow with drain_batch
+	// (MySQL caps a statement at 65,535 placeholders; engine.MaxKeysPerStatement).
+	for _, piece := range engine.Pieces(keys, engine.MaxKeysPerStatement) {
+		pred, args := keyInPredicate(keyCols, piece)
+		q := fmt.Sprintf("SELECT %s FROM %s WHERE %s", quotedCols(cols), qualify(t.Schema, t.Name), pred)
+		if s.cluster {
+			q, args = s.versionedRereadQuery(t, cols, keyCols, piece)
+		}
+		if err := s.rereadPiece(ctx, t, q, args, nScan, bw); err != nil {
+			return err
+		}
+	}
+	return bw.Flush()
+}
+
+// rereadPiece runs one re-read statement and writes its rows to bw.
+func (s *Source) rereadPiece(ctx context.Context, t engine.TableRef, q string, args []any, nScan int, bw *bufio.Writer) error {
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return fmt.Errorf("mysql: reread %s: %w", t, err)
 	}
 	defer func() { _ = rows.Close() }()
-
-	bw := newRowWriter(w)
 	raw := make([][]byte, nScan)
 	dest := make([]any, nScan)
 	for i := range raw {
@@ -55,10 +68,7 @@ func (s *Source) RereadCurrent(ctx context.Context, t engine.TableRef, keys []en
 		}
 		writeRow(bw, raw)
 	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	return bw.Flush()
+	return rows.Err()
 }
 
 // meshVersionCols are the four version columns a cluster re-read appends after the

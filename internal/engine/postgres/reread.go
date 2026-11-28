@@ -32,17 +32,25 @@ func (s *Source) RereadCurrent(ctx context.Context, t engine.TableRef, keys []en
 	if len(keyCols) == 0 {
 		return fmt.Errorf("postgres: reread: table %s has no usable key", t)
 	}
-	pred, err := keysetInPredicate(keyCols, keys)
-	if err != nil {
-		return err
-	}
-	if s.cluster {
-		return s.rereadVersioned(ctx, t, cols, keyCols, pred, w)
-	}
-	sql := fmt.Sprintf("COPY (SELECT %s FROM %s WHERE %s) TO STDOUT",
-		quotedColumnList(cols), qualifyTable(t), pred)
-	if _, err := s.conn.PgConn().CopyTo(ctx, w, sql); err != nil {
-		return fmt.Errorf("postgres: reread %s: %w", t, err)
+	// In pieces: one statement over a whole drain batch can be too big to plan
+	// (engine.MaxKeysPerStatement). Each piece's COPY appends its rows to w, so the
+	// stream is the same as one statement's.
+	for _, piece := range engine.Pieces(keys, engine.MaxKeysPerStatement) {
+		pred, err := keysetInPredicate(keyCols, piece)
+		if err != nil {
+			return err
+		}
+		if s.cluster {
+			if err := s.rereadVersioned(ctx, t, cols, keyCols, pred, w); err != nil {
+				return err
+			}
+			continue
+		}
+		sql := fmt.Sprintf("COPY (SELECT %s FROM %s WHERE %s) TO STDOUT",
+			quotedColumnList(cols), qualifyTable(t), pred)
+		if _, err := s.conn.PgConn().CopyTo(ctx, w, sql); err != nil {
+			return fmt.Errorf("postgres: reread %s: %w", t, err)
+		}
 	}
 	return nil
 }

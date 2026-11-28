@@ -257,22 +257,28 @@ func (v verifyDB) rangeRowHashes(ctx context.Context, t engine.TableRef, cols []
 }
 
 func (v verifyDB) rowHashes(ctx context.Context, t engine.TableRef, cols []string, keys []engine.KeyValues) ([]engine.RowHash, error) {
-	if len(keys) == 0 {
-		return nil, nil
-	}
 	tuple := "(" + placeholders(len(v.key)) + ")"
-	tuples := make([]string, len(keys))
-	args := make([]any, 0, len(keys)*len(v.key))
-	for i, k := range keys {
-		if len(k) != len(v.key) {
-			return nil, fmt.Errorf("mysql: verify %s: key %v has %d values, want %d", t, k, len(k), len(v.key))
+	var out []engine.RowHash
+	// In pieces (engine.MaxKeysPerStatement): the keys to look up again can be many.
+	for _, piece := range engine.Pieces(keys, engine.MaxKeysPerStatement) {
+		tuples := make([]string, len(piece))
+		args := make([]any, 0, len(piece)*len(v.key))
+		for i, k := range piece {
+			if len(k) != len(v.key) {
+				return nil, fmt.Errorf("mysql: verify %s: key %v has %d values, want %d", t, k, len(k), len(v.key))
+			}
+			tuples[i] = tuple
+			args = append(args, keyArgs(k)...)
 		}
-		tuples[i] = tuple
-		args = append(args, keyArgs(k)...)
+		q := fmt.Sprintf("SELECT %s%s, %s FROM %s WHERE (%s) IN (%s)",
+			timeHint(ctx), v.keyList(""), rowHashExpr(cols), qualify(t.Schema, t.Name), v.keyList(""), strings.Join(tuples, ", "))
+		got, err := v.scanRowHashes(ctx, t, q, args)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, got...)
 	}
-	q := fmt.Sprintf("SELECT %s%s, %s FROM %s WHERE (%s) IN (%s)",
-		timeHint(ctx), v.keyList(""), rowHashExpr(cols), qualify(t.Schema, t.Name), v.keyList(""), strings.Join(tuples, ", "))
-	return v.scanRowHashes(ctx, t, q, args)
+	return out, nil
 }
 
 func (v verifyDB) scanRowHashes(ctx context.Context, t engine.TableRef, q string, args []any) ([]engine.RowHash, error) {

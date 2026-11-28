@@ -119,3 +119,37 @@ func tempColumnDDL(tbl engine.Table, cols []string) (string, error) {
 	}
 	return strings.Join(parts, ", "), nil
 }
+
+// stagingKeyIndex returns an index clause on the table's key columns for an apply
+// staging table (", INDEX `rc_key` (...)"), or "" when one cannot be built (a key
+// column missing from the staging, or a TEXT/BLOB-style column, which MySQL can only
+// index with a prefix length). The apply deletes target rows whose key is NOT IN the
+// staging; without an index MySQL checks each candidate row against the whole staging,
+// so the delete grows with the square of the batch (30k changes took 94s). With it,
+// each check is one index look-up. It is part of the CREATE TEMPORARY TABLE, since an
+// ALTER TABLE would commit the open transaction.
+func stagingKeyIndex(tbl engine.Table, cols []string) string {
+	key := replicationKey(tbl)
+	if key == nil || len(key.Columns) == 0 {
+		return ""
+	}
+	inStaging := make(map[string]bool, len(cols))
+	for _, c := range cols {
+		inStaging[c] = true
+	}
+	types := make(map[string]string, len(tbl.Columns))
+	for _, c := range tbl.Columns {
+		types[c.Name] = strings.ToLower(c.DataType)
+	}
+	names := make([]string, len(key.Columns))
+	for i, name := range key.Columns {
+		t := types[name]
+		if !inStaging[name] || t == "" ||
+			strings.Contains(t, "text") || strings.Contains(t, "blob") ||
+			strings.Contains(t, "json") || strings.Contains(t, "geometry") {
+			return ""
+		}
+		names[i] = bq(name)
+	}
+	return ", INDEX `rc_key` (" + strings.Join(names, ", ") + ")"
+}

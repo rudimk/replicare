@@ -167,22 +167,24 @@ func databaseSize(ctx context.Context, db *sql.DB) (int64, error) {
 // by (table_schema, table_name) so a table absent at this endpoint contributes
 // nothing. An empty list returns 0.
 func replicatedSize(ctx context.Context, db *sql.DB, tables []engine.TableRef) (int64, error) {
-	if len(tables) == 0 {
-		return 0, nil
-	}
-	pairs := make([]string, len(tables))
-	args := make([]any, 0, len(tables)*2)
-	for i, t := range tables {
-		pairs[i] = "(?,?)"
-		args = append(args, t.Schema, t.Name)
-	}
-	q := fmt.Sprintf(`SELECT COALESCE(SUM(data_length + index_length), 0)
+	var total int64
+	// In pieces (engine.MaxKeysPerStatement): two placeholders per table.
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		pairs := make([]string, len(piece))
+		args := make([]any, 0, len(piece)*2)
+		for i, t := range piece {
+			pairs[i] = "(?,?)"
+			args = append(args, t.Schema, t.Name)
+		}
+		q := fmt.Sprintf(`SELECT COALESCE(SUM(data_length + index_length), 0)
 FROM information_schema.tables WHERE (table_schema, table_name) IN (%s)`, strings.Join(pairs, ", "))
-	var b sql.NullInt64
-	if err := db.QueryRowContext(ctx, q, args...).Scan(&b); err != nil {
-		return 0, fmt.Errorf("mysql: replicated size: %w", err)
+		var b sql.NullInt64
+		if err := db.QueryRowContext(ctx, q, args...).Scan(&b); err != nil {
+			return 0, fmt.Errorf("mysql: replicated size: %w", err)
+		}
+		total += b.Int64
 	}
-	return b.Int64, nil
+	return total, nil
 }
 
 // serverVersion queries the connected server's version, rejects MariaDB (out of

@@ -93,16 +93,20 @@ func (s *Source) ConfirmConsumed(ctx context.Context, t engine.TableRef, target 
 		return fmt.Errorf("mysql: confirm consumed: table %s is not captured", t)
 	}
 
-	placeholders := make([]string, len(ids))
-	args := make([]any, 0, 1+len(ids))
-	for i, id := range ids {
-		placeholders[i] = "(?, ?)"
-		args = append(args, string(target), int64(id))
-	}
-	q := fmt.Sprintf("INSERT INTO %s (target, delta_id) VALUES %s ON DUPLICATE KEY UPDATE delta_id = delta_id",
-		captureRef(trackTableName(relID)), strings.Join(placeholders, ", "))
-	if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
-		return fmt.Errorf("mysql: confirm consumed for %s: %w", t, err)
+	// In pieces (engine.MaxKeysPerStatement): two placeholders per id, and MySQL caps a
+	// statement at 65,535.
+	for _, piece := range engine.Pieces(ids, engine.MaxKeysPerStatement) {
+		placeholders := make([]string, len(piece))
+		args := make([]any, 0, 2*len(piece))
+		for i, id := range piece {
+			placeholders[i] = "(?, ?)"
+			args = append(args, string(target), int64(id))
+		}
+		q := fmt.Sprintf("INSERT INTO %s (target, delta_id) VALUES %s ON DUPLICATE KEY UPDATE delta_id = delta_id",
+			captureRef(trackTableName(relID)), strings.Join(placeholders, ", "))
+		if _, err := s.db.ExecContext(ctx, q, args...); err != nil {
+			return fmt.Errorf("mysql: confirm consumed for %s: %w", t, err)
+		}
 	}
 	return nil
 }

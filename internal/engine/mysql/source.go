@@ -95,32 +95,13 @@ func (s *Source) EstimateRows(ctx context.Context, tables []engine.TableRef) (ma
 		return nil, errNotConnected
 	}
 	out := make(map[engine.TableRef]int64, len(tables))
-	if len(tables) == 0 {
-		return out, nil
-	}
-	pairs := make([]string, len(tables))
-	args := make([]any, 0, len(tables)*2)
-	for i, t := range tables {
-		pairs[i] = "(?, ?)"
-		args = append(args, t.Schema, t.Name)
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(TABLE_ROWS, 0)
-FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (`+strings.Join(pairs, ", ")+`)`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("mysql: estimate rows: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var schema, name string
-		var n int64
-		if err := rows.Scan(&schema, &name, &n); err != nil {
-			return nil, fmt.Errorf("mysql: estimate rows: %w", err)
-		}
-		if n > 0 {
-			out[engine.TableRef{Schema: schema, Name: name}] = n
+	// In pieces (engine.MaxKeysPerStatement): two placeholders per table.
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		if err := s.tableStatPiece(ctx, "COALESCE(TABLE_ROWS, 0)", "estimate rows", piece, out); err != nil {
+			return nil, err
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 var _ engine.RowEstimator = (*Source)(nil)
@@ -132,32 +113,13 @@ func (s *Source) EstimateTableBytes(ctx context.Context, tables []engine.TableRe
 		return nil, errNotConnected
 	}
 	out := make(map[engine.TableRef]int64, len(tables))
-	if len(tables) == 0 {
-		return out, nil
-	}
-	pairs := make([]string, len(tables))
-	args := make([]any, 0, len(tables)*2)
-	for i, t := range tables {
-		pairs[i] = "(?, ?)"
-		args = append(args, t.Schema, t.Name)
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT TABLE_SCHEMA, TABLE_NAME, COALESCE(DATA_LENGTH, 0)
-FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (`+strings.Join(pairs, ", ")+`)`, args...)
-	if err != nil {
-		return nil, fmt.Errorf("mysql: estimate table bytes: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var schema, name string
-		var n int64
-		if err := rows.Scan(&schema, &name, &n); err != nil {
-			return nil, fmt.Errorf("mysql: estimate table bytes: %w", err)
-		}
-		if n > 0 {
-			out[engine.TableRef{Schema: schema, Name: name}] = n
+	// In pieces (engine.MaxKeysPerStatement): two placeholders per table.
+	for _, piece := range engine.Pieces(tables, engine.MaxKeysPerStatement) {
+		if err := s.tableStatPiece(ctx, "COALESCE(DATA_LENGTH, 0)", "estimate table bytes", piece, out); err != nil {
+			return nil, err
 		}
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 var _ engine.TableSizeEstimator = (*Source)(nil)
@@ -186,3 +148,31 @@ func (s *Source) Introspect(ctx context.Context, sel engine.Selection) (*engine.
 // PlanChunks is in chunk.go, CopyChunk in copy.go (MM4a).
 // RereadCurrent is in reread.go (MM5a).
 // Purge/DeltaBacklog are in purge.go (MM5c).
+
+// tableStatPiece reads one information_schema.TABLES column (an expression such as
+// COALESCE(TABLE_ROWS, 0)) for a piece of tables into out, keeping positive values.
+func (s *Source) tableStatPiece(ctx context.Context, expr, what string, tables []engine.TableRef, out map[engine.TableRef]int64) error {
+	pairs := make([]string, len(tables))
+	args := make([]any, 0, len(tables)*2)
+	for i, t := range tables {
+		pairs[i] = "(?, ?)"
+		args = append(args, t.Schema, t.Name)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT TABLE_SCHEMA, TABLE_NAME, `+expr+`
+FROM information_schema.TABLES WHERE (TABLE_SCHEMA, TABLE_NAME) IN (`+strings.Join(pairs, ", ")+`)`, args...)
+	if err != nil {
+		return fmt.Errorf("mysql: %s: %w", what, err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var schema, name string
+		var n int64
+		if err := rows.Scan(&schema, &name, &n); err != nil {
+			return fmt.Errorf("mysql: %s: %w", what, err)
+		}
+		if n > 0 {
+			out[engine.TableRef{Schema: schema, Name: name}] = n
+		}
+	}
+	return rows.Err()
+}
