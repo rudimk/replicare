@@ -4,6 +4,22 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.6]
+
+- **Fixed: the backlog of a long queue could read far too low, then jump.** For a queue of 100,000
+  changes or more, Postgres estimates the backlog as the queue's rows less the ones already applied.
+  The applied count included records that versions before 0.7.0 left behind for changes long gone,
+  so the estimate came out too low, and as the background clean-up removed those records it jumped
+  up, which made the catch-up ETA read "not catching up" for a while after a start. It now counts
+  only applied changes that are still in the queue.
+- **Fixed: `replicare status` and `replicare verify` failed for most tables with `conn closed`.**
+  Both read every table over one connection to each database, with a time limit on each read. On
+  Postgres the driver gives up on a read past its limit by closing the connection, so one slow table
+  (an exact count of a very large table on a busy disk, say) made every table after it fail with
+  `failed to deallocate cached statement(s): conn closed`. Now the Postgres server enforces the limit
+  itself and cancels just that read, so the connection stays open, and if a connection is lost
+  anyway it is opened again before the next table. Only the slow table reports an error.
+
 ## [0.8.5]
 
 - **Streaming passes no longer spend minutes on tables with nothing queued.** At the end of every

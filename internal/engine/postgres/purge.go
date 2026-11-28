@@ -335,7 +335,7 @@ const exactBacklogRows = 100_000
 // at the end of every pass, so it is normally the very first row). The row count is exact
 // for a short queue; for a long one it is the queue's live-row count from Postgres's
 // statistics (pg_stat_get_live_tuples, updated as rows are written) less the changes this
-// target has applied that are not purged yet. Bytes is prorated from the delta table's
+// target has applied that are still queued (not purged yet). Bytes is prorated from the delta table's
 // on-disk size. Every query here is old-PG-safe.
 func (s *Source) deltaBacklogByRel(ctx context.Context, relID int, target engine.TargetID) (engine.DeltaBacklog, error) {
 	delta := qualifiedCapture(deltaTableName(relID))
@@ -366,8 +366,18 @@ func (s *Source) deltaBacklogByRel(ctx context.Context, relID int, target engine
 	if err != nil {
 		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): oldest: %w", relID, err)
 	}
+	// Applied but not yet purged: only track rows whose change is still queued. Track rows
+	// left by versions before 0.7.0 (their change long purged) must not come off the
+	// estimate: counted, they made it far too low, and as the background sweep removed
+	// them it jumped up, so the catch-up ETA read "not catching up" (production, 0.8.5).
+	// The range starts at the oldest queued change (the key index), and each row is one
+	// probe of the queue's key, so this reads only the track rows of the live queue.
 	var applied int64
-	if err := s.conn.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE target = $1`, track),
+	if err := s.conn.QueryRow(ctx, fmt.Sprintf(`
+		SELECT count(*) FROM %[2]s tr
+		WHERE tr.target = $1
+		  AND tr.delta_id >= (SELECT min(delta_id) FROM %[1]s)
+		  AND EXISTS (SELECT 1 FROM %[1]s d WHERE d.delta_id = tr.delta_id)`, delta, track),
 		string(target)).Scan(&applied); err != nil {
 		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): applied: %w", relID, err)
 	}

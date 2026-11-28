@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/rudimk/replicare/internal/engine"
 )
 
@@ -28,7 +26,7 @@ func (s *Source) CountRows(ctx context.Context, t engine.TableRef) (int64, error
 	if s.conn == nil {
 		return 0, errNotConnected("source")
 	}
-	return countRows(ctx, s.conn, t)
+	return limited(ctx, s.conn, func(q pgQuerier) (int64, error) { return countRows(ctx, q, t) })
 }
 
 // Fingerprint returns the table's count plus an order-independent content hash.
@@ -36,7 +34,7 @@ func (s *Source) Fingerprint(ctx context.Context, t engine.TableRef, cols []stri
 	if s.conn == nil {
 		return engine.Fingerprint{}, errNotConnected("source")
 	}
-	return fingerprint(ctx, s.conn, t, cols)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.Fingerprint, error) { return fingerprint(ctx, q, t, cols) })
 }
 
 // CountRows returns the live row count of a target table.
@@ -44,7 +42,7 @@ func (s *Sink) CountRows(ctx context.Context, t engine.TableRef) (int64, error) 
 	if s.conn == nil {
 		return 0, errNotConnected("sink")
 	}
-	return countRows(ctx, s.conn, t)
+	return limited(ctx, s.conn, func(q pgQuerier) (int64, error) { return countRows(ctx, q, t) })
 }
 
 // Fingerprint returns the target table's count plus an order-independent content hash.
@@ -52,10 +50,10 @@ func (s *Sink) Fingerprint(ctx context.Context, t engine.TableRef, cols []string
 	if s.conn == nil {
 		return engine.Fingerprint{}, errNotConnected("sink")
 	}
-	return fingerprint(ctx, s.conn, t, cols)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.Fingerprint, error) { return fingerprint(ctx, q, t, cols) })
 }
 
-func countRows(ctx context.Context, conn *pgx.Conn, t engine.TableRef) (int64, error) {
+func countRows(ctx context.Context, conn pgQuerier, t engine.TableRef) (int64, error) {
 	var n int64
 	if err := conn.QueryRow(ctx, "SELECT count(*)::bigint FROM "+qualifyTable(t)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("postgres: count %s: %w", t, err)
@@ -72,7 +70,7 @@ func countRows(ctx context.Context, conn *pgx.Conn, t engine.TableRef) (int64, e
 // projection, so it matches between a source and a target whose physical column
 // order differs (faithful apply is name-matched, §4.2). The md5→bigint idiom
 // ('x'||hex)::bit(64)::bigint is old-Postgres-safe (CLAUDE.md §1.6).
-func fingerprint(ctx context.Context, conn *pgx.Conn, t engine.TableRef, cols []string) (engine.Fingerprint, error) {
+func fingerprint(ctx context.Context, conn pgQuerier, t engine.TableRef, cols []string) (engine.Fingerprint, error) {
 	if len(cols) == 0 {
 		// No projectable columns: fall back to a count-only fingerprint.
 		n, err := countRows(ctx, conn, t)

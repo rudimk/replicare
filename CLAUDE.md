@@ -277,6 +277,16 @@ correctness mechanism** — only a lag/observability signal.
   partial backlog was taken as whole, and pgx closed the conn); a cut round returns an error and
   `Telemetry.BacklogRound` samples the catch-up ETA once per **complete** round only;
   catch-up ETA window 30 min (passes apply in lumps longer than 10).
+- **Operator reads survive a slow table (decision, 0.8.6, from production).** `status`/`verify`
+  read every table over one connection per database with a per-read context deadline; on PG an
+  expired deadline makes pgx close the conn, so one slow table (a 32 GB `count(*)`) failed every
+  later one with `conn closed`. PG verify reads (`CountRows`, `Fingerprint`, every
+  `engine.ChunkVerifier` method) run in `withQueryLimit`: a rolled-back tx with `SET LOCAL
+  statement_timeout` = deadline − max(2s, 10%), so the **server** cancels (57014) and the conn
+  lives; no deadline → runs directly. And `live` revives an endpoint after a failed read
+  (`Enricher.revive`: HealthCheck, else Close + Connect) before the next table; one that can't be
+  reopened stops only its own reads. The long-queue backlog estimate counts only track rows whose
+  delta is still queued (leftovers from before 0.7.0 made it read low, then jump).
 
 **Foreign keys on the target — dependency-ordered apply (decision):** since we apply coalesced,
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply
