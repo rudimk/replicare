@@ -116,7 +116,9 @@ func (s *Sink) DatabaseSize(ctx context.Context) (int64, error) {
 		return 0, errNotConnected("sink")
 	}
 	var b int64
-	if err := s.conn.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&b); err != nil {
+	if err := inBoundedRead(ctx, s.conn, func(q pgx.Tx) error {
+		return q.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&b)
+	}); err != nil {
 		return 0, fmt.Errorf("postgres: database size: %w", err)
 	}
 	return b, nil

@@ -80,7 +80,9 @@ func (s *Source) DatabaseSize(ctx context.Context) (int64, error) {
 		return 0, errNotConnected("source")
 	}
 	var b int64
-	if err := s.conn.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&b); err != nil {
+	if err := inBoundedRead(ctx, s.conn, func(q pgx.Tx) error {
+		return q.QueryRow(ctx, "SELECT pg_database_size(current_database())").Scan(&b)
+	}); err != nil {
 		return 0, fmt.Errorf("postgres: database size: %w", err)
 	}
 	return b, nil
@@ -109,7 +111,9 @@ func replicatedSize(ctx context.Context, conn *pgx.Conn, tables []engine.TableRe
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE (n.nspname, c.relname) IN (%s)`, pairs)
 		var b int64
-		if err := conn.QueryRow(ctx, q, args...).Scan(&b); err != nil {
+		if err := inBoundedRead(ctx, conn, func(tx pgx.Tx) error {
+			return tx.QueryRow(ctx, q, args...).Scan(&b)
+		}); err != nil {
 			return 0, fmt.Errorf("postgres: replicated size: %w", err)
 		}
 		total += b
@@ -155,22 +159,24 @@ func (s *Source) estimateRowsPiece(ctx context.Context, tables []engine.TableRef
             ELSE c.reltuples END::bigint
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE (n.nspname, c.relname) IN (%s)`, pairs)
-	rows, err := s.conn.Query(ctx, q, args...)
-	if err != nil {
-		return fmt.Errorf("postgres: estimate rows: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var schema, name string
-		var n int64
-		if err := rows.Scan(&schema, &name, &n); err != nil {
+	return inBoundedRead(ctx, s.conn, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
 			return fmt.Errorf("postgres: estimate rows: %w", err)
 		}
-		if n > 0 {
-			out[engine.TableRef{Schema: schema, Name: name}] = n
+		defer rows.Close()
+		for rows.Next() {
+			var schema, name string
+			var n int64
+			if err := rows.Scan(&schema, &name, &n); err != nil {
+				return fmt.Errorf("postgres: estimate rows: %w", err)
+			}
+			if n > 0 {
+				out[engine.TableRef{Schema: schema, Name: name}] = n
+			}
 		}
-	}
-	return rows.Err()
+		return rows.Err()
+	})
 }
 
 var _ engine.RowEstimator = (*Source)(nil)
@@ -201,22 +207,24 @@ func (s *Source) estimateBytesPiece(ctx context.Context, tables []engine.TableRe
             OR r.oid IN (SELECT i.inhrelid FROM pg_inherits i WHERE i.inhparent = c.oid))::bigint
 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE (n.nspname, c.relname) IN (%s)`, pairs)
-	rows, err := s.conn.Query(ctx, q, args...)
-	if err != nil {
-		return fmt.Errorf("postgres: estimate table bytes: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var schema, name string
-		var n int64
-		if err := rows.Scan(&schema, &name, &n); err != nil {
+	return inBoundedRead(ctx, s.conn, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, q, args...)
+		if err != nil {
 			return fmt.Errorf("postgres: estimate table bytes: %w", err)
 		}
-		if n > 0 {
-			out[engine.TableRef{Schema: schema, Name: name}] = n
+		defer rows.Close()
+		for rows.Next() {
+			var schema, name string
+			var n int64
+			if err := rows.Scan(&schema, &name, &n); err != nil {
+				return fmt.Errorf("postgres: estimate table bytes: %w", err)
+			}
+			if n > 0 {
+				out[engine.TableRef{Schema: schema, Name: name}] = n
+			}
 		}
-	}
-	return rows.Err()
+		return rows.Err()
+	})
 }
 
 var _ engine.TableSizeEstimator = (*Source)(nil)

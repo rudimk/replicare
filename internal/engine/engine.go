@@ -644,6 +644,10 @@ type DeltaBacklog struct {
 	Bytes      int64
 	OldestAge  time.Duration
 	HasBacklog bool
+	// Estimated marks Rows (and Bytes) as an estimate rather than a count: a long queue
+	// is not counted row by row on every read (CLAUDE.md §3.4 "cheap backlog").
+	// OldestAge and HasBacklog are always exact.
+	Estimated bool
 }
 
 // CopySelectionHolder is implemented by a Source that filters its copy reads by the

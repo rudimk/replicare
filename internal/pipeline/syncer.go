@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rudimk/replicare/internal/copy"
@@ -131,7 +132,8 @@ type Syncer struct {
 
 	// compIdx maps each replicable table to its FK-component id (the component's
 	// first sorted member), for the per-component metric label. Built lazily.
-	compIdx map[engine.TableRef]string
+	compIdx  map[engine.TableRef]string
+	compOnce sync.Once
 	// lastDBSize throttles the DB-size metric queries (they scan catalogs, so we
 	// emit them on an interval, not every drain pass).
 	lastDBSize time.Time
@@ -153,6 +155,9 @@ type Syncer struct {
 
 	// progress accumulates streaming passes for the minute-by-minute progress line.
 	progress streamProgress
+	// monitorOn is set while the streaming monitor runs (startMonitor): it then reads the
+	// backlog, lag and sizes on connections of its own, and the passes don't.
+	monitorOn atomic.Bool
 }
 
 // Bringup takes a cold sync to streaming (CLAUDE.md §4): it installs capture
@@ -240,9 +245,9 @@ func (s *Syncer) publishCopyTargets(ctx context.Context) {
 	if len(todo) == 0 {
 		return
 	}
-	qctx, cancel := context.WithTimeout(ctx, healthTimeout)
-	defer cancel()
-	rows, err := est.EstimateRows(qctx, todo)
+	// No deadline on the context: these read on the streaming connection, and a query
+	// given up client-side closes it. The engine bounds them on the server.
+	rows, err := est.EstimateRows(ctx, todo)
 	if err != nil {
 		return
 	}
@@ -254,9 +259,7 @@ func (s *Syncer) publishCopyTargets(ctx context.Context) {
 	// Table sizes weight the copy ETA, so a table of large rows (message bodies) counts
 	// for its size, not its row count. Best-effort: without them the ETA counts rows.
 	if sizer, ok := s.Source.(engine.TableSizeEstimator); ok {
-		bctx, bcancel := context.WithTimeout(ctx, healthTimeout)
-		defer bcancel()
-		if sizes, err := sizer.EstimateTableBytes(bctx, todo); err == nil {
+		if sizes, err := sizer.EstimateTableBytes(ctx, todo); err == nil {
 			for _, t := range todo {
 				if b, ok := sizes[t]; ok && rows[t] > 0 {
 					s.Tel.SetCopyTableBytes(s.Name, t, b)
