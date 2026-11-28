@@ -4,7 +4,7 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.5]
 
 - **Streaming passes no longer spend minutes on tables with nothing queued.** At the end of every
   pass, `replicare` purged each table's change queue one table at a time, a few round trips to the
