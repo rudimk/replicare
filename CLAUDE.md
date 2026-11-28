@@ -246,10 +246,25 @@ correctness mechanism** — only a lag/observability signal.
   changes: 94s → 2s). Tests drive 40k-key batches (and a 100k `drain_batch`) on a three-column key (`TestBigBatch*`).
 - **A failing group doesn't stop the pass (decision, 0.8.3).** `streamOnce` used to `break` on the
   first component error, so one table's failure held up every component after it. Components are
-  FK-independent, so with both endpoints up (`endpointsUp`) the pass carries on and the error names
+  FK-independent, so with both endpoints up (`connsUp` on its own pairs) the pass carries on and the error names
   every failed group; a down endpoint still breaks at once (every group would fail). Backlog/lag
   gauges (`publishBacklogs`) are published when `Stream` starts and after a failed pass (source
   reachable), not only after a healthy one, and so is each applied table's last-applied stamp. `cutover` logs only a component whose phase changed.
+- **Streaming monitor, cheap backlog, groups side by side (decision, 0.8.4, from a production
+  catch-up).** Each pass read every delta table in full twice (`deltaBacklogByRel` in retention's
+  `overCapTargets` and again for the gauges): 918k changes on one table, every pass, on a saturated
+  disk; and the gauges/progress waited for a pass to end. Now (1) PG `deltaBacklogByRel` counts
+  exactly only below `exactBacklogRows` (100k, by `pg_stat_get_live_tuples`); above, oldest = first
+  untracked delta by `delta_id` (index walk), rows = live − this target's track rows,
+  `DeltaBacklog.Estimated`; (2) `startMonitor` (when `OpenSource` is set) runs on its own source +
+  sink every max(30s, 2× last round): `publishBacklogsFrom`, caught-up, `measureDBSizesOn`,
+  `RefreshETAs`, and `logStreamProgress` every minute (applied counted live via
+  `apply.WithAppliedHook`, "one running for N"); passes skip that work while `monitorOn`;
+  (3) `drainComponents` runs components side by side over the apply pool (one pair each, a
+  multi-table component also takes free pairs); pool of 1 = old sequential order; a failure with a
+  dead pair stops scheduling, running ones finish; (4) no client-side context deadline on queries on
+  streaming connections (pgx closes the conn on expiry): PG size/estimate reads use
+  `inBoundedRead` (`SET LOCAL statement_timeout 30s`); `reconnectIfDown` before the first pass.
 
 **Foreign keys on the target — dependency-ordered apply (decision):** since we apply coalesced,
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply

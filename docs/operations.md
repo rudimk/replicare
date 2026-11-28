@@ -647,13 +647,33 @@ Each sync has its own `tuning:` block, with these knobs:
 |---|---|---|
 | `drain_interval` | Time between streaming drain passes. A longer interval coalesces more changes per PK(less source load), but raises lag. | 1s |
 | `drain_batch` | The most dirty deltas applied per table, per pass. Together with `drain_interval`, this sets the per-table streaming ceiling. | 1000 |
-| `apply_concurrency` | How many of a component's tables apply concurrently in each pass. `1` is sequential; anything higher spreads the work across the copy-worker pool. Raise it when several tables backlog at once. | 1 |
+| `apply_concurrency` | How many connection pairs apply changes at once in each pass. `1` applies one group of linked tables after another; anything higher runs independent groups side by side, and lets a group of several tables apply them in parallel, across the copy-worker pool. Raise it when several tables backlog at once. | 1 |
 | `retention.max_age` | Cap on the age of the oldest unconsumed delta before a lagging target is reseeded. | 24h |
 | `retention.max_bytes` | Cap on the delta table's on-disk size before a reseed. | off |
 | `pool.max_source_connections` / `pool.max_target_connections` | Connection caps; the copy worker pool is sized from these. | 4 each |
 
 The defaults favour low source pressure. For more throughput, raise the pool caps and shorten
 `drain_interval`; to reduce re-read load under heavy churn, lengthen `drain_interval` instead.
+
+### Reading the backlog and lag
+
+The backlog, the replication lag, the catch-up ETA and the database sizes come from a monitor that
+runs beside streaming, on a source and a target connection of its own. It reads them every 30
+seconds, or less often on a large schema(it waits twice as long as its last reading took), so they
+show from the moment streaming starts and stay up to date during a long pass, or while passes fail.
+Its two extra connections come on top of `pool.max_source_connections` and
+`pool.max_target_connections`.
+
+The oldest waiting change, which the lag shows, is always exact. The number of waiting changes is
+counted exactly for a table with fewer than 100,000 queued; for a longer queue it comes from
+Postgres's own running count of the queue's rows, so reading it never means reading the whole
+queue. The progress line in the logs says "about" when it's an estimate:
+
+```text
+streaming: applied 41,800 rows in the last 1m0s (0 passes finished, one running for 3m0s); backlog about 1,612,077 rows in 214 tables, oldest waiting 13h20m
+```
+
+It's written every minute, whether or not a pass finishes in that minute.
 
 ### A single high-volume table that lags
 
@@ -685,10 +705,12 @@ shrinking, so the table is catching up.
 ### Several tables backlogged at once
 
 The `drain_batch` / `drain_interval` levers above are per-table ceilings on a single-threaded
-drain; by default, a pass applies each component's tables one at a time. When several tables are
-backlogged together, raise `apply_concurrency` instead. It applies a component's tables
-concurrently, across a pool built from the copy workers(which sit idle during streaming), so the
-tables no longer queue behind each other.
+drain; by default, a pass applies one group of linked tables after another, one table at a time.
+When several tables are backlogged together, raise `apply_concurrency` instead. Groups don't
+depend on each other, so with more than one connection pair they apply side by side, each on a
+pair of its own; a group of several tables also takes the pairs free when it starts and applies
+its tables in parallel. The pool is built from the copy workers(which sit idle during streaming),
+so the tables no longer queue behind each other.
 
 It's bounded by the connection caps. The pool has one primary pair plus up to
 `apply_concurrency-1` worker pairs, and the worker pairs come from `pool.max_source_connections` /

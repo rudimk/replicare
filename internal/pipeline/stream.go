@@ -3,9 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/rudimk/replicare/internal/apply"
@@ -44,10 +42,17 @@ func (s *Syncer) Stream(ctx context.Context) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Publish the backlog and lag at once, so they show from the start of streaming
-	// rather than only after the first pass completes, which can take minutes on a
-	// large backlog (decision, 0.8.3).
-	s.noteBacklogs(s.publishBacklogs(ctx))
+	// A connection can be dropped while bring-up finishes (in production one was closed
+	// between the capture install and the first pass): check both ends first, so the
+	// first pass doesn't fail on it.
+	s.reconnectIfDown(ctx)
+	// The backlog, lag, sizes and the per-minute progress line come from a monitor on
+	// connections of its own, so they show from the start and never wait for a pass
+	// (decision, 0.8.4). Without one (no OpenSource), each pass publishes them itself.
+	defer s.startMonitor(ctx)()
+	if !s.monitorOn.Load() {
+		s.noteBacklogs(s.publishBacklogs(ctx))
+	}
 
 	for {
 		select {
@@ -89,40 +94,14 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// Liveness: mark the heartbeat as work completes inside the pass, not only at its end,
 	// so a long but moving pass never reads as stuck (apply/progress.go).
 	ctx = apply.WithProgress(ctx, s.Heartbeat)
+	// Rows applied are counted as each table commits, so the progress line written during
+	// a long pass reports them.
+	ctx = apply.WithAppliedHook(ctx, func(_ engine.TableRef, n int) { s.addApplied(n) })
+	s.passBegins()
+	defer s.passEnds()
 
-	var drainErr error
-	var consumed int
 	drainStart := time.Now()
-	pool := s.applyPool()
-	var failedGroups []string
-	for _, comp := range s.Components {
-		n, err := apply.DrainComponentRetryingPool(ctx, pool, len(pool),
-			comp.Order, s.Target, s.DrainBatch, comp.HasCycle(), apply.DefaultRetryPolicy)
-		consumed += n
-		if err == nil {
-			continue
-		}
-		if drainErr == nil {
-			drainErr = err
-		}
-		failedGroups = append(failedGroups, comp.Order[0].String())
-		// A database that is down fails every group, so the pass stops there, as before.
-		// With both up, the failure is this group's own (a value the target refuses, a
-		// statement the server cannot run): the other groups are independent of it
-		// (CLAUDE.md §8.1), so they carry on rather than wait behind it (decision, 0.8.3,
-		// from a production stall: one table's failure held up every table after it).
-		if ctx.Err() != nil || !s.endpointsUp(ctx) {
-			break
-		}
-	}
-	if len(failedGroups) > 1 {
-		shown := failedGroups
-		if len(shown) > 5 {
-			shown = shown[:5]
-		}
-		drainErr = fmt.Errorf("%d groups of tables failed this pass (from %s); the first: %w",
-			len(failedGroups), strings.Join(shown, ", "), drainErr)
-	}
+	consumed, drainErr := s.drainComponents(ctx, s.applyPool())
 	// Apply-batch latency + throughput (only meaningful when a pass did work).
 	if drainErr == nil {
 		elapsed := time.Since(drainStart)
@@ -165,7 +144,7 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 		// (decision, 0.8.3: they were only published after a pass succeeded, so a sync
 		// whose passes all failed showed no lag at all).
 		var backlogs map[engine.TableRef]engine.DeltaBacklog
-		if s.sourceReachable(ctx) {
+		if !s.monitorOn.Load() && s.sourceReachable(ctx) {
 			backlogs = s.publishBacklogs(ctx)
 		}
 		s.notePass(consumed, backlogs, drainErr)
@@ -193,14 +172,23 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 	// the escalating retention log once the backlog is actually approaching the cap
 	// (half or more) — logging it at proximity 0 every tick is just noise. Refresh
 	// the cursor so its age reflects liveness (not a stale cutover timestamp).
-	backlogs := s.publishBacklogs(ctx)
-	if allCaughtUp(backlogs, s.Replicable) {
-		s.noteCaughtUp()
+	// The monitor, when it runs, reads the backlog on its own connection (and marks the
+	// target caught up); the pass only does when there is none.
+	var backlogs map[engine.TableRef]engine.DeltaBacklog
+	if !s.monitorOn.Load() {
+		backlogs = s.publishBacklogs(ctx)
+		if allCaughtUp(backlogs, s.Replicable) {
+			s.noteCaughtUp()
+		}
 	}
 	s.notePass(consumed, backlogs, nil)
 	s.Tel.SetTargetUp(s.Name, s.Target, true)
 	s.Tel.SetSourceUp(s.Name, true) // the drain succeeded, so the source answered
-	s.refreshDBSizes(ctx)
+	// The monitor measures both ends when it can open a target connection of its own;
+	// otherwise (a cluster edge) the pass still does.
+	if !s.monitorOn.Load() || s.OpenSink == nil {
+		s.refreshDBSizes(ctx)
+	}
 	s.touchCursors(ctx)
 	// Stamp the last-data-movement signal for any table this pass actually applied rows
 	// to (distinct from touchCursors' liveness bump). Reads the pass accumulator.
@@ -415,7 +403,8 @@ var dbSizeInterval = 30 * time.Second // a var so tests can shorten it
 // componentOf returns the FK-component id of a table (the component's first sorted
 // member, per CLAUDE.md §8.1), for the per-component metric label. Built once.
 func (s *Syncer) componentOf(t engine.TableRef) string {
-	if s.compIdx == nil {
+	// Built once; the monitor and the passes both read it.
+	s.compOnce.Do(func() {
 		s.compIdx = make(map[engine.TableRef]string)
 		for _, c := range s.Components {
 			id := ""
@@ -426,7 +415,7 @@ func (s *Syncer) componentOf(t engine.TableRef) string {
 				s.compIdx[ref] = id
 			}
 		}
-	}
+	})
 	return s.compIdx[t]
 }
 
@@ -456,25 +445,32 @@ func (s *Syncer) refreshDBSizes(ctx context.Context) {
 
 // measureDBSizes queries and emits the size gauges, unthrottled (see refreshDBSizes).
 func (s *Syncer) measureDBSizes(ctx context.Context) {
-	if sz, ok := s.Source.(engine.DBSizer); ok {
-		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		if b, err := sz.DatabaseSize(qctx); err == nil {
+	s.measureDBSizesOn(ctx, s.Source, s.Sink)
+}
+
+// measureDBSizesOn emits the size gauges from the given endpoints. No deadline on the
+// context: a query given up client-side closes its connection, and these may share the
+// streaming connections. The engine bounds them on the server instead (Postgres:
+// statement_timeout); a failed query is skipped.
+func (s *Syncer) measureDBSizesOn(ctx context.Context, src engine.Source, sink engine.Sink) {
+	if sz, ok := src.(engine.DBSizer); ok {
+		if b, err := sz.DatabaseSize(ctx); err == nil {
 			s.Tel.SetSourceDBBytes(s.Name, b)
 		}
-		if b, err := sz.ReplicatedSize(qctx, s.Replicable); err == nil {
+		if b, err := sz.ReplicatedSize(ctx, s.Replicable); err == nil {
 			s.Tel.SetSourceReplicatedBytes(s.Name, b)
 		}
-		cancel()
 	}
-	if sz, ok := s.Sink.(engine.DBSizer); ok {
-		qctx, cancel := context.WithTimeout(ctx, healthTimeout)
-		if b, err := sz.DatabaseSize(qctx); err == nil {
+	if sink == nil {
+		return
+	}
+	if sz, ok := sink.(engine.DBSizer); ok {
+		if b, err := sz.DatabaseSize(ctx); err == nil {
 			s.Tel.SetTargetDBBytes(s.Name, s.Target, b)
 		}
-		if b, err := sz.ReplicatedSize(qctx, s.Replicable); err == nil {
+		if b, err := sz.ReplicatedSize(ctx, s.Replicable); err == nil {
 			s.Tel.SetTargetReplicatedBytes(s.Name, s.Target, b)
 		}
-		cancel()
 	}
 }
 
@@ -561,14 +557,25 @@ func (s *Syncer) purgeTargets(t engine.TableRef) []engine.TargetID {
 // a failed one as well as after a healthy one. A table whose backlog can't be read is
 // left out of the result.
 func (s *Syncer) publishBacklogs(ctx context.Context) map[engine.TableRef]engine.DeltaBacklog {
+	backlogs, _ := s.publishBacklogsFrom(ctx, s.Source)
+	return backlogs
+}
+
+// publishBacklogsFrom is publishBacklogs reading from src. The error is the first read
+// that failed, when none succeeded (a dead connection, typically).
+func (s *Syncer) publishBacklogsFrom(ctx context.Context, src engine.Source) (map[engine.TableRef]engine.DeltaBacklog, error) {
 	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
+	var firstErr error
 	for _, t := range s.Replicable {
 		if ctx.Err() != nil {
 			break
 		}
 		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
-		bl, err := s.Source.DeltaBacklog(ctx, t, s.Target)
+		bl, err := src.DeltaBacklog(ctx, t, s.Target)
 		if err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
 			continue
 		}
 		backlogs[t] = bl
@@ -579,13 +586,8 @@ func (s *Syncer) publishBacklogs(ctx context.Context) map[engine.TableRef]engine
 			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
 		}
 	}
-	return backlogs
-}
-
-// endpointsUp reports whether both the source and the target answer a bounded
-// health-check on the primary pair.
-func (s *Syncer) endpointsUp(ctx context.Context) bool {
-	hctx, cancel := context.WithTimeout(ctx, healthTimeout)
-	defer cancel()
-	return s.Source.HealthCheck(hctx) == nil && s.Sink.HealthCheck(hctx) == nil
+	if len(backlogs) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return backlogs, nil
 }

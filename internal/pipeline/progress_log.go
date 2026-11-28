@@ -33,6 +33,38 @@ type streamProgress struct {
 	applied  int64
 	backlog  map[engine.TableRef]engine.DeltaBacklog
 	lastSeen time.Time // last healthy pass (backlog read)
+	// passStart is when the pass under way began (zero between passes), so a progress
+	// line written during a long pass says how long it has run.
+	passStart time.Time
+}
+
+// addApplied counts rows applied as each table commits (apply.WithAppliedHook).
+func (s *Syncer) addApplied(n int) {
+	p := &s.progress
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.since.IsZero() {
+		p.since = time.Now()
+	}
+	p.applied += int64(n)
+}
+
+// passBegins and passEnds bracket a pass for the progress line.
+func (s *Syncer) passBegins() {
+	p := &s.progress
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.since.IsZero() {
+		p.since = time.Now()
+	}
+	p.passStart = time.Now()
+}
+
+func (s *Syncer) passEnds() {
+	p := &s.progress
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.passStart = time.Time{}
 }
 
 // logOnly writes an event to the log, not to the state store.
@@ -100,8 +132,7 @@ func (s *Syncer) notePass(consumed int, backlogs map[engine.TableRef]engine.Delt
 	if p.since.IsZero() {
 		p.since = time.Now()
 	}
-	p.passes++
-	p.applied += int64(consumed)
+	p.passes++ // rows applied are counted as they commit (addApplied), not here
 	if backlogs != nil {
 		p.backlog = backlogs
 		p.lastSeen = time.Now()
@@ -134,20 +165,26 @@ func (s *Syncer) logStreamProgress(ctx context.Context) {
 		return
 	}
 	since, passes, failed, lastErr, applied := time.Since(p.since), p.passes, p.failed, p.lastErr, p.applied
-	backlog, lastSeen := p.backlog, p.lastSeen
+	backlog, lastSeen, passStart := p.backlog, p.lastSeen, p.passStart
 	p.since, p.passes, p.failed, p.lastErr, p.applied = time.Now(), 0, 0, "", 0
 	p.mu.Unlock()
 
-	msg := fmt.Sprintf("streaming: applied %s rows in the last %s (%d passes)",
+	msg := fmt.Sprintf("streaming: applied %s rows in the last %s (%d passes finished",
 		groupDigits(applied), roughDuration(since), passes)
+	if !passStart.IsZero() {
+		msg += fmt.Sprintf(", one running for %s", roughDuration(time.Since(passStart)))
+	}
+	msg += ")"
 	var rows int64
 	var oldest time.Duration
 	waiting := 0
+	estimated := false
 	for _, bl := range backlog {
 		rows += bl.Rows
 		if bl.Rows > 0 {
 			waiting++
 		}
+		estimated = estimated || bl.Estimated
 		oldest = max(oldest, bl.OldestAge)
 	}
 	switch {
@@ -156,8 +193,12 @@ func (s *Syncer) logStreamProgress(ctx context.Context) {
 	case rows == 0:
 		msg += "; caught up, nothing waiting"
 	default:
-		msg += fmt.Sprintf("; backlog %s rows in %s, oldest waiting %s",
-			groupDigits(rows), tablesWord(waiting), roughDuration(oldest))
+		about := ""
+		if estimated {
+			about = "about "
+		}
+		msg += fmt.Sprintf("; backlog %s%s rows in %s, oldest waiting %s",
+			about, groupDigits(rows), tablesWord(waiting), roughDuration(oldest))
 	}
 	level := "INFO"
 	if failed > 0 {

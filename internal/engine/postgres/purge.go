@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"time"
@@ -320,29 +321,85 @@ func (s *Source) DeltaBacklog(ctx context.Context, t engine.TableRef, target eng
 	return s.deltaBacklogByRel(ctx, relID, target)
 }
 
-// deltaBacklogByRel computes the backlog for a captured table's rel_id: the count
-// and estimated bytes of delta rows not yet in the target's track, plus the age
-// of the oldest such delta. Bytes is prorated from the delta table's total
-// on-disk size by the backlog's row fraction. FILTER aggregates are old-PG-safe
-// (9.4+), within the 9.6 floor.
+// exactBacklogRows: a change queue shorter than this (Postgres's own running count of
+// its rows) is counted exactly. A longer one is estimated, since counting it means
+// reading the whole queue, and the backlog is read for every table on every pass and
+// every monitor round: on a busy source with a deep queue that read was a large share of
+// each pass (decision, 0.8.4, from a production catch-up).
+const exactBacklogRows = 100_000
+
+// deltaBacklogByRel computes the backlog for a captured table's rel_id: the delta rows
+// not yet in the target's track, their estimated bytes, and the age of the oldest such
+// delta. The oldest is always exact and cheap: the first queued change this target has
+// not applied, found by walking the queue in delta_id order (applied changes are purged
+// at the end of every pass, so it is normally the very first row). The row count is exact
+// for a short queue; for a long one it is the queue's live-row count from Postgres's
+// statistics (pg_stat_get_live_tuples, updated as rows are written) less the changes this
+// target has applied that are not purged yet. Bytes is prorated from the delta table's
+// on-disk size. Every query here is old-PG-safe.
 func (s *Source) deltaBacklogByRel(ctx context.Context, relID int, target engine.TargetID) (engine.DeltaBacklog, error) {
+	delta := qualifiedCapture(deltaTableName(relID))
+	track := qualifiedCapture(trackTableName(relID))
+	var (
+		live       int64
+		totalBytes int64
+	)
+	if err := s.conn.QueryRow(ctx,
+		`SELECT pg_stat_get_live_tuples($1::regclass), pg_total_relation_size($1::regclass)`, delta).
+		Scan(&live, &totalBytes); err != nil {
+		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): %w", relID, err)
+	}
+	if live < exactBacklogRows {
+		return s.deltaBacklogExact(ctx, relID, target, totalBytes)
+	}
+
+	var oldestSec *float64
+	err := s.conn.QueryRow(ctx, fmt.Sprintf(`
+		SELECT EXTRACT(EPOCH FROM now() - d.rc_at)::float8
+		FROM %s d
+		WHERE NOT EXISTS (SELECT 1 FROM %s tr WHERE tr.target = $1 AND tr.delta_id = d.delta_id)
+		ORDER BY d.delta_id
+		LIMIT 1`, delta, track), string(target)).Scan(&oldestSec)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return engine.DeltaBacklog{Estimated: true}, nil
+	}
+	if err != nil {
+		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): oldest: %w", relID, err)
+	}
+	var applied int64
+	if err := s.conn.QueryRow(ctx, fmt.Sprintf(`SELECT count(*) FROM %s WHERE target = $1`, track),
+		string(target)).Scan(&applied); err != nil {
+		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): applied: %w", relID, err)
+	}
+	rows := max(live-applied, 1) // there is at least the oldest
+	bl := engine.DeltaBacklog{
+		Rows:       rows,
+		Bytes:      totalBytes * min(rows, live) / live,
+		HasBacklog: true,
+		Estimated:  true,
+	}
+	if oldestSec != nil {
+		bl.OldestAge = time.Duration(*oldestSec * float64(time.Second))
+	}
+	return bl, nil
+}
+
+// deltaBacklogExact counts a short queue's backlog exactly in one pass over it.
+func (s *Source) deltaBacklogExact(ctx context.Context, relID int, target engine.TargetID, totalBytes int64) (engine.DeltaBacklog, error) {
 	var (
 		backlogRows int64
 		totalRows   int64
 		oldestSec   float64
-		totalBytes  int64
 	)
 	err := s.conn.QueryRow(ctx, fmt.Sprintf(`
 		SELECT
 			count(*) FILTER (WHERE tr.delta_id IS NULL),
 			count(*),
-			COALESCE(EXTRACT(EPOCH FROM now() - min(d.rc_at) FILTER (WHERE tr.delta_id IS NULL)), 0),
-			pg_total_relation_size($2::regclass)
+			COALESCE(EXTRACT(EPOCH FROM now() - min(d.rc_at) FILTER (WHERE tr.delta_id IS NULL)), 0)
 		FROM %s d
 		LEFT JOIN %s tr ON tr.target = $1 AND tr.delta_id = d.delta_id`,
 		qualifiedCapture(deltaTableName(relID)), qualifiedCapture(trackTableName(relID))),
-		string(target), qualifiedCapture(deltaTableName(relID))).
-		Scan(&backlogRows, &totalRows, &oldestSec, &totalBytes)
+		string(target)).Scan(&backlogRows, &totalRows, &oldestSec)
 	if err != nil {
 		return engine.DeltaBacklog{}, fmt.Errorf("postgres: delta backlog (rel %d): %w", relID, err)
 	}

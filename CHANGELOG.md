@@ -4,6 +4,36 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.4]
+
+- **The backlog, lag and catch-up ETA show from the start, whatever the passes are doing.** They
+  used to come from the end of each pass, on the streaming connections: a long pass left the
+  dashboard blank, and after a restart the first reading could fail on a connection dropped during
+  start-up. A monitor now reads them every 30 seconds(or less often on a large schema) on a source
+  and a target connection of its own, along with the database sizes, and marks the target caught up.
+- **Streaming no longer reads every change queue in full on every pass.** Each pass counted every
+  table's waiting changes twice, once for retention and once for the dashboard, which on a deep
+  queue meant reading all of it(918,000 changes for one table in production) on a busy disk. The
+  oldest waiting change is now found from the front of the queue, and a queue of 100,000 changes or
+  more is counted from Postgres's own running statistics instead of row by row. The lag stays exact.
+- **Independent groups of tables apply side by side.** With `apply_concurrency` above 1, groups of
+  linked tables now run in parallel across the connection pool, instead of one after another with
+  only the tables inside a group in parallel; a group of several tables still takes the free pairs
+  for its own tables. One big table no longer waits behind every other group. With the default of
+  1, the order is unchanged.
+- **A progress line every minute, during a pass too.** `stream.progress` was only written when a
+  pass finished, so a long pass made the logs go silent. It's now written every minute with the rows
+  applied so far(counted as each table commits) and how long the current pass has run.
+- **Fixed: a slow size or estimate query could close the streaming connection.** These had a time
+  limit in `replicare`, and the database driver gives up on a query past its limit by closing the
+  connection, which the next pass then failed on. On Postgres the limit is now kept by the server,
+  which cancels just the statement. Both connections are also checked, and opened again if needed,
+  before the first pass.
+- **Fixed: the check after catch-up could break the streaming connection.** When the check found
+  rows that differ, it queued them for streaming to write again on the connection streaming itself
+  was using, at the same moment as a pass. Both then failed(`conn busy`) and the connection could be
+  left closed. The check now queues them on a connection of its own.
+
 ## [0.8.3]
 
 - **Fixed: a large `drain_batch` broke streaming.** To apply a batch of changes, `replicare`

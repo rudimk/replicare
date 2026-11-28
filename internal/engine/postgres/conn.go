@@ -165,3 +165,25 @@ func serverVersion(ctx context.Context, conn *pgx.Conn) (int, error) {
 	}
 	return num, nil
 }
+
+// boundedReadTimeout is the server-side limit on a best-effort read: database and table
+// sizes, row estimates. The server cancels a statement that runs past it and the
+// connection stays usable. A deadline on the Go context would do the opposite: pgx gives
+// up on a query whose context expires by closing the connection, and these reads share
+// the connection that streaming runs on, so a slow size query once closed it under the
+// next pass (decision, 0.8.4, from production).
+const boundedReadTimeout = "30s"
+
+// inBoundedRead runs fn inside a read transaction whose statements the server stops
+// after boundedReadTimeout. The transaction is rolled back: fn only reads.
+func inBoundedRead(ctx context.Context, conn *pgx.Conn, fn func(q pgx.Tx) error) error {
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = '"+boundedReadTimeout+"'"); err != nil {
+		return err
+	}
+	return fn(tx)
+}

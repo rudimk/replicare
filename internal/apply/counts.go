@@ -50,6 +50,9 @@ func recordApplied(ctx context.Context, t engine.TableRef, n int) {
 	if n == 0 {
 		return
 	}
+	if fn, ok := ctx.Value(appliedHookKey{}).(func(engine.TableRef, int)); ok && fn != nil {
+		fn(t, n)
+	}
 	ac, ok := ctx.Value(appliedCountsKey{}).(*appliedCounts)
 	if !ok || ac == nil {
 		return
@@ -57,4 +60,16 @@ func recordApplied(ctx context.Context, t engine.TableRef, n int) {
 	ac.mu.Lock()
 	ac.byTable[t] += n
 	ac.mu.Unlock()
+}
+
+type appliedHookKey struct{}
+
+// WithAppliedHook installs fn on ctx, called with each table's confirmed-consumed count
+// as soon as it commits, so a caller can report rows applied while a pass is still
+// running. fn must be cheap and safe to call from several goroutines.
+func WithAppliedHook(ctx context.Context, fn func(engine.TableRef, int)) context.Context {
+	if fn == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, appliedHookKey{}, fn)
 }
