@@ -197,6 +197,7 @@ type catchupProgress struct {
 	oldest  map[string]time.Duration // table -> age of its oldest unconsumed delta
 	total   etaSeries
 	down    bool
+	rounds  int // BacklogRound calls still open: per-table updates wait for the round's end
 }
 
 type etaTracker struct {
@@ -373,12 +374,49 @@ func (t *Telemetry) etaBacklog(sync string, target engine.TargetID, table engine
 	c.down = false
 	c.backlog[table.String()] = bl.Rows
 	c.oldest[table.String()] = bl.OldestAge
+	if c.rounds == 0 {
+		c.sampleTotal(t.eta.now())
+	}
+	t.publishCatchupETA(sync, target, c)
+}
+
+// sampleTotal records the target's whole backlog now, for the rate.
+func (c *catchupProgress) sampleTotal(now time.Time) {
 	var sum int64
 	for _, v := range c.backlog {
 		sum += v
 	}
-	c.total.add(t.eta.now(), float64(sum))
-	t.publishCatchupETA(sync, target, c)
+	c.total.add(now, float64(sum))
+}
+
+// BacklogRound marks the start of a reading of every table's backlog for a target, and
+// returns the func that marks its end. Inside a round, each table's SetBacklog updates the
+// gauges but the ETA's history takes one sample, of the whole backlog, at the end.
+//
+// A round over hundreds of tables on a busy source takes minutes. Sampled table by table,
+// the first round after a start fills the total from nothing, so the history began with a
+// near-empty backlog that seemed to grow, and the ETA read "not catching up" for its whole
+// first window (seen in production on 0.8.4).
+func (t *Telemetry) BacklogRound(syncName string, target engine.TargetID) (done func()) {
+	if t == nil || t.reg == nil {
+		return func() {}
+	}
+	t.eta.mu.Lock()
+	t.eta.catchupFor(syncName, target).rounds++
+	t.eta.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			t.eta.mu.Lock()
+			defer t.eta.mu.Unlock()
+			c := t.eta.catchupFor(syncName, target)
+			c.rounds--
+			if len(c.backlog) > 0 {
+				c.sampleTotal(t.eta.now())
+			}
+			t.publishCatchupETA(syncName, target, c)
+		})
+	}
 }
 
 func (t *Telemetry) etaTargetDown(sync string, target engine.TargetID) {

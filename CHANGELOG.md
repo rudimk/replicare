@@ -4,6 +4,13 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **Fixed: the catch-up ETA read "not catching up" for about 10 minutes after a start.** The
+  first reading after a start fills in each table's backlog in turn, which on hundreds of tables
+  takes minutes, and the ETA took a sample after each table, so its history began with an almost
+  empty backlog that seemed to grow. It now takes one sample per complete reading of every table.
+
 ## [0.8.4]
 
 - **The backlog, lag and catch-up ETA show from the start, whatever the passes are doing.** They

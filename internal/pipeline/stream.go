@@ -566,6 +566,7 @@ func (s *Syncer) publishBacklogs(ctx context.Context) map[engine.TableRef]engine
 func (s *Syncer) publishBacklogsFrom(ctx context.Context, src engine.Source) (map[engine.TableRef]engine.DeltaBacklog, error) {
 	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
 	var firstErr error
+	defer s.Tel.BacklogRound(s.Name, s.Target)() // one ETA sample for the whole round
 	for _, t := range s.Replicable {
 		if ctx.Err() != nil {
 			break
