@@ -29,6 +29,10 @@ All notable changes to replicare are documented here. The format follows
   connection, which the next pass then failed on. On Postgres the limit is now kept by the server,
   which cancels just the statement. Both connections are also checked, and opened again if needed,
   before the first pass.
+- **Fixed: the check after catch-up could break the streaming connection.** When the check found
+  rows that differ, it queued them for streaming to write again on the connection streaming itself
+  was using, at the same moment as a pass. Both then failed(`conn busy`) and the connection could be
+  left closed. The check now queues them on a connection of its own.
 
 ## [0.8.3]
 

@@ -202,7 +202,7 @@ func checkEvent(k checkKind, skipped, check string) string {
 // left marked, so the next start tries again. A comparison that could not run is tried
 // again after skipCheckRetry.
 func (s *Syncer) runSkipCheck(ctx context.Context, pending []engine.TableRef, kinds map[engine.TableRef]checkKind) {
-	requeuer, _ := s.Source.(engine.KeyRequeuer)
+	_, canRequeue := s.Source.(engine.KeyRequeuer)
 	cs, _ := s.Store.(state.CheckStore)
 	lastDiff := map[engine.TableRef]int{}
 	stuck := map[engine.TableRef]int{}
@@ -288,7 +288,7 @@ func (s *Syncer) runSkipCheck(ctx context.Context, pending []engine.TableRef, ki
 					stuck[t] = 0
 				}
 				lastDiff[t] = r.Differing
-				if requeuer == nil || len(r.Keys) == 0 || stuck[t] >= maxRepairRounds {
+				if !canRequeue || len(r.Keys) == 0 || stuck[t] >= maxRepairRounds {
 					standing[t] = "drift"
 					why := "these rows could not be repaired here"
 					if stuck[t] >= maxRepairRounds {
@@ -298,7 +298,7 @@ func (s *Syncer) runSkipCheck(ctx context.Context, pending []engine.TableRef, ki
 						fmt.Sprintf("%s does not match the source: %s. Changes still stream, but %s; it is checked again on the next start, or copy it again with `replicare reseed`", t, r.Detail, why)))
 					continue
 				}
-				if err := requeuer.RequeueKeys(ctx, t, r.Keys); err != nil {
+				if err := s.requeueKeys(ctx, t, r.Keys); err != nil {
 					retry = append(retry, t)
 					s.recordEvent(ctx, state0(s, "WARN", t, checkEvent(k, observability.EventCopySkipCheckFailed, observability.EventCheckFailed),
 						fmt.Sprintf("queueing the rows of %s that differ from the source (tried again in %s): %v", t, skipCheckRetry, err)))
@@ -424,4 +424,26 @@ func tablesWord(n int) string {
 		return "1 table"
 	}
 	return fmt.Sprintf("%d tables", n)
+}
+
+// requeueKeys queues keys on the source as changes, on a connection of its own opened
+// for the call and closed after (OpenSource). The check runs beside streaming, and the
+// streaming connection is in use by a pass at any moment: sharing it failed both with
+// "conn busy" and could leave it closed. Without OpenSource (tests that build a Syncer by
+// hand) it falls back to the streaming connection.
+func (s *Syncer) requeueKeys(ctx context.Context, t engine.TableRef, keys []engine.KeyValues) error {
+	src := s.Source
+	if s.OpenSource != nil {
+		c, err := s.OpenSource(ctx)
+		if err != nil {
+			return fmt.Errorf("connect to the source: %w", err)
+		}
+		defer func() { _ = c.Close(context.Background()) }()
+		src = c
+	}
+	rq, ok := src.(engine.KeyRequeuer)
+	if !ok {
+		return fmt.Errorf("the source cannot queue rows again")
+	}
+	return rq.RequeueKeys(ctx, t, keys)
 }
