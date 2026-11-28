@@ -10,6 +10,15 @@ All notable changes to replicare are documented here. The format follows
   first reading after a start fills in each table's backlog in turn, which on hundreds of tables
   takes minutes, and the ETA took a sample after each table, so its history began with an almost
   empty backlog that seemed to grow. It now takes one sample per complete reading of every table.
+- **Fixed: the backlog could read about half its real size, then jump.** A reading of every
+  table's backlog had a 5-minute limit; on 820 tables on a busy source the first one ran into it,
+  and the tables read so far were taken for the whole backlog(980,000 changes instead of
+  1.9 million). The limit also closed the reader's connection, so the next reading failed. A
+  reading now has no limit, and one that stops part-way is never taken for the whole backlog.
+- **The catch-up ETA is steadier.** It measured how fast the backlog shrank over the last
+  10 minutes, but on a deep backlog changes are applied in lumps, a pass at a time, and one pass
+  can take longer than that; the ETA flipped between a short time and "not catching up". It now
+  looks back 30 minutes.
 
 ## [0.8.4]
 

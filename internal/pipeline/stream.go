@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
@@ -566,9 +567,14 @@ func (s *Syncer) publishBacklogs(ctx context.Context) map[engine.TableRef]engine
 func (s *Syncer) publishBacklogsFrom(ctx context.Context, src engine.Source) (map[engine.TableRef]engine.DeltaBacklog, error) {
 	backlogs := make(map[engine.TableRef]engine.DeltaBacklog, len(s.Replicable))
 	var firstErr error
-	defer s.Tel.BacklogRound(s.Name, s.Target)() // one ETA sample for the whole round
+	// One ETA sample for the whole round, and only if the round read every table it could:
+	// a round cut short holds only part of the backlog.
+	roundDone := s.Tel.BacklogRound(s.Name, s.Target)
+	cut := false
+	defer func() { roundDone(!cut) }()
 	for _, t := range s.Replicable {
 		if ctx.Err() != nil {
+			cut = true
 			break
 		}
 		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
@@ -586,6 +592,12 @@ func (s *Syncer) publishBacklogsFrom(ctx context.Context, src engine.Source) (ma
 		if prox := telemetry.RetentionProximity(bl, s.Retention); prox >= 0.5 {
 			s.Tel.RetentionApproaching(ctx, s.Name, s.Target, t, comp, bl, prox)
 		}
+	}
+	if cut || ctx.Err() != nil {
+		cut = true
+		// Not every table was read: the caller must not take this for the whole backlog
+		// (the progress line's total, caught-up). The gauges of the tables read stand.
+		return nil, fmt.Errorf("backlog reading stopped after %d of %d tables: %w", len(backlogs), len(s.Replicable), ctx.Err())
 	}
 	if len(backlogs) == 0 && firstErr != nil {
 		return nil, firstErr
