@@ -4,6 +4,15 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+- **Fixed: the backlog of a long queue could read far too low, then jump.** For a queue of 100,000
+  changes or more, Postgres estimates the backlog as the queue's rows less the ones already applied.
+  The applied count included records that versions before 0.7.0 left behind for changes long gone,
+  so the estimate came out too low, and as the background clean-up removed those records it jumped
+  up, which made the catch-up ETA read "not catching up" for a while after a start. It now counts
+  only applied changes that are still in the queue.
+
 ## [0.8.5]
 
 - **Streaming passes no longer spend minutes on tables with nothing queued.** At the end of every
