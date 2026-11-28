@@ -4,7 +4,7 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.8.6]
 
 - **Fixed: the backlog of a long queue could read far too low, then jump.** For a queue of 100,000
   changes or more, Postgres estimates the backlog as the queue's rows less the ones already applied.
