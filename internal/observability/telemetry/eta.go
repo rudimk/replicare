@@ -16,7 +16,7 @@ import (
 //     reports table sizes (each table's size times the share of its estimated rows still
 //     to copy), else in rows. 0 once nothing is left to copy.
 //   - replicare_catchup_eta_seconds{sync,target}: the target's delta backlog divided by
-//     how fast that backlog has been shrinking over the last etaWindow. 0 when caught up:
+//     how fast that backlog has been shrinking over the last catchupWindow. 0 when caught up:
 //     no backlog, or nothing waiting longer than etaCaughtUp.
 //
 // Both use the value etaStalled (-1) for "not moving": no rows copied in the window, or
@@ -24,9 +24,15 @@ import (
 // series yet means there is not enough history to estimate (under etaMinSpan).
 
 const (
-	etaWindow  = 10 * time.Minute
-	etaMinSpan = time.Minute
-	etaStalled = -1.0
+	etaWindow = 10 * time.Minute
+	// catchupWindow is longer: changes are applied in lumps (a pass on a deep backlog can
+	// run longer than etaWindow, with minutes in which nothing commits while the app keeps
+	// adding changes), so a 10-minute window flipped between a short ETA and "not catching
+	// up" from one reading to the next (production, 0.8.4). Half an hour spans several
+	// passes. It delays nothing: a rate exists once the history spans etaMinSpan.
+	catchupWindow = 30 * time.Minute
+	etaMinSpan    = time.Minute
+	etaStalled    = -1.0
 	// etaCaughtUp: a target whose oldest waiting change is younger than this is caught
 	// up. Under steady writes the backlog never quite reaches 0 and stops shrinking,
 	// which is healthy, not "not catching up".
@@ -44,7 +50,17 @@ type etaSample struct {
 
 // etaSeries keeps a running total's recent history: every sample inside the window, plus
 // the newest one older than it, so a rate always spans the full window once it exists.
-type etaSeries struct{ samples []etaSample }
+type etaSeries struct {
+	samples []etaSample
+	window  time.Duration // how far back the rate looks; 0 = etaWindow
+}
+
+func (s *etaSeries) span() time.Duration {
+	if s.window > 0 {
+		return s.window
+	}
+	return etaWindow
+}
 
 func (s *etaSeries) add(at time.Time, v float64) {
 	if n := len(s.samples); n > 0 && at.Sub(s.samples[n-1].at) < time.Second {
@@ -53,7 +69,7 @@ func (s *etaSeries) add(at time.Time, v float64) {
 		s.samples = append(s.samples, etaSample{at, v})
 	}
 	cut := 0
-	for i := 1; i < len(s.samples) && at.Sub(s.samples[i].at) >= etaWindow; i++ {
+	for i := 1; i < len(s.samples) && at.Sub(s.samples[i].at) >= s.span(); i++ {
 		cut = i
 	}
 	s.samples = s.samples[cut:]
@@ -70,7 +86,7 @@ func (s *etaSeries) rate(now time.Time) (perSec float64, ok bool) {
 	// Measure from the newest sample at or before the window's start (the window ends now,
 	// not at the last update), so progress that stopped long ago doesn't count.
 	for _, smp := range s.samples[1:] {
-		if now.Sub(smp.at) < etaWindow {
+		if now.Sub(smp.at) < s.span() {
 			break
 		}
 		first = smp
@@ -197,6 +213,7 @@ type catchupProgress struct {
 	oldest  map[string]time.Duration // table -> age of its oldest unconsumed delta
 	total   etaSeries
 	down    bool
+	rounds  int // BacklogRound calls still open: per-table updates wait for the round's end
 }
 
 type etaTracker struct {
@@ -224,7 +241,8 @@ func (e *etaTracker) catchupFor(sync string, target engine.TargetID) *catchupPro
 	k := [2]string{sync, string(target)}
 	c := e.catchup[k]
 	if c == nil {
-		c = &catchupProgress{backlog: map[string]int64{}, oldest: map[string]time.Duration{}}
+		c = &catchupProgress{backlog: map[string]int64{}, oldest: map[string]time.Duration{},
+			total: etaSeries{window: catchupWindow}}
 		e.catchup[k] = c
 	}
 	return c
@@ -373,12 +391,51 @@ func (t *Telemetry) etaBacklog(sync string, target engine.TargetID, table engine
 	c.down = false
 	c.backlog[table.String()] = bl.Rows
 	c.oldest[table.String()] = bl.OldestAge
+	if c.rounds == 0 {
+		c.sampleTotal(t.eta.now())
+	}
+	t.publishCatchupETA(sync, target, c)
+}
+
+// sampleTotal records the target's whole backlog now, for the rate.
+func (c *catchupProgress) sampleTotal(now time.Time) {
 	var sum int64
 	for _, v := range c.backlog {
 		sum += v
 	}
-	c.total.add(t.eta.now(), float64(sum))
-	t.publishCatchupETA(sync, target, c)
+	c.total.add(now, float64(sum))
+}
+
+// BacklogRound marks the start of a reading of every table's backlog for a target, and
+// returns the func that marks its end. Inside a round, each table's SetBacklog updates the
+// gauges but the ETA's history takes one sample, of the whole backlog, at the end — and
+// only when the round was complete (every table read): a round cut short holds only part
+// of the backlog, and sampling it made the backlog seem to jump (production, 0.8.4).
+//
+// A round over hundreds of tables on a busy source takes minutes. Sampled table by table,
+// the first round after a start fills the total from nothing, so the history began with a
+// near-empty backlog that seemed to grow, and the ETA read "not catching up" for its whole
+// first window (seen in production on 0.8.4).
+func (t *Telemetry) BacklogRound(syncName string, target engine.TargetID) (done func(complete bool)) {
+	if t == nil || t.reg == nil {
+		return func(bool) {}
+	}
+	t.eta.mu.Lock()
+	t.eta.catchupFor(syncName, target).rounds++
+	t.eta.mu.Unlock()
+	var once sync.Once
+	return func(complete bool) {
+		once.Do(func() {
+			t.eta.mu.Lock()
+			defer t.eta.mu.Unlock()
+			c := t.eta.catchupFor(syncName, target)
+			c.rounds--
+			if complete && len(c.backlog) > 0 {
+				c.sampleTotal(t.eta.now())
+			}
+			t.publishCatchupETA(syncName, target, c)
+		})
+	}
 }
 
 func (t *Telemetry) etaTargetDown(sync string, target engine.TargetID) {

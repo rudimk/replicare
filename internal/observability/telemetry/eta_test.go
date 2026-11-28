@@ -3,6 +3,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -296,5 +297,66 @@ func TestInitialCopyETAWaitsWhileTooEarlyToTell(t *testing.T) {
 		if i == 31 && !ok {
 			t.Fatal("no ETA after 31 minutes")
 		}
+	}
+}
+
+// A round over many tables takes minutes on a busy source. The first round after a start
+// fills the backlog in table by table; sampled per table, the history began near zero and
+// "grew", so the ETA read not-catching-up for its whole first window (production, 0.8.4).
+// With the round marked, the history takes one sample per round, of the whole backlog.
+func TestCatchupETASlowRoundsAfterStart(t *testing.T) {
+	tel, reg, now := etaTel()
+	labels := map[string]string{"sync": "s", "target": "dst"}
+	tables := make([]engine.TableRef, 40)
+	for i := range tables {
+		tables[i] = engine.TableRef{Schema: "public", Name: fmt.Sprintf("t%02d", i)}
+	}
+	round := func(rows int64) {
+		done := tel.BacklogRound("s", "dst")
+		for _, tbl := range tables {
+			*now = now.Add(5 * time.Second) // 40 tables, 200s for the round
+			tel.SetBacklog("s", "dst", tbl, "c", engine.DeltaBacklog{Rows: rows, OldestAge: time.Hour})
+		}
+		done(true)
+	}
+
+	round(25_000) // 1,000,000 waiting
+	*now = now.Add(5 * time.Minute)
+	round(24_000) // 960,000: 40,000 fewer over 5m + 200s = 500s, i.e. 80 rows/s
+	v, ok := gaugeValue(t, reg, observability.MetricCatchupETA, labels)
+	if !ok || v == etaStalled {
+		t.Fatalf("ETA after two slow rounds = %v (%v), want a duration, not stalled", v, ok)
+	}
+	if !near(v, 960_000/80.0) {
+		t.Fatalf("ETA = %v, want %v", v, 960_000/80.0)
+	}
+}
+
+// A round cut short (the reader stopped part-way) holds only part of the backlog; it must
+// not enter the ETA's history, or the backlog seems to shrink and then jump back.
+func TestCatchupETAIgnoresAnIncompleteRound(t *testing.T) {
+	tel, reg, now := etaTel()
+	labels := map[string]string{"sync": "s", "target": "dst"}
+	a, b := engine.TableRef{Schema: "public", Name: "a"}, engine.TableRef{Schema: "public", Name: "b"}
+	round := func(na, nb int64, complete bool) {
+		done := tel.BacklogRound("s", "dst")
+		*now = now.Add(time.Minute)
+		tel.SetBacklog("s", "dst", a, "c", engine.DeltaBacklog{Rows: na, OldestAge: time.Hour})
+		if complete {
+			tel.SetBacklog("s", "dst", b, "c", engine.DeltaBacklog{Rows: nb, OldestAge: time.Hour})
+		}
+		done(complete)
+	}
+	round(500_000, 500_000, true) // 1,000,000
+	*now = now.Add(5 * time.Minute)
+	round(10, 0, false) // cut short after a, which is nearly empty now: no sample
+	*now = now.Add(5 * time.Minute)
+	round(400_000, 400_000, true) // 800,000: 200,000 fewer over 12 minutes
+	v, ok := gaugeValue(t, reg, observability.MetricCatchupETA, labels)
+	if !ok || v == etaStalled {
+		t.Fatalf("ETA = %v (%v), want a duration", v, ok)
+	}
+	if want := 800_000 / (200_000 / (12 * 60.0)); !near(v, want) {
+		t.Fatalf("ETA = %v, want %v", v, want)
 	}
 }

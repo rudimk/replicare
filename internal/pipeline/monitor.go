@@ -21,9 +21,6 @@ var (
 	// longer waits twice its own length before the next, so on a big schema the monitor
 	// never reads the source more than about a third of the time.
 	monitorInterval = 30 * time.Second
-	// monitorReadTimeout bounds one round on the monitor's own connections (a round that
-	// overruns only costs the monitor its connection, which it opens again).
-	monitorReadTimeout = 5 * time.Minute
 )
 
 // startMonitor starts the monitor when the syncer can open connections of its own
@@ -74,17 +71,22 @@ func (s *Syncer) monitorBacklogs(ctx context.Context) {
 			}
 		}
 		if src != nil {
-			rctx, cancel := context.WithTimeout(ctx, monitorReadTimeout)
-			backlogs, err := s.publishBacklogsFrom(rctx, src)
+			// No time limit on the round: a limit on the client side closes the connection
+			// mid-query (pgx) and cut the round short — on 820 tables on a busy source the
+			// first round takes minutes, and the part read was taken for the whole backlog
+			// (production, 0.8.4). A round takes as long as the source needs; the passes
+			// never wait for it, and each query is small (see Source.DeltaBacklog).
+			backlogs, err := s.publishBacklogsFrom(ctx, src)
 			if err == nil {
 				s.noteBacklogs(backlogs)
 				if allCaughtUp(backlogs, s.Replicable) {
 					s.noteCaughtUp()
 				}
-				s.measureDBSizesOn(rctx, src, sink)
+				s.measureDBSizesOn(ctx, src, sink)
+			} else if ctx.Err() == nil {
+				s.log(ctx, "streaming monitor: read the backlog (tried again next round)", err)
 			}
 			s.Tel.RefreshETAs()
-			cancel()
 			if err != nil && ctx.Err() == nil {
 				// Most likely the connection is gone: open a fresh one next round.
 				_ = src.Close(context.Background())

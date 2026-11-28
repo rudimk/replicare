@@ -128,7 +128,7 @@ This is the headline lag section:
 | Panel | Query | Reading |
 |---|---|---|
 | Max replication lag (SLO) | `max(replicare_replication_lag_seconds)` | Worst lag; green below 30s, amber below 5m, red beyond |
-| Catch-up ETA | `replicare_catchup_eta_seconds` | How long until the target has applied every waiting change, as a duration, from the backlog and how fast it shrank over the last 10 minutes. "Caught up" means nothing has been waiting longer than a minute; "Not catching up" means the backlog is flat or growing, or the target is unreachable |
+| Catch-up ETA | `replicare_catchup_eta_seconds` | How long until the target has applied every waiting change, as a duration, from the backlog and how fast it shrank over the last 30 minutes(changes are applied in batches, and on a deep backlog one pass can take several minutes, so a shorter look-back swings). "Caught up" means nothing has been waiting longer than a minute; "Not catching up" means the backlog is flat or growing, or the target is unreachable |
 | Inflow vs drain (rows/s) | `sum(replicare_throughput_rows_per_second)` vs `sum(replicare_throughput_rows_per_second) + sum(rate(replicare_delta_backlog_rows[5m]))` | Inflow above drain means the backlog is growing |
 | Replication lag / Total backlog | `replicare_replication_lag_seconds`, `sum(replicare_delta_backlog_rows)` | Per-table lag; total rows still to apply |
 

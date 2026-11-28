@@ -4,6 +4,29 @@ All notable changes to replicare are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/), and the project aims to follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.8.5]
+
+- **Streaming passes no longer spend minutes on tables with nothing queued.** At the end of every
+  pass, `replicare` purged each table's change queue one table at a time, a few round trips to the
+  source each, and the pass and the backlog reading went through every table the same way. On 820
+  tables with about 50 queues in use, that was 3 to 4 minutes of each 5-minute pass spent on empty
+  queues, mostly waiting on the network. Each pass now asks the source once which tables have
+  anything queued, and skips the rest. For a table with nothing queued nothing changes: there is
+  nothing to apply or purge, and its backlog is zero. Postgres and MySQL.
+- **Fixed: the catch-up ETA read "not catching up" for about 10 minutes after a start.** The
+  first reading after a start fills in each table's backlog in turn, which on hundreds of tables
+  takes minutes, and the ETA took a sample after each table, so its history began with an almost
+  empty backlog that seemed to grow. It now takes one sample per complete reading of every table.
+- **Fixed: the backlog could read about half its real size, then jump.** A reading of every
+  table's backlog had a 5-minute limit; on 820 tables on a busy source the first one ran into it,
+  and the tables read so far were taken for the whole backlog(980,000 changes instead of
+  1.9 million). The limit also closed the reader's connection, so the next reading failed. A
+  reading now has no limit, and one that stops part-way is never taken for the whole backlog.
+- **The catch-up ETA is steadier.** It measured how fast the backlog shrank over the last
+  10 minutes, but on a deep backlog changes are applied in lumps, a pass at a time, and one pass
+  can take longer than that; the ETA flipped between a short time and "not catching up". It now
+  looks back 30 minutes.
+
 ## [0.8.4]
 
 - **The backlog, lag and catch-up ETA show from the start, whatever the passes are doing.** They
