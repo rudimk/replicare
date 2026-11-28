@@ -208,6 +208,7 @@ func (e *Enricher) VerifyWith(ctx context.Context, name string, opts VerifyOptio
 			continue
 		}
 		vt.verifier = v
+		vt.sink = sink
 		vt.chunked, _ = sink.(engine.ChunkVerifier)
 	}
 
@@ -233,8 +234,28 @@ func (e *Enricher) VerifyWith(ctx context.Context, name string, opts VerifyOptio
 		} else {
 			rows = e.verifyWhole(ctx, srcVerifier, live, rt)
 		}
+		failed := false
 		for _, vt := range live {
 			vt.report.Tables = append(vt.report.Tables, rows[vt])
+			failed = failed || rows[vt].Status == "error"
+		}
+		// A table that failed may have cost a connection (a read past its time limit
+		// closes a Postgres one); open it again so the tables after it are still checked.
+		if failed {
+			if err := e.revive(ctx, src); err != nil {
+				rep.Error = fmt.Sprintf("source %q: %v", sync.Source, err)
+				rep.Converged = false
+				break
+			}
+			for _, vt := range live {
+				if vt.sink == nil {
+					continue
+				}
+				if err := e.revive(ctx, vt.sink); err != nil {
+					vt.report.Error = err.Error()
+					vt.verifier, vt.chunked = nil, nil // no more tables for this target
+				}
+			}
 		}
 	}
 
@@ -269,6 +290,7 @@ type verifyTarget struct {
 	report   VerifyTarget
 	verifier engine.Verifier
 	chunked  engine.ChunkVerifier
+	sink     engine.Sink
 }
 
 // filterTables keeps the tables named in only (schema.table); every name must be a

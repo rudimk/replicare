@@ -12,6 +12,13 @@ All notable changes to replicare are documented here. The format follows
   so the estimate came out too low, and as the background clean-up removed those records it jumped
   up, which made the catch-up ETA read "not catching up" for a while after a start. It now counts
   only applied changes that are still in the queue.
+- **Fixed: `replicare status` and `replicare verify` failed for most tables with `conn closed`.**
+  Both read every table over one connection to each database, with a time limit on each read. On
+  Postgres the driver gives up on a read past its limit by closing the connection, so one slow table
+  (an exact count of a very large table on a busy disk, say) made every table after it fail with
+  `failed to deallocate cached statement(s): conn closed`. Now the Postgres server enforces the limit
+  itself and cancels just that read, so the connection stays open, and if a connection is lost
+  anyway it is opened again before the next table. Only the slow table reports an error.
 
 ## [0.8.5]
 

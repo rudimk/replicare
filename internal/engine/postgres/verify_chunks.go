@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/jackc/pgx/v5"
-
 	"github.com/rudimk/replicare/internal/engine"
 )
 
@@ -29,7 +27,7 @@ func (s *Source) NextKey(ctx context.Context, t engine.TableRef, after engine.Ke
 	if err != nil {
 		return nil, err
 	}
-	return nextKey(ctx, s.conn, t, captureColsFor(meta), after, n)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.KeyValues, error) { return nextKey(ctx, q, t, captureColsFor(meta), after, n) })
 }
 
 // NextKey implements engine.ChunkVerifier.
@@ -41,7 +39,7 @@ func (s *Sink) NextKey(ctx context.Context, t engine.TableRef, after engine.KeyV
 	if err != nil {
 		return nil, err
 	}
-	return nextKey(ctx, s.conn, t, captureColsFor(meta), after, n)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.KeyValues, error) { return nextKey(ctx, q, t, captureColsFor(meta), after, n) })
 }
 
 // VerifyRange implements engine.ChunkVerifier.
@@ -53,7 +51,9 @@ func (s *Source) VerifyRange(ctx context.Context, t engine.TableRef, cols []stri
 	if err != nil {
 		return engine.Fingerprint{}, err
 	}
-	return verifyRange(ctx, s.conn, t, captureColsFor(meta), cols, after, upTo)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.Fingerprint, error) {
+		return verifyRange(ctx, q, t, captureColsFor(meta), cols, after, upTo)
+	})
 }
 
 // VerifyRange implements engine.ChunkVerifier.
@@ -65,7 +65,9 @@ func (s *Sink) VerifyRange(ctx context.Context, t engine.TableRef, cols []string
 	if err != nil {
 		return engine.Fingerprint{}, err
 	}
-	return verifyRange(ctx, s.conn, t, captureColsFor(meta), cols, after, upTo)
+	return limited(ctx, s.conn, func(q pgQuerier) (engine.Fingerprint, error) {
+		return verifyRange(ctx, q, t, captureColsFor(meta), cols, after, upTo)
+	})
 }
 
 // RangeRowHashes implements engine.ChunkVerifier.
@@ -77,7 +79,9 @@ func (s *Source) RangeRowHashes(ctx context.Context, t engine.TableRef, cols []s
 	if err != nil {
 		return nil, err
 	}
-	return rangeRowHashes(ctx, s.conn, t, captureColsFor(meta), cols, after, upTo, limit)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.RowHash, error) {
+		return rangeRowHashes(ctx, q, t, captureColsFor(meta), cols, after, upTo, limit)
+	})
 }
 
 // RangeRowHashes implements engine.ChunkVerifier.
@@ -89,7 +93,9 @@ func (s *Sink) RangeRowHashes(ctx context.Context, t engine.TableRef, cols []str
 	if err != nil {
 		return nil, err
 	}
-	return rangeRowHashes(ctx, s.conn, t, captureColsFor(meta), cols, after, upTo, limit)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.RowHash, error) {
+		return rangeRowHashes(ctx, q, t, captureColsFor(meta), cols, after, upTo, limit)
+	})
 }
 
 // RowHashes implements engine.ChunkVerifier.
@@ -101,7 +107,9 @@ func (s *Source) RowHashes(ctx context.Context, t engine.TableRef, cols []string
 	if err != nil {
 		return nil, err
 	}
-	return rowHashes(ctx, s.conn, t, captureColsFor(meta), cols, keys)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.RowHash, error) {
+		return rowHashes(ctx, q, t, captureColsFor(meta), cols, keys)
+	})
 }
 
 // RowHashes implements engine.ChunkVerifier.
@@ -113,7 +121,9 @@ func (s *Sink) RowHashes(ctx context.Context, t engine.TableRef, cols []string, 
 	if err != nil {
 		return nil, err
 	}
-	return rowHashes(ctx, s.conn, t, captureColsFor(meta), cols, keys)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.RowHash, error) {
+		return rowHashes(ctx, q, t, captureColsFor(meta), cols, keys)
+	})
 }
 
 // SampleKeys implements engine.ChunkVerifier.
@@ -125,7 +135,7 @@ func (s *Source) SampleKeys(ctx context.Context, t engine.TableRef, n int) ([]en
 	if err != nil {
 		return nil, err
 	}
-	return sampleKeys(ctx, s.conn, t, captureColsFor(meta), n)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.KeyValues, error) { return sampleKeys(ctx, q, t, captureColsFor(meta), n) })
 }
 
 // SampleKeys implements engine.ChunkVerifier.
@@ -137,13 +147,13 @@ func (s *Sink) SampleKeys(ctx context.Context, t engine.TableRef, n int) ([]engi
 	if err != nil {
 		return nil, err
 	}
-	return sampleKeys(ctx, s.conn, t, captureColsFor(meta), n)
+	return limited(ctx, s.conn, func(q pgQuerier) ([]engine.KeyValues, error) { return sampleKeys(ctx, q, t, captureColsFor(meta), n) })
 }
 
 // sampleKeys picks n random keys with TABLESAMPLE SYSTEM (9.5+), which reads only the
 // sampled share of the table's pages. The share is sized from the planner's row
 // estimate to return about 50 rows per key wanted, so a huge table reads a few MB.
-func sampleKeys(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []captureCol, n int) ([]engine.KeyValues, error) {
+func sampleKeys(ctx context.Context, conn pgQuerier, t engine.TableRef, key []captureCol, n int) ([]engine.KeyValues, error) {
 	if err := requireKey(t, key); err != nil {
 		return nil, err
 	}
@@ -186,7 +196,7 @@ func sampleKeys(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []ca
 	}
 }
 
-func sampleOnce(ctx context.Context, conn *pgx.Conn, t engine.TableRef, q string, pct float64, n int) ([]engine.KeyValues, error) {
+func sampleOnce(ctx context.Context, conn pgQuerier, t engine.TableRef, q string, pct float64, n int) ([]engine.KeyValues, error) {
 	rows, err := conn.Query(ctx, q, pct, n)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: verify %s: sample keys: %w", t, err)
@@ -264,7 +274,7 @@ func requireKey(t engine.TableRef, key []captureCol) error {
 	return nil
 }
 
-func nextKey(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []captureCol, after engine.KeyValues, n int) (engine.KeyValues, error) {
+func nextKey(ctx context.Context, conn pgQuerier, t engine.TableRef, key []captureCol, after engine.KeyValues, n int) (engine.KeyValues, error) {
 	if err := requireKey(t, key); err != nil {
 		return nil, err
 	}
@@ -307,7 +317,7 @@ func textAliases(key []captureCol) string {
 	return strings.Join(parts, ", ")
 }
 
-func verifyRange(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []captureCol, cols []string, after, upTo engine.KeyValues) (engine.Fingerprint, error) {
+func verifyRange(ctx context.Context, conn pgQuerier, t engine.TableRef, key []captureCol, cols []string, after, upTo engine.KeyValues) (engine.Fingerprint, error) {
 	if err := requireKey(t, key); err != nil {
 		return engine.Fingerprint{}, err
 	}
@@ -324,7 +334,7 @@ func verifyRange(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []c
 	return fp, nil
 }
 
-func rangeRowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []captureCol, cols []string, after, upTo engine.KeyValues, limit int) ([]engine.RowHash, error) {
+func rangeRowHashes(ctx context.Context, conn pgQuerier, t engine.TableRef, key []captureCol, cols []string, after, upTo engine.KeyValues, limit int) ([]engine.RowHash, error) {
 	if err := requireKey(t, key); err != nil {
 		return nil, err
 	}
@@ -337,7 +347,7 @@ func rangeRowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key 
 	return scanRowHashes(ctx, conn, t, q, len(key), limit)
 }
 
-func rowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []captureCol, cols []string, keys []engine.KeyValues) ([]engine.RowHash, error) {
+func rowHashes(ctx context.Context, conn pgQuerier, t engine.TableRef, key []captureCol, cols []string, keys []engine.KeyValues) ([]engine.RowHash, error) {
 	if err := requireKey(t, key); err != nil {
 		return nil, err
 	}
@@ -363,7 +373,7 @@ func rowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, key []cap
 	return out, nil
 }
 
-func scanRowHashes(ctx context.Context, conn *pgx.Conn, t engine.TableRef, q string, nKey int, args ...any) ([]engine.RowHash, error) {
+func scanRowHashes(ctx context.Context, conn pgQuerier, t engine.TableRef, q string, nKey int, args ...any) ([]engine.RowHash, error) {
 	rows, err := conn.Query(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("postgres: verify %s: row hashes: %w", t, err)

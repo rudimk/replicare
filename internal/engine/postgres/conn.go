@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/rudimk/replicare/internal/engine"
 )
@@ -186,4 +188,71 @@ func inBoundedRead(ctx context.Context, conn *pgx.Conn, fn func(q pgx.Tx) error)
 		return err
 	}
 	return fn(tx)
+}
+
+// pgQuerier is what a read needs from a connection: a *pgx.Conn or a pgx.Tx.
+type pgQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// queryLimitMargin is how long before the caller's deadline the server gives up on a
+// read in withQueryLimit: enough for the cancellation to come back over the network.
+const queryLimitMargin = 2 * time.Second
+
+// withQueryLimit runs a read so that a deadline on ctx is kept by the server, not by
+// pgx. pgx gives up on a query whose context expires by closing the connection; the
+// operator commands (status, verify) read many tables over one connection, so one slow
+// table closed it and every table after it failed with "conn closed" (production,
+// 0.8.6). Here the read runs in a transaction whose statement_timeout ends a little
+// before the deadline: a slow query is cancelled by the server and the connection stays
+// usable. Without a deadline fn runs directly. The transaction is rolled back (fn reads).
+func withQueryLimit(ctx context.Context, conn *pgx.Conn, fn func(q pgQuerier) error) error {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return fn(conn)
+	}
+	left := time.Until(deadline)
+	limit := left - max(queryLimitMargin, left/10)
+	if limit < 100*time.Millisecond {
+		// Too little time to start a query the server could finish and still answer.
+		return fmt.Errorf("postgres: not enough time left for the query (%s): %w", left.Round(time.Millisecond), context.DeadlineExceeded)
+	}
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Not on ctx: it may be about to expire, and an expired rollback closes the connection.
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		_ = tx.Rollback(rctx)
+	}()
+	if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = '%dms'", limit.Milliseconds())); err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		if isQueryCanceled(err) {
+			return fmt.Errorf("%w (it ran past the %s limit for one query; the connection is still usable)", err, left.Round(time.Second))
+		}
+		return err
+	}
+	return nil
+}
+
+// isQueryCanceled reports a statement the server cancelled (57014: statement_timeout).
+func isQueryCanceled(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "57014"
+}
+
+// limited is withQueryLimit for a read that returns a value.
+func limited[T any](ctx context.Context, conn *pgx.Conn, fn func(q pgQuerier) (T, error)) (T, error) {
+	var out T
+	err := withQueryLimit(ctx, conn, func(q pgQuerier) error {
+		var err error
+		out, err = fn(q)
+		return err
+	})
+	return out, err
 }

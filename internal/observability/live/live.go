@@ -44,6 +44,34 @@ func New(cfg *config.Config, timeout time.Duration) *Enricher {
 	return &Enricher{cfg: cfg, timeout: timeout}
 }
 
+// endpoint is the part of an engine Source or Sink that revive needs.
+type endpoint interface {
+	Connect(ctx context.Context) error
+	Close(ctx context.Context) error
+	HealthCheck(ctx context.Context) error
+}
+
+// revive checks an endpoint after one of its reads failed and, if its connection is
+// gone, opens it again, so the tables after it are still read. A single-connection
+// engine loses the connection when a read runs past its time limit (pgx closes it), and
+// every table after the slow one then failed with "conn closed" (production, 0.8.6).
+// The error is only returned when the endpoint cannot be reached again.
+func (e *Enricher) revive(ctx context.Context, ep endpoint) error {
+	hctx, cancel := context.WithTimeout(ctx, e.timeout)
+	err := ep.HealthCheck(hctx)
+	cancel()
+	if err == nil {
+		return nil
+	}
+	_ = ep.Close(context.Background())
+	cctx, cancel := context.WithTimeout(ctx, e.timeout)
+	defer cancel()
+	if err := ep.Connect(cctx); err != nil {
+		return fmt.Errorf("connection lost and could not be opened again: %w", err)
+	}
+	return nil
+}
+
 // findSync resolves a sync by name.
 func (e *Enricher) findSync(name string) *config.Sync {
 	for _, s := range e.cfg.Syncs {
@@ -174,15 +202,20 @@ func (e *Enricher) Enrich(ctx context.Context, name string, base status.Report) 
 	var notes []string
 	srcVerifier, srcCanCount := src.(engine.Verifier)
 
+	srcDown := false // the source's connection was lost and could not be opened again
 	for _, rt := range tables {
 		ts := ensure(rt.ref)
-		if srcCanCount {
+		if srcCanCount && !srcDown {
 			qctx, qcancel := context.WithTimeout(ctx, e.timeout)
 			if n, err := srcVerifier.CountRows(qctx, rt.ref); err == nil {
 				v := n
 				ts.SourceRows = &v
 			} else {
 				notes = appendNote(notes, fmt.Sprintf("source count %s: %v", rt.ref, err))
+				if rerr := e.revive(ctx, src); rerr != nil {
+					notes = appendNote(notes, fmt.Sprintf("source %q: %v", sync.Source, rerr))
+					srcDown = true
+				}
 			}
 			qcancel()
 		}
@@ -203,16 +236,23 @@ func (e *Enricher) Enrich(ctx context.Context, name string, base status.Report) 
 			continue
 		}
 		sinkVerifier, sinkCanCount := sink.(engine.Verifier)
+		sinkDown := false
 		for _, rt := range tables {
 			ts := ensure(rt.ref)
 			tt := ensureTarget(ts, tgtName)
-			if sinkCanCount {
+			if sinkCanCount && !sinkDown {
 				qctx, qcancel := context.WithTimeout(ctx, e.timeout)
 				if n, err := sinkVerifier.CountRows(qctx, rt.ref); err == nil {
 					v := n
 					tt.TargetRows = &v
+				} else if rerr := e.revive(ctx, sink); rerr != nil {
+					notes = appendNote(notes, fmt.Sprintf("target %q: %v", tgtName, rerr))
+					sinkDown = true
 				}
 				qcancel()
+			}
+			if srcDown {
+				continue
 			}
 			qctx, qcancel := context.WithTimeout(ctx, e.timeout)
 			if b, err := src.DeltaBacklog(qctx, rt.ref, engine.TargetID(tgtName)); err == nil {
@@ -224,6 +264,10 @@ func (e *Enricher) Enrich(ctx context.Context, name string, base status.Report) 
 				// but surface WHY, so an operator isn't left guessing why backlog is blank
 				// (e.g. a table not captured, or a transient source error).
 				notes = appendNote(notes, fmt.Sprintf("backlog %s -> %s: %v", rt.ref, tgtName, err))
+				if rerr := e.revive(ctx, src); rerr != nil {
+					notes = appendNote(notes, fmt.Sprintf("source %q: %v", sync.Source, rerr))
+					srcDown = true
+				}
 			}
 			qcancel()
 		}
