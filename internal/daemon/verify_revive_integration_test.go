@@ -56,8 +56,10 @@ syncs:
 	opts := live.VerifyOptions{ChunkRows: 300, Pause: -1, RecheckAfter: -1, Progress: func(table string, _ int64) {
 		once.Do(func() {
 			first = table
+			// Old-PG-safe (the harness source can predate backend_type, PG10): every other
+			// session of this role on this database is verify's.
 			mustExec(t, ctx, src, `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-				WHERE datname = current_database() AND pid <> pg_backend_pid() AND backend_type = 'client backend'`)
+				WHERE datname = current_database() AND usename = current_user AND pid <> pg_backend_pid()`)
 		})
 	}}
 	vr := live.New(cfg, 20*time.Second).VerifyWith(ctx, "s1", opts)
