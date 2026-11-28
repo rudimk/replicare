@@ -6,6 +6,13 @@ All notable changes to replicare are documented here. The format follows
 
 ## [Unreleased]
 
+- **Streaming passes no longer spend minutes on tables with nothing queued.** At the end of every
+  pass, `replicare` purged each table's change queue one table at a time, a few round trips to the
+  source each, and the pass and the backlog reading went through every table the same way. On 820
+  tables with about 50 queues in use, that was 3 to 4 minutes of each 5-minute pass spent on empty
+  queues, mostly waiting on the network. Each pass now asks the source once which tables have
+  anything queued, and skips the rest. For a table with nothing queued nothing changes: there is
+  nothing to apply or purge, and its backlog is zero. Postgres and MySQL.
 - **Fixed: the catch-up ETA read "not catching up" for about 10 minutes after a start.** The
   first reading after a start fills in each table's backlog in turn, which on hundreds of tables
   takes minutes, and the ETA took a sample after each table, so its history began with an almost

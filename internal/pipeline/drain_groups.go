@@ -40,10 +40,41 @@ func (s *Syncer) drainComponents(ctx context.Context, pool []apply.Conn) (int, e
 		return halted
 	}
 
+	// Groups whose tables have nothing queued have nothing to drain: skip them instead of
+	// reading each empty queue (engine.ChangePresence, asked once per pass; on a large
+	// schema most groups). A change queued after the check is drained next pass, exactly
+	// as one queued just after its table was read. If the check fails, every group runs.
+	var present map[engine.TableRef]bool
+	if len(pool) > 0 {
+		if cp, ok := pool[0].Src.(engine.ChangePresence); ok {
+			var tables []engine.TableRef
+			for _, comp := range s.Components {
+				tables = append(tables, comp.Order...)
+			}
+			if m, err := cp.TablesWithChanges(ctx, tables); err == nil {
+				present = m
+			}
+		}
+	}
+	nothingQueued := func(comp engine.Component) bool {
+		if present == nil {
+			return false
+		}
+		for _, t := range comp.Order {
+			if has, known := present[t]; !known || has {
+				return false
+			}
+		}
+		return true
+	}
+
 schedule:
 	for _, comp := range s.Components {
 		if ctx.Err() != nil || stopped() {
 			break
+		}
+		if nothingQueued(comp) {
+			continue
 		}
 		var conns []apply.Conn
 		select {

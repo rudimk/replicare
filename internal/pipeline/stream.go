@@ -572,13 +572,25 @@ func (s *Syncer) publishBacklogsFrom(ctx context.Context, src engine.Source) (ma
 	roundDone := s.Tel.BacklogRound(s.Name, s.Target)
 	cut := false
 	defer func() { roundDone(!cut) }()
+	// Tables with nothing queued have a zero backlog: no need to ask each one
+	// (engine.ChangePresence; most tables of a large schema, a few round trips each).
+	var present map[engine.TableRef]bool
+	if cp, ok := src.(engine.ChangePresence); ok {
+		if m, err := cp.TablesWithChanges(ctx, s.Replicable); err == nil {
+			present = m
+		}
+	}
 	for _, t := range s.Replicable {
 		if ctx.Err() != nil {
 			cut = true
 			break
 		}
 		s.Tel.SetPhase(s.Name, t, string(state.PhaseStreaming))
-		bl, err := src.DeltaBacklog(ctx, t, s.Target)
+		var bl engine.DeltaBacklog
+		var err error
+		if has, known := present[t]; !known || has {
+			bl, err = src.DeltaBacklog(ctx, t, s.Target)
+		}
 		if err != nil {
 			if firstErr == nil {
 				firstErr = err

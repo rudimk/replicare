@@ -89,7 +89,20 @@ func Enforce(ctx context.Context, d Deps, syncName string, tablesTopo []engine.T
 
 	res := EnforceResult{Purged: map[engine.TableRef]int64{}, PurgeTook: map[engine.TableRef]time.Duration{}}
 	reseedSet := map[engine.TargetID]bool{}
+	// Skip the tables with nothing queued (engine.ChangePresence): for them Purge has
+	// nothing to delete and no backlog to hold against a cap. On a large schema this is
+	// most tables, and purging each one cost a few round trips per pass (minutes on 820
+	// tables). If the check fails, every table is purged as before.
+	var present map[engine.TableRef]bool
+	if cp, ok := d.Src.(engine.ChangePresence); ok {
+		if m, err := cp.TablesWithChanges(ctx, tablesTopo); err == nil {
+			present = m
+		}
+	}
 	for _, t := range tablesTopo {
+		if has, known := present[t]; known && !has {
+			continue
+		}
 		start := time.Now()
 		tgs := targets
 		if d.TargetsFor != nil {
