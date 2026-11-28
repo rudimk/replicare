@@ -169,6 +169,8 @@ func (s *Syncer) streamOnce(ctx context.Context) error {
 			backlogs = s.publishBacklogs(ctx)
 		}
 		s.notePass(consumed, backlogs, drainErr)
+		// Groups that applied before or after the failing one still record it.
+		s.recordApplied(ctx, readApplied())
 		s.reportDrainFailure(ctx, drainErr)
 		// Distinguish a source-side failure in the up gauges: a bounded ping tells
 		// whether the source is reachable (reportDrainFailure already handles the

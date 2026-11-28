@@ -249,7 +249,7 @@ correctness mechanism** — only a lag/observability signal.
   FK-independent, so with both endpoints up (`endpointsUp`) the pass carries on and the error names
   every failed group; a down endpoint still breaks at once (every group would fail). Backlog/lag
   gauges (`publishBacklogs`) are published when `Stream` starts and after a failed pass (source
-  reachable), not only after a healthy one. `cutover` logs only a component whose phase changed.
+  reachable), not only after a healthy one, and so is each applied table's last-applied stamp. `cutover` logs only a component whose phase changed.
 
 **Foreign keys on the target — dependency-ordered apply (decision):** since we apply coalesced,
 otherwise-unordered batches, we **topologically sort by the FK graph**: **upserts apply

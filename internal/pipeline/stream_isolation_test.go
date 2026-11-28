@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/rudimk/replicare/internal/engine"
 	"github.com/rudimk/replicare/internal/observability"
 	"github.com/rudimk/replicare/internal/observability/prom"
 	"github.com/rudimk/replicare/internal/observability/telemetry"
@@ -81,6 +82,13 @@ func TestStreamOneFailingGroupDoesNotStopTheOthers(t *testing.T) {
 	}
 	if !metricPresent(t, reg, observability.MetricReplicationLagSeconds) {
 		t.Error("no lag published after a failed pass")
+	}
+	cur, err := syncer.Store.LoadCursor(ctx, syncer.Name, syncer.Target, engine.TableRef{Schema: "rc_it", Name: "b_fine"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.LastAppliedRows != 2 || cur.LastAppliedAt.IsZero() {
+		t.Errorf("b_fine's last applied = %d rows at %v, want 2 rows recorded by the failed pass", cur.LastAppliedRows, cur.LastAppliedAt)
 	}
 }
 
